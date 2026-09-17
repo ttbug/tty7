@@ -1564,16 +1564,6 @@ impl Tty7App {
                         .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
                     ),
             );
-        // The tile inside asks for `w_full`, and a percentage is only a width
-        // while some box above it has a real one. This row used to have none of
-        // its own and borrowed the column's by cross-axis stretch, which did not
-        // always hold; `w_full` here swapped that for a second percentage, and a
-        // row whose width is `Percent` is no longer `auto`, so it lost stretch
-        // as well — on the passes that size the column from its content there
-        // was still nothing to resolve against and the tile fell back to hugging
-        // the workspace name. Hand the row real pixels: the rail is
-        // `w(px(width))` and layout is border-box, so its content is one pixel
-        // narrower than that because of the right border.
         let brand = h_flex()
             .flex_shrink_0()
             .h(px(58.))
@@ -1616,11 +1606,19 @@ impl Tty7App {
                     ),
             );
 
-        let workspace_head = h_flex()
+        // The workspace scopes every task above it, but is not itself a task.
+        // Keep its switcher pinned below the independently scrolling task tree
+        // so a long list cannot push the global context control off screen.
+        // The tile inside asks for `w_full`, so this row carries the rail's
+        // definite pixel width rather than relying on percentage resolution.
+        let workspace_footer = h_flex()
             .w(px(width - 1.))
             .flex_shrink_0()
+            .h(px(46.))
+            .items_center()
             .px(px(crate::ui::app::CONTENT_INSET - 7.))
-            .pt(px(4.))
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
             .child(self.workspace_head(cx));
 
         let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
@@ -1779,14 +1777,14 @@ impl Tty7App {
                         cx,
                     ))
                     .child(brand)
-                    .child(workspace_head)
                     .child(top_bar)
                     .child(task_heading)
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         "tab-sidebar-scrollbar",
                         list,
                         &self.sidebar_scroll,
-                    )),
+                    ))
+                    .child(workspace_footer),
             )
             .child(handle)
             .child(crate::ui::app::hover_sheet(
