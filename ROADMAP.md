@@ -10,11 +10,11 @@
 - 侧边栏改动已通过 `cargo fmt --check` 和 `git diff --check`。
 - 侧边栏改动已通过 `cargo build` 完整编译验证。
 - workspace 创建与切换入口已从侧边栏顶部移到底部固定区域，任务树保持独立滚动，并继续复用现有切换面板及其新建入口。
-- 已重新生成包含底部 workspace 入口改动的 Apple Silicon 本地安装包 `dist/tty7-26.9.2-macos-arm64.dmg`。
+- Agent 会话行已将 Agent avatar、Agent 身份和会话标题拆为明确的两层布局，并在两层之间绘制 L 形连接线。
 
 ## 进行中
 
-- 已实现品牌区、任务分区、仓库分组、树形会话列表和底部 workspace 入口，等待启动应用进行视觉检查。
+- 已实现品牌区、任务分区、仓库分组、两层 Agent 会话树和底部 workspace 入口，等待启动应用进行视觉检查。
 - 已保留搜索、折叠、拖拽排序、关闭、右键菜单、Git Diff 和缩放行为。
 
 ## 待办
@@ -33,4 +33,4 @@
 - `cargo check -p tty7`：通过，存在既有编译警告。
 - `cargo build`：使用 `rustc 1.98.1` 通过，存在既有编译警告。
 - `cargo build --release --locked --target aarch64-apple-darwin`：通过，存在既有编译警告。
-- macOS DMG：CRC 校验、只读挂载、ad-hoc 签名和三个可执行文件的 arm64 架构检查均通过；SHA-256 为 `39e7a7179cb4569c6260c72561e7d9a302e59a263aa5bf643f575d9e68f41b10`。
+- macOS DMG：CRC 校验、只读挂载、`tty7.app` 与 `/Applications` 入口检查、ad-hoc 签名和三个可执行文件的 thin arm64 架构检查均通过；SHA-256 为 `5abac535d2b2776770a2068fa70664b4aee6df9e2051d18d6e7790871fb20d09`（2026-09-18 21:37 重新构建，包含最新侧边栏样式改动，27946631 bytes，同时生成 updater zip）。

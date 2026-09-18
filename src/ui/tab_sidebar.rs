@@ -705,10 +705,10 @@ impl Tty7App {
                 let agent_heading =
                     agent.map(|agent| SharedString::from(agent.display_name().to_string()));
                 let is_agent = agent_heading.is_some();
-                let show_agent_subtitle = agent_heading
-                    .as_ref()
-                    .is_some_and(|name| name.as_ref() != shown_title.as_ref())
-                    || (is_agent && cwd_shown.is_some());
+                // Agent rows always reserve a second line for the session
+                // title. Keeping the two identities separate makes the row
+                // read like the task tree in the switcher: the Agent owns the
+                // running state, while the title names the work it is doing.
                 let primary_title = agent_heading.clone().unwrap_or_else(|| shown_title.clone());
                 let agent_state = agent.map(|_| {
                     use crate::core::cli_agent::AgentStatus;
@@ -746,10 +746,22 @@ impl Tty7App {
                         // and switch away from the name being typed, taking
                         // the focus with it.
                         .on_click(|_, _, cx| cx.stop_propagation())
+                        .when(is_agent, |line| {
+                            line.child(self.tab_avatar(
+                                ("sidebar-avatar", i),
+                                agent,
+                                agent_status,
+                                agent_unread,
+                                ssh_dot,
+                                22.,
+                                cx,
+                            ))
+                        })
                         .child(Input::new(&input).appearance(false))
                         .into_any_element(),
                     None => v_flex()
                         .id(("sidebar-label", i))
+                        .relative()
                         .flex_1()
                         .min_w_0()
                         .gap(px(2.))
@@ -844,6 +856,17 @@ impl Tty7App {
                                 .w_full()
                                 .items_center()
                                 .gap_1p5()
+                                .when(is_agent, |line| {
+                                    line.child(self.tab_avatar(
+                                        ("sidebar-avatar", i),
+                                        agent,
+                                        agent_status,
+                                        agent_unread,
+                                        ssh_dot,
+                                        22.,
+                                        cx,
+                                    ))
+                                })
                                 .child(
                                     div()
                                         .flex_1()
@@ -871,8 +894,9 @@ impl Tty7App {
                                     )
                                 })
                                 // Shell rows keep their directory beside the
-                                // title. Agent rows use this line for identity
-                                // and state, then put task context below it.
+                                // title. Agent rows use this line for the
+                                // Agent identity and state, then put the
+                                // session title below it.
                                 .when_some(
                                     (!is_agent)
                                         .then(|| cwd_shown.clone().map(|(cwd, _)| cwd))
@@ -888,7 +912,7 @@ impl Tty7App {
                                     },
                                 ),
                         )
-                        .when(show_agent_subtitle, |col| {
+                        .when(is_agent, |col| {
                             col.child(
                                 h_flex()
                                     .w_full()
@@ -896,6 +920,33 @@ impl Tty7App {
                                     .gap_1p5()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .flex_shrink_0()
+                                            .w(px(row_metrics::AVATAR + row_metrics::GAP))
+                                            .h(px(16.))
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(row_metrics::AVATAR / 2. - 0.5))
+                                                    .top_0()
+                                                    .w(px(1.))
+                                                    .h(px(10.))
+                                                    .bg(cx.theme().sidebar_border),
+                                            )
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(row_metrics::AVATAR / 2.))
+                                                    .top(px(10.))
+                                                    .w(px(
+                                                        row_metrics::AVATAR / 2. + row_metrics::GAP
+                                                    ))
+                                                    .h(px(1.))
+                                                    .bg(cx.theme().sidebar_border),
+                                            ),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
@@ -1032,21 +1083,26 @@ impl Tty7App {
                                 ),
                         )
                     })
-                    .child(self.tab_avatar(
-                        ("sidebar-avatar", i),
-                        agent,
-                        agent_status,
-                        agent_unread,
-                        ssh_dot,
-                        22.,
-                        cx,
-                    ))
                     // Leading, like the chip's: the trailing end of a row is
                     // the badge's, and the close button fades in over it.
-                    .when(zoomed, |row| {
-                        row.child(self.zoom_mark(("sidebar-zoom", i), cx))
+                    .when(!is_agent, |row| {
+                        row.child(self.tab_avatar(
+                            ("sidebar-avatar", i),
+                            agent,
+                            agent_status,
+                            agent_unread,
+                            ssh_dot,
+                            22.,
+                            cx,
+                        ))
+                        .when(zoomed, |row| {
+                            row.child(self.zoom_mark(("sidebar-zoom", i), cx))
+                        })
                     })
                     .child(label_region)
+                    .when(is_agent && zoomed, |row| {
+                        row.child(self.zoom_mark(("sidebar-zoom", i), cx))
+                    })
                     .when(show_badges && badge_pos < 9, |row| {
                         row.child(
                             div()
