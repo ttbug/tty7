@@ -60,7 +60,7 @@ mod row_metrics {
     pub(super) const HEADER_PAD: f32 = 8. + 6.;
     /// The chevron and folder in a group header, and the asterisk that marks a
     /// custom group: all resolve to 12px.
-    pub(super) const HEADER_ICON: f32 = 12.;
+    pub(super) const HEADER_ICON: f32 = 13.;
 
     /// What a row can spend on text, before the badge is taken out.
     pub(super) const fn text_budget(width: f32) -> f32 {
@@ -326,7 +326,7 @@ impl Tty7App {
         // A group header draws at a fixed 11px, its name semibold and the
         // branch beside it regular. Resolved here so the header measures
         // itself in the face it is about to be painted in, the way a row does.
-        let header_size = 12.;
+        let header_size = 13.;
         let header_font = gpui::Font {
             weight: FontWeight::SEMIBOLD,
             ..font.clone()
@@ -1290,8 +1290,8 @@ impl Tty7App {
                     // and it is what makes a group a group without a box.
                     .pt(px(10.))
                     .pb_1()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(13.))
+                    .text_color(added_ink)
                     .hover(|s| s.text_color(cx.theme().foreground))
                     .on_click(cx.listener({
                         let key = group_key.clone();
