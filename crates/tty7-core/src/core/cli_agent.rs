@@ -28,10 +28,11 @@ pub enum CLIAgent {
     TraeCode,
     QoderCLI,
     Crush,
+    CommandCode,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 22] = [
+    pub const ALL: [CLIAgent; 23] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -54,6 +55,7 @@ impl CLIAgent {
         CLIAgent::Kimi,
         CLIAgent::QoderCLI,
         CLIAgent::Crush,
+        CLIAgent::CommandCode,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -99,6 +101,13 @@ impl CLIAgent {
             // Charm's terminal agent. One binary, and the name on `PATH` is
             // the one it starts as.
             CLIAgent::Crush => &["crush"],
+            // The npm package installs `command-code` everywhere plus a
+            // short `cmd` shim — `cmdc` on Windows, where plain `cmd` is
+            // the system shell. The shim is the documented way to launch it,
+            // so it stays a detection alias; on a Windows remote a bare
+            // `cmd.exe` shell will be misread as this agent, the accepted
+            // cost of the shim sharing its name with the shell.
+            CLIAgent::CommandCode => &["cmd", "cmdc", "command-code"],
         }
     }
 
@@ -126,6 +135,7 @@ impl CLIAgent {
             CLIAgent::Kimi => "kimi",
             CLIAgent::QoderCLI => "qodercli",
             CLIAgent::Crush => "crush",
+            CLIAgent::CommandCode => "command-code",
         }
     }
 
@@ -158,6 +168,7 @@ impl CLIAgent {
             CLIAgent::Kimi => "Kimi Code",
             CLIAgent::QoderCLI => "Qoder CLI",
             CLIAgent::Crush => "Crush",
+            CLIAgent::CommandCode => "Command Code",
         }
     }
 
@@ -194,6 +205,9 @@ impl CLIAgent {
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
             CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
             CLIAgent::Crush => Some(format!("crush{flags} --session {session_id}")),
+            // `command-code` is the spelling the docs guarantee on every
+            // platform: the short shim is `cmd`, which is the Windows shell.
+            CLIAgent::CommandCode => Some(format!("command-code{flags} --resume {session_id}")),
             _ => None,
         }
     }
@@ -207,6 +221,9 @@ impl CLIAgent {
             // "If false, chat history is not saved and --continue/--resume
             // will not work" — the yargs negation of `--chat-recording`.
             CLIAgent::Qwen => &["--no-chat-recording"],
+            // In-memory session: never written to disk, so nothing shows up
+            // in the resume picker and there is nothing left to reopen.
+            CLIAgent::CommandCode => &["--no-session"],
             // Print mode still emits a session id in hooks when persistence
             // is disabled, but there is no saved conversation to reopen.
             CLIAgent::QoderCLI => &["--no-session-persistence"],
@@ -229,6 +246,9 @@ impl CLIAgent {
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
             CLIAgent::QoderCLI => Some(format!(
                 "qodercli{flags} --resume {session_id} --fork-session"
+            )),
+            CLIAgent::CommandCode => Some(format!(
+                "command-code{flags} --resume {session_id} --fork-session"
             )),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
@@ -258,7 +278,8 @@ impl CLIAgent {
             | CLIAgent::Amp
             | CLIAgent::Qwen
             | CLIAgent::Goose
-            | CLIAgent::QoderCLI => Some("Fork Session"),
+            | CLIAgent::QoderCLI
+            | CLIAgent::CommandCode => Some("Fork Session"),
             _ => None,
         }
     }
@@ -442,6 +463,23 @@ impl CLIAgent {
             // `--session {id}` this command appends. `-c` is *not* in that
             // group here — Crush spells `--cwd` with it, and it must survive.
             CLIAgent::Crush => &["--session", "-s", "--continue", "-C"],
+            // `--resume`/`-r` (with its `--sessions` alias), `--session`
+            // and `-c` all select a session and clash with the
+            // `--resume {id}` this command appends; `--fork-session` is the
+            // flag the fork variant appends itself, and
+            // `--worktree`/`-w` would create or attach a managed worktree
+            // again.
+            CLIAgent::CommandCode => &[
+                "--resume",
+                "-r",
+                "--sessions",
+                "--continue",
+                "-c",
+                "--session",
+                "--fork-session",
+                "--worktree",
+                "-w",
+            ],
             _ => &[],
         };
         let mut i = 0;
@@ -509,6 +547,8 @@ impl CLIAgent {
             CLIAgent::QoderCLI => 0xFFFFFF,
             // The blue-violet field Charm ships the Crush heart on.
             CLIAgent::Crush => 0x6B50FF,
+            // The yellow the docs site accents commands and "New" badges with.
+            CLIAgent::CommandCode => 0xFAD000,
         }
     }
 
@@ -528,6 +568,8 @@ impl CLIAgent {
         match self {
             CLIAgent::TraeCode => 0x32F08C,
             CLIAgent::QoderCLI => 0x000000,
+            // A white silhouette would vanish on the brand yellow disc.
+            CLIAgent::CommandCode => 0x000000,
             _ => 0xFFFFFF,
         }
     }
@@ -555,7 +597,10 @@ impl CLIAgent {
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity => "icons/bot.svg",
+            // Command Code joins the fallback: its only brand mark is a wide
+            // wordmark, and no square glyph exists to trace into a mask.
+            | CLIAgent::Antigravity
+            | CLIAgent::CommandCode => "icons/bot.svg",
         }
     }
 
@@ -894,6 +939,35 @@ mod tests {
     }
 
     #[test]
+    fn command_code_detects_resumes_and_skips_in_memory_sessions() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["cmd"])),
+            Some(CLIAgent::CommandCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["command-code", "-p", "hi"])),
+            Some(CLIAgent::CommandCode)
+        );
+        assert_eq!(
+            CLIAgent::CommandCode
+                .resume_command("abc123", None)
+                .as_deref(),
+            Some("command-code --resume abc123")
+        );
+        assert_eq!(
+            CLIAgent::CommandCode
+                .fork_command("abc123", None)
+                .as_deref(),
+            Some("command-code --resume abc123 --fork-session")
+        );
+        // `--no-session` keeps nothing on disk, so there is nothing to resume.
+        assert_eq!(
+            CLIAgent::CommandCode.resume_command("abc123", Some(&argv(&["cmd", "--no-session"]))),
+            None
+        );
+    }
+
+    #[test]
     fn strips_leading_env_assignments() {
         assert_eq!(
             CLIAgent::detect_from_argv(&argv(&["FOO=1", "BAR=baz", "claude"])),
@@ -1009,7 +1083,14 @@ mod tests {
             .collect();
         assert_eq!(
             fallback,
-            ["aider", "auggie", "hermes", "vibe", "antigravity"]
+            [
+                "aider",
+                "auggie",
+                "hermes",
+                "vibe",
+                "antigravity",
+                "command-code"
+            ]
         );
         assert!(
             !fallback.contains(&"omp"),

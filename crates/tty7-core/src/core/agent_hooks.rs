@@ -268,10 +268,11 @@ pub enum HookAgent {
     Kimi,
     QoderCLI,
     Crush,
+    CommandCode,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 15] = [
+    pub const ALL: [HookAgent; 16] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -287,6 +288,7 @@ impl HookAgent {
         HookAgent::Kimi,
         HookAgent::QoderCLI,
         HookAgent::Crush,
+        HookAgent::CommandCode,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -311,6 +313,7 @@ impl HookAgent {
             CLIAgent::Kimi => Some(HookAgent::Kimi),
             CLIAgent::QoderCLI => Some(HookAgent::QoderCLI),
             CLIAgent::Crush => Some(HookAgent::Crush),
+            CLIAgent::CommandCode => Some(HookAgent::CommandCode),
             CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
@@ -334,6 +337,7 @@ impl HookAgent {
             HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
             HookAgent::QoderCLI => Some(QODER_HOOK_EVENTS),
             HookAgent::Crush => Some(CRUSH_HOOK_EVENTS),
+            HookAgent::CommandCode => Some(COMMANDCODE_HOOK_EVENTS),
             HookAgent::Copilot
             | HookAgent::OpenCode
             | HookAgent::Pi
@@ -379,6 +383,7 @@ impl HookAgent {
             HookAgent::Kimi => "kimi",
             HookAgent::QoderCLI => "qodercli",
             HookAgent::Crush => "crush",
+            HookAgent::CommandCode => "command-code",
         }
     }
 
@@ -399,6 +404,7 @@ impl HookAgent {
             HookAgent::Kimi => "Kimi Code",
             HookAgent::QoderCLI => "Qoder CLI",
             HookAgent::Crush => "Crush",
+            HookAgent::CommandCode => "Command Code",
         }
     }
 
@@ -433,6 +439,9 @@ impl HookAgent {
             HookAgent::Kimi => target.kimi_config_path(),
             HookAgent::QoderCLI => target.qoder_settings_path(),
             HookAgent::Crush => target.crush_settings_path(),
+            // Claude's hook shape in a fixed home path; the docs name no
+            // config-dir override for it.
+            HookAgent::CommandCode => target.under_home(&[".commandcode", "settings.json"]),
         }
     }
 
@@ -872,6 +881,22 @@ const QODER_HOOK_EVENTS: &[(&str, &str)] = &[
 /// friends, they slot in here.
 const CRUSH_HOOK_EVENTS: &[(&str, &str)] = &[("PreToolUse", "tool-complete")];
 
+/// Command Code mirrors Claude's nested `hooks` map in
+/// `~/.commandcode/settings.json`, but ships only four events:
+/// SessionStart, PreToolUse, PostToolUse and Stop. There is no
+/// UserPromptSubmit and no SessionEnd. PreToolUse is therefore the first
+/// observable boundary of a new agent turn: treating it as prompt-submit
+/// moves a pane out of Done before the tool runs. A text-only turn still has
+/// no start event, but a tool-using turn no longer spends its whole run
+/// labelled complete. PostToolUse keeps the activity counter moving until
+/// Stop closes the turn.
+const COMMANDCODE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("PreToolUse", "prompt-submit"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+];
+
 fn hook_map_state(
     target: &HookTarget,
     path: &Path,
@@ -1235,7 +1260,8 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Qwen
         | HookAgent::QoderCLI
         | HookAgent::Crush
-        | HookAgent::Kimi => None,
+        | HookAgent::Kimi
+        | HookAgent::CommandCode => None,
     }
 }
 
@@ -1692,6 +1718,7 @@ mod tests {
             .chain(GOOSE_HOOK_EVENTS)
             .chain(KIMI_HOOK_EVENTS)
             .chain(CRUSH_HOOK_EVENTS)
+            .chain(COMMANDCODE_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1712,6 +1739,19 @@ mod tests {
     }
 
     #[test]
+    fn command_code_uses_pre_tool_as_its_turn_start() {
+        assert_eq!(
+            COMMANDCODE_HOOK_EVENTS,
+            [
+                ("SessionStart", "session-start"),
+                ("PreToolUse", "prompt-submit"),
+                ("PostToolUse", "tool-complete"),
+                ("Stop", "stop"),
+            ]
+        );
+    }
+
+    #[test]
     fn the_new_hook_agents_target_the_paths_their_clis_read() {
         let host = FakeRemote::shared();
         let t = HookTarget::remote(&*host, PathBuf::from("/home/me"));
@@ -1728,6 +1768,10 @@ mod tests {
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
+            (
+                HookAgent::CommandCode,
+                "/home/me/.commandcode/settings.json",
+            ),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -1750,6 +1794,7 @@ mod tests {
             HookAgent::Kimi,
             HookAgent::QoderCLI,
             HookAgent::Crush,
+            HookAgent::CommandCode,
         ] {
             assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
             install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));

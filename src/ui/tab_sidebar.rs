@@ -522,7 +522,18 @@ impl Tty7App {
                                 abbreviate_home(strip_host_prefix(title.trim()), home.as_deref())
                                     .into_owned()
                             }
-                            TabLabel::Agent(agent) => agent.display_name().to_string(),
+                            // Agent rows render the agent identity on their
+                            // first line. When the agent has not supplied a
+                            // terminal/session title yet, TabView uses
+                            // TabLabel::Agent as its fallback; using that as
+                            // the second line would render the same name
+                            // twice. Keep the session line meaningful by
+                            // falling back to the pane's working directory.
+                            TabLabel::Agent(_) => view
+                                .cwd
+                                .as_deref()
+                                .map(|cwd| abbreviate_home(cwd, home.as_deref()).into_owned())
+                                .unwrap_or_default(),
                             // A tab holding a name got one above.
                             TabLabel::Named(name) => name.to_string(),
                             TabLabel::Process(title) => title.to_string(),
