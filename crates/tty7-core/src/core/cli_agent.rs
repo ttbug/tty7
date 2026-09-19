@@ -593,14 +593,13 @@ impl CLIAgent {
             CLIAgent::Kimi => "icons/agents/kimi.svg",
             CLIAgent::QoderCLI => "icons/agents/qodercli.svg",
             CLIAgent::Crush => "icons/agents/crush.svg",
+            // Command Code's mark: a rounded-square frame around the ⌘ glyph.
+            CLIAgent::CommandCode => "icons/agents/command-code.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            // Command Code joins the fallback: its only brand mark is a wide
-            // wordmark, and no square glyph exists to trace into a mask.
-            | CLIAgent::Antigravity
-            | CLIAgent::CommandCode => "icons/bot.svg",
+            | CLIAgent::Antigravity => "icons/bot.svg",
         }
     }
 
@@ -1083,14 +1082,7 @@ mod tests {
             .collect();
         assert_eq!(
             fallback,
-            [
-                "aider",
-                "auggie",
-                "hermes",
-                "vibe",
-                "antigravity",
-                "command-code"
-            ]
+            ["aider", "auggie", "hermes", "vibe", "antigravity",]
         );
         assert!(
             !fallback.contains(&"omp"),

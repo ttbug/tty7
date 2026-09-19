@@ -64,6 +64,9 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/kimi.svg" => include_bytes!("../../assets/icons/agents/kimi.svg"),
         "icons/agents/qodercli.svg" => include_bytes!("../../assets/icons/agents/qodercli.svg"),
         "icons/agents/crush.svg" => include_bytes!("../../assets/icons/agents/crush.svg"),
+        "icons/agents/command-code.svg" => {
+            include_bytes!("../../assets/icons/agents/command-code.svg")
+        }
         _ => return None,
     };
     Some(bytes)

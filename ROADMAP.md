@@ -19,6 +19,7 @@
 - 已修复 Command Code 侧边栏双层会话行：无终端会话标题时，TabLabel::Agent 不再被当成第二行标题重复渲染；Agent 名称保留在第一行，第二行回退到工作目录，避免 Agent 名称与会话标题混在一起。
 - 已修复 Command Code 状态在首轮结束后始终停留“已完成”：其无 UserPromptSubmit hook，改用 PreToolUse 映射 prompt-submit，在每轮首次执行工具前切回“进行中”，PostToolUse 记录活动，Stop 结束回合。
 - 已确认 Command Code 英文会话名称来自其自身 `.meta.json` 自动标题，tty7 原样显示以保持与 `/resume` 和 `/rename` 一致；中文标题可在 Command Code 内执行 `/rename 中文标题`。
+- Command Code 侧边栏图标已从 bot.svg 兜底改为专属图标 command-code.svg：200×200 源图归一化为 24×24 透明背景描边图形（去掉纯黑背景矩形，避免 mask 渲染整面填充），在 `Assets::agent_icon` 注册嵌入，`icon_path()` 离开 fallback 组，fallback 断言列表同步移除 command-code；像素级效果仍待启动桌面窗口确认。
 
 ## 进行中
 
@@ -52,3 +53,8 @@
 - macOS DMG：CRC 校验、只读挂载、`tty7.app` 与 `/Applications` 入口检查、ad-hoc 签名和三个可执行文件的 thin arm64 架构检查均通过；SHA-256 为 `1e1bb457652260c156d9147a0e3cb0926748326b42ef5248dcfe36a7c4c01fc0`（2026-09-18 23:25 重新构建，包含 Command Code agent 集成与图标对比度修正，27947091 bytes，同时生成 updater zip，其 SHA-256 为 `dc971b9821c11003650512b3f965a7f4375007674eef89449ae91784f62c88f5`）。
 - macOS DMG：侧边栏 Agent/会话行修复后重新构建并通过 CRC、只读挂载、`tty7.app` 与 `/Applications` 入口、ad-hoc 签名和三个可执行文件 thin arm64 架构检查；SHA-256 为 `cbb8143fb8f280fc7fcc4967dcfd063001fd2b3cb358615b010bb4b6ac94dffe`（2026-09-18 23:53，27947091 bytes）；updater zip SHA-256 为 `089d5e91af272a87e32e00554458d7605eb20a8343c282f32ef6d4491879fe56`。
 - macOS DMG：Command Code PreToolUse 状态修复后重新构建并通过 CRC、只读挂载、`tty7.app` 与 `/Applications` 入口、ad-hoc 签名和三个可执行文件 thin arm64 架构检查；SHA-256 为 `f1c18607d55cebe0d9279b3004ff22fa9131e6d43ec7d750d20dc7efd47f7f21`（2026-09-19，27946891 bytes）；updater zip SHA-256 为 `483698b5df8a76bbe6a316fb35b971b643f9b30ef6ed2b5f44cf1b66f6d2da48`。
+- macOS DMG：Command Code 专属图标落地后重新构建（`cargo build --release --locked --target aarch64-apple-darwin` + `--features updater --bin tty7-updater` + `bundle-macos.sh`）并通过 CRC 校验、只读挂载、`tty7.app` 与 `/Applications` 入口、ad-hoc 签名、三个可执行文件 thin arm64 架构检查，另确认 `icons/agents/command-code.svg` 已编入包内二进制；SHA-256 为 `ead260a9cad50a98a02a1cc411f22b6921fa706352798fae883e9535f071bbdf`（2026-09-19 09:19，27946665 bytes）；updater zip SHA-256 为 `38036955f2efc5e4e4ce213a002531b6e957b7c483006277a7af40d9c704b2ef`（23858675 bytes）。挂载点已卸载、临时目录已清理。
+- `cargo fmt --check`：通过。
+- `cargo test -p tty7-core --lib cli_agent`：34 个测试通过（含 Command Code 专属图标后的 fallback 断言）。
+- `cargo test -p tty7 every_agent_icon_resolves`：通过（含 command-code.svg 注册校验）。
+- `cargo check -p tty7`：通过，存在既有编译警告。
