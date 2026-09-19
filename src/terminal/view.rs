@@ -416,6 +416,7 @@ pub struct TerminalView {
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    last_agent_turns: u64,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
     agent_was_rich: bool,
@@ -1616,6 +1617,7 @@ impl TerminalView {
             running_title: String::new(),
             running_agent: None,
             last_agent_status: None,
+            last_agent_turns: 0,
             last_agent_session: (None, None),
             agent_turn_started: None,
             agent_was_rich: false,
@@ -4008,8 +4010,11 @@ impl TerminalView {
             // From here on this app is watching the pane, so a later rebuild
             // must find a mark rather than adopt its own replay.
             self.record_agent_read_mark(turns, cx);
+            self.last_agent_turns = turns;
         }
-        if status == self.last_agent_status {
+        let turns_changed = turns != self.last_agent_turns;
+        self.last_agent_turns = turns;
+        if status == self.last_agent_status && !turns_changed {
             return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
@@ -4040,10 +4045,11 @@ impl TerminalView {
             return false;
         }
 
-        let turn_finished = status == Some(AgentStatus::Done) && prev != Some(AgentStatus::Done);
+        let turn_finished =
+            status == Some(AgentStatus::Done) && (prev != Some(AgentStatus::Done) || turns_changed);
 
         match status {
-            Some(AgentStatus::Done) if prev != Some(AgentStatus::Done) => {
+            Some(AgentStatus::Done) if turn_finished => {
                 // Whether the reader saw the result is a question about the
                 // window's live focus, not about the last focus callback this
                 // pane happened to receive. A pane focused while it was being
@@ -4078,14 +4084,7 @@ impl TerminalView {
                     .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
                 self.notify_pane(Some(agent_name), &body, cx);
             }
-            Some(AgentStatus::Done)
-                if rich
-                    && notify_allowed
-                    && matches!(
-                        prev,
-                        Some(AgentStatus::Working) | Some(AgentStatus::Waiting)
-                    ) =>
-            {
+            Some(AgentStatus::Done) if rich && notify_allowed && turn_finished => {
                 let body = match self.agent_turn_started.take() {
                     Some(start) => {
                         let secs = start.elapsed().as_secs().to_string();
@@ -10276,6 +10275,33 @@ mod gpui_tests {
         assert!(
             poll_unread(window, &after, cx),
             "the second turn finished unseen"
+        );
+    }
+
+    #[gpui::test]
+    fn a_later_done_turn_in_the_same_pane_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut daemon) = harness(cx);
+        let pane = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_turn(AgentStatus::Done, 1, &pane, cx, &mut daemon);
+        assert!(!poll_unread(window, &pane, cx), "the reader saw turn one");
+
+        let (_elsewhere, _elsewhere_daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(2, window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 2, &pane, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &pane, cx),
+            "a newer turn must badge even though the status stayed Done"
         );
     }
 

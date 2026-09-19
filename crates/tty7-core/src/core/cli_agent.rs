@@ -101,13 +101,10 @@ impl CLIAgent {
             // Charm's terminal agent. One binary, and the name on `PATH` is
             // the one it starts as.
             CLIAgent::Crush => &["crush"],
-            // The npm package installs `command-code` everywhere plus a
-            // short `cmd` shim — `cmdc` on Windows, where plain `cmd` is
-            // the system shell. The shim is the documented way to launch it,
-            // so it stays a detection alias; on a Windows remote a bare
-            // `cmd.exe` shell will be misread as this agent, the accepted
-            // cost of the shim sharing its name with the shell.
-            CLIAgent::CommandCode => &["cmd", "cmdc", "command-code"],
+            // Keep the unambiguous package bins. `cmd` is intentionally
+            // excluded: stripping executable suffixes would make a Windows
+            // `cmd.exe` shell indistinguishable from Command Code.
+            CLIAgent::CommandCode => &["cmdc", "command-code", "commandcode"],
         }
     }
 
@@ -817,7 +814,11 @@ impl AgentSessionState {
                 }
             }
             AgentEventKind::Stop => {
-                if self.status != AgentStatus::Done {
+                // Command Code has no prompt-submit hook. A text-only turn can
+                // therefore arrive as Done -> Stop, so each of its Stop hooks
+                // is the only observable edge for a completed turn. Other
+                // agents retain the status-based duplicate suppression.
+                if self.status != AgentStatus::Done || ev.agent == Some(CLIAgent::CommandCode) {
                     self.turns = self.turns.wrapping_add(1);
                 }
                 self.status = AgentStatus::Done;
@@ -940,13 +941,19 @@ mod tests {
     #[test]
     fn command_code_detects_resumes_and_skips_in_memory_sessions() {
         assert_eq!(
-            CLIAgent::detect_from_argv(&argv(&["cmd"])),
+            CLIAgent::detect_from_argv(&argv(&["cmdc"])),
             Some(CLIAgent::CommandCode)
         );
         assert_eq!(
             CLIAgent::detect_from_argv(&argv(&["command-code", "-p", "hi"])),
             Some(CLIAgent::CommandCode)
         );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["commandcode"])),
+            Some(CLIAgent::CommandCode)
+        );
+        assert_eq!(CLIAgent::detect_from_argv(&argv(&["cmd"])), None);
+        assert_eq!(CLIAgent::detect_from_argv(&argv(&["cmd.exe"])), None);
         assert_eq!(
             CLIAgent::CommandCode
                 .resume_command("abc123", None)
@@ -960,8 +967,9 @@ mod tests {
             Some("command-code --resume abc123 --fork-session")
         );
         // `--no-session` keeps nothing on disk, so there is nothing to resume.
+        let ephemeral = argv(&["command-code", "--no-session"]);
         assert_eq!(
-            CLIAgent::CommandCode.resume_command("abc123", Some(&argv(&["cmd", "--no-session"]))),
+            CLIAgent::CommandCode.resume_command("abc123", Some(&ephemeral)),
             None
         );
     }
@@ -1383,6 +1391,27 @@ mod tests {
 
         s.apply_event(&ev(AgentEventKind::SessionEnd));
         assert_eq!(s.turns, 2);
+    }
+
+    #[test]
+    fn command_code_counts_text_only_turns_from_stop_hooks() {
+        let stop = AgentEvent {
+            agent: Some(CLIAgent::CommandCode),
+            kind: AgentEventKind::Stop,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.apply_event(&stop);
+        assert_eq!(s.turns, 1);
+        assert_eq!(s.status, AgentStatus::Done);
+
+        s.apply_event(&stop);
+        assert_eq!(s.turns, 2, "a later text-only turn has no start hook");
+        assert_eq!(s.status, AgentStatus::Done);
     }
 
     #[test]
