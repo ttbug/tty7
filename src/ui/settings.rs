@@ -682,6 +682,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchCrushKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentCommandCode,
+            keywords: SettingsSearchCommandCodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentMiniMaxCode,
+            keywords: SettingsSearchMiniMaxCodeKeywords,
+        },
+        SearchEntry {
             section: WindowTabs,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,

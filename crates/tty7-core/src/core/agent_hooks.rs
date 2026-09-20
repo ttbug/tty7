@@ -13,10 +13,17 @@ const MAX_STDIN: u64 = 64 * 1024;
 
 pub fn run_agent_hook(agent: &str, event: &str) {
     detach_console();
-    if std::env::var_os(TTY7_ENV_MARKER).is_none() {
+    let agent = effective_agent(agent, std::env::var_os(GROK_HOOK_ENV).is_some());
+    let has_tty7_marker = std::env::var_os(TTY7_ENV_MARKER).is_some();
+    // MiniMax's official runner filters custom environment variables. The
+    // process ancestry is the fallback proof that its command belongs to a
+    // tty7 pane rather than an unrelated terminal.
+    let tty7_process_owner = agent == HookAgent::MiniMaxCode.slug()
+        && !has_tty7_marker
+        && tty7_process_owns_hook_terminal();
+    if !hook_runner_enabled(agent, has_tty7_marker, tty7_process_owner) {
         return;
     }
-    let agent = effective_agent(agent, std::env::var_os(GROK_HOOK_ENV).is_some());
     let mut input = String::new();
     if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(MAX_STDIN).read_to_string(&mut input);
@@ -40,6 +47,61 @@ fn detach_console() {}
 
 fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
     if ran_by_grok { "grok" } else { agent }
+}
+
+fn hook_runner_enabled(agent: &str, has_tty7_marker: bool, tty7_process_owner: bool) -> bool {
+    has_tty7_marker || (agent == HookAgent::MiniMaxCode.slug() && tty7_process_owner)
+}
+
+#[cfg(unix)]
+fn tty7_process_owns_hook_terminal() -> bool {
+    use std::process::Command;
+
+    let mut pid = unsafe { libc::getppid() };
+    for _ in 0..16 {
+        if pid <= 1 {
+            break;
+        }
+        let Ok(output) = Command::new("ps")
+            .args(["-o", "ppid=", "-o", "comm=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        let line = String::from_utf8_lossy(&output.stdout);
+        let Some((parent, name)) = parse_hook_ancestor(&line) else {
+            return false;
+        };
+        if is_tty7_host_exe(name) {
+            return true;
+        }
+        if parent <= 1 || parent == pid {
+            break;
+        }
+        pid = parent;
+    }
+    false
+}
+
+#[cfg(any(unix, test))]
+fn parse_hook_ancestor(line: &str) -> Option<(i32, &str)> {
+    let (parent, name) = line.trim().split_once(char::is_whitespace)?;
+    let name = name.trim_start();
+    if name.is_empty() {
+        return None;
+    }
+    Some((parent.parse().ok()?, name))
+}
+
+#[cfg(not(unix))]
+fn tty7_process_owns_hook_terminal() -> bool {
+    let procs = crate::daemon::winproc::snapshot();
+    ancestor_pids(&procs).into_iter().any(|pid| {
+        procs
+            .iter()
+            .find(|process| process.pid == pid)
+            .is_some_and(|process| is_tty7_host_exe(&process.name))
+    })
 }
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
@@ -198,9 +260,15 @@ fn write_to_controlling_tty(bytes: &[u8]) -> bool {
     any
 }
 
-#[cfg(any(not(unix), test))]
 fn is_tty7_host_exe(name: &str) -> bool {
-    matches!(name, "tty7-app.exe" | "tty7-server.exe" | "tty7.exe")
+    let name = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(name, "tty7" | "tty7-app" | "tty7-server")
+        || crate::daemon::install::asset::dialect_from_path(name).is_some()
 }
 
 #[cfg(not(unix))]
@@ -269,10 +337,11 @@ pub enum HookAgent {
     QoderCLI,
     Crush,
     CommandCode,
+    MiniMaxCode,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 16] = [
+    pub const ALL: [HookAgent; 17] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -289,6 +358,7 @@ impl HookAgent {
         HookAgent::QoderCLI,
         HookAgent::Crush,
         HookAgent::CommandCode,
+        HookAgent::MiniMaxCode,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -314,6 +384,7 @@ impl HookAgent {
             CLIAgent::QoderCLI => Some(HookAgent::QoderCLI),
             CLIAgent::Crush => Some(HookAgent::Crush),
             CLIAgent::CommandCode => Some(HookAgent::CommandCode),
+            CLIAgent::MiniMaxCode => Some(HookAgent::MiniMaxCode),
             CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
@@ -326,7 +397,7 @@ impl HookAgent {
 
     /// The events this agent's hooks merge into a shared JSON config, if that
     /// is how it takes them. `None` means the agent owns a generated file
-    /// instead — see [`owned_file_content`].
+    /// or a native Plugin package instead.
     fn hook_map_events(self) -> Option<&'static [(&'static str, &'static str)]> {
         match self {
             HookAgent::Claude => Some(CLAUDE_HOOK_EVENTS),
@@ -344,7 +415,8 @@ impl HookAgent {
             | HookAgent::Grok
             | HookAgent::OhMyPi
             | HookAgent::Goose
-            | HookAgent::Kimi => None,
+            | HookAgent::Kimi
+            | HookAgent::MiniMaxCode => None,
         }
     }
 
@@ -384,6 +456,7 @@ impl HookAgent {
             HookAgent::QoderCLI => "qodercli",
             HookAgent::Crush => "crush",
             HookAgent::CommandCode => "command-code",
+            HookAgent::MiniMaxCode => "minimax-code",
         }
     }
 
@@ -405,11 +478,17 @@ impl HookAgent {
             HookAgent::QoderCLI => "Qoder CLI",
             HookAgent::Crush => "Crush",
             HookAgent::CommandCode => "Command Code",
+            HookAgent::MiniMaxCode => "MiniMax Code",
         }
     }
 
     pub fn target_display(self, target: &HookTarget) -> String {
-        target.abbreviate_home(&self.target_path(target))
+        let path = if self == HookAgent::MiniMaxCode {
+            target.minimax_plugin_root()
+        } else {
+            self.target_path(target)
+        };
+        target.abbreviate_home(&path)
     }
 
     fn target_path(self, target: &HookTarget) -> PathBuf {
@@ -442,6 +521,7 @@ impl HookAgent {
             // Claude's hook shape in a fixed home path; the docs name no
             // config-dir override for it.
             HookAgent::CommandCode => target.under_home(&[".commandcode", "settings.json"]),
+            HookAgent::MiniMaxCode => target.minimax_plugin_manifest_path(),
         }
     }
 
@@ -451,6 +531,17 @@ impl HookAgent {
 }
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+const MINIMAX_PLUGIN_NAME: &str = "tty7-agent-hooks";
+const MINIMAX_PLUGIN_VERSION: &str = "1.0.0";
+const MINIMAX_PLUGIN_AUTHOR: &str = "tty7";
+const MINIMAX_PLUGIN_DESCRIPTION: &str =
+    "tty7 lifecycle status hooks for MiniMax Code. Generated by tty7.";
+const MINIMAX_PLUGIN_ICON: &[u8] = include_bytes!("../../../../assets/logo@256.png");
+const MINIMAX_PLUGIN_MANIFEST_TEMP: &str = ".plugin.json.tty7.tmp";
+const MINIMAX_PLUGIN_HOOKS_MARKER: &str = "tty7-agent-hooks-v1";
+const MINIMAX_PLUGIN_HOOKS_TEMP: &str = ".tty7-hooks.json.tmp";
+const MINIMAX_PLUGIN_ICON_TEMP: &str = ".tty7-icon.png.tmp";
 
 pub struct HookTarget<'a> {
     host: &'a dyn Host,
@@ -505,6 +596,70 @@ impl<'a> HookTarget<'a> {
 
     fn under_home(&self, parts: &[&str]) -> PathBuf {
         self.under(&self.home, parts)
+    }
+
+    fn minimax_data_dir(&self) -> PathBuf {
+        let primary = std::env::var_os("MINIMAX_DATA_DIR");
+        let legacy = std::env::var_os("MAVIS_DATA_DIR");
+        minimax_data_dir_for(
+            &self.home,
+            self.is_local(),
+            primary.as_deref(),
+            legacy.as_deref(),
+        )
+    }
+
+    fn minimax_plugin_root(&self) -> PathBuf {
+        self.under(&self.minimax_data_dir(), &["plugins", MINIMAX_PLUGIN_NAME])
+    }
+
+    fn minimax_plugin_manifest_path(&self) -> PathBuf {
+        self.under(
+            &self.minimax_plugin_root(),
+            &[".minimax-plugin", "plugin.json"],
+        )
+    }
+
+    fn minimax_plugin_hooks_path(&self) -> PathBuf {
+        self.under(&self.minimax_plugin_root(), &["hooks", "tty7.json"])
+    }
+
+    fn minimax_plugin_icon_path(&self) -> PathBuf {
+        self.under(&self.minimax_plugin_root(), &["icon.png"])
+    }
+
+    fn minimax_plugin_manifest_temp_path(&self) -> PathBuf {
+        self.under(
+            &self.minimax_plugin_root(),
+            &[".minimax-plugin", MINIMAX_PLUGIN_MANIFEST_TEMP],
+        )
+    }
+
+    fn minimax_plugin_hooks_temp_path(&self) -> PathBuf {
+        self.under(&self.minimax_plugin_root(), &[MINIMAX_PLUGIN_HOOKS_TEMP])
+    }
+
+    fn minimax_plugin_icon_temp_path(&self) -> PathBuf {
+        self.under(&self.minimax_plugin_root(), &[MINIMAX_PLUGIN_ICON_TEMP])
+    }
+
+    fn minimax_plugin_guard_paths(&self) -> [PathBuf; 11] {
+        let data_dir = self.minimax_data_dir();
+        let plugins = self.under(&data_dir, &["plugins"]);
+        let root = self.minimax_plugin_root();
+        [
+            data_dir,
+            plugins,
+            root.clone(),
+            self.under(&root, &[".minimax-plugin"]),
+            self.under(&root, &["hooks"]),
+            self.minimax_plugin_manifest_path(),
+            self.minimax_plugin_manifest_temp_path(),
+            self.minimax_plugin_hooks_path(),
+            self.minimax_plugin_icon_path(),
+            self.minimax_plugin_hooks_temp_path(),
+            self.minimax_plugin_icon_temp_path(),
+        ]
     }
 
     fn claude_settings_path(&self) -> PathBuf {
@@ -637,6 +792,9 @@ pub enum HooksState {
 }
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
+    if agent == HookAgent::MiniMaxCode {
+        return minimax_plugin_state(target);
+    }
     let path = agent.target_path(target);
     if let Some(events) = agent.toml_hook_events() {
         return toml_hooks_state(target, &path, agent, events);
@@ -673,6 +831,10 @@ pub enum HookOutcome {
 }
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
+    if agent == HookAgent::MiniMaxCode {
+        minimax_plugin_install(target)?;
+        return Ok(HookOutcome::Installed);
+    }
     let path = agent.target_path(target);
     if let Some(events) = agent.toml_hook_events() {
         toml_hooks_install(target, &path, agent, events)?;
@@ -698,6 +860,9 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<Ho
 }
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
+    if agent == HookAgent::MiniMaxCode {
+        return minimax_plugin_uninstall(target);
+    }
     let path = agent.target_path(target);
     if agent.toml_hook_events().is_some() {
         return toml_hooks_uninstall(target, &path, agent);
@@ -759,6 +924,25 @@ fn home_dir() -> Option<PathBuf> {
     {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
     }
+}
+
+fn minimax_data_dir_for(
+    home: &Path,
+    local: bool,
+    primary: Option<&std::ffi::OsStr>,
+    legacy: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if local {
+        if let Some(dir) = primary.filter(|dir| !dir.is_empty()) {
+            return PathBuf::from(dir);
+        }
+        if let Some(dir) = legacy.filter(|dir| !dir.is_empty()) {
+            return PathBuf::from(dir);
+        }
+    }
+    let mut path = home.to_path_buf();
+    path.push(".minimax");
+    path
 }
 
 const OWNED_FILE_STEM_JSON: &str = "tty7.json";
@@ -896,6 +1080,457 @@ const COMMANDCODE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("PostToolUse", "tool-complete"),
     ("Stop", "stop"),
 ];
+
+/// MiniMax Code loads these entries from a native multi-file Plugin package.
+/// Its public hook contract has explicit turn, permission and session events,
+/// so there is no need to infer permissions from a generic notification.
+const MINIMAX_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+fn minimax_plugin_state(target: &HookTarget) -> HooksState {
+    if minimax_reject_plugin_symlinks(target).is_err() {
+        return HooksState::NotInstalled;
+    }
+    let manifest_path = target.minimax_plugin_manifest_path();
+    let Ok(manifest) = minimax_read_text(target, &manifest_path) else {
+        return HooksState::NotInstalled;
+    };
+    if !minimax_manifest_is_ours(&manifest) {
+        return HooksState::NotInstalled;
+    }
+
+    let Ok(expected_manifest) = minimax_plugin_manifest() else {
+        return HooksState::Outdated;
+    };
+    let Ok(expected_hooks) = minimax_plugin_hooks(target) else {
+        return HooksState::Outdated;
+    };
+    let hooks = minimax_read_text(target, &target.minimax_plugin_hooks_path()).ok();
+    let icon = minimax_read_bytes(target, &target.minimax_plugin_icon_path()).ok();
+    if manifest == expected_manifest
+        && hooks.as_deref() == Some(expected_hooks.as_str())
+        && icon.as_deref() == Some(MINIMAX_PLUGIN_ICON)
+    {
+        HooksState::Installed
+    } else {
+        HooksState::Outdated
+    }
+}
+
+fn minimax_plugin_install(target: &HookTarget) -> anyhow::Result<()> {
+    minimax_reject_plugin_symlinks(target)?;
+    let root = target.minimax_plugin_root();
+    let manifest_path = target.minimax_plugin_manifest_path();
+    let hooks_path = target.minimax_plugin_hooks_path();
+    let icon_path = target.minimax_plugin_icon_path();
+    let manifest_temp_path = target.minimax_plugin_manifest_temp_path();
+    let hooks_temp_path = target.minimax_plugin_hooks_temp_path();
+    let icon_temp_path = target.minimax_plugin_icon_temp_path();
+    let manifest = minimax_plugin_manifest()?;
+    let hooks = minimax_plugin_hooks(target)?;
+
+    let root_exists = match target.host.stat(&root) {
+        Ok(meta) => {
+            if !meta.is_dir {
+                return Err(anyhow::anyhow!(
+                    "{} exists but is not a directory; not touching it",
+                    root.display()
+                ));
+            }
+            true
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
+    };
+
+    let manifest_owned = match minimax_read_text(target, &manifest_path) {
+        Ok(manifest) if !minimax_manifest_is_ours(&manifest) => {
+            return Err(anyhow::anyhow!(
+                "{} exists but wasn't written by tty7; not touching it",
+                manifest_path.display()
+            ));
+        }
+        Ok(_) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && root_exists => {
+            if !minimax_partial_package_is_ours(target, &hooks, &manifest)? {
+                return Err(anyhow::anyhow!(
+                    "{} exists without a tty7 manifest; not touching it",
+                    root.display()
+                ));
+            }
+            false
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", manifest_path.display())),
+    };
+
+    match minimax_read_text(target, &hooks_path) {
+        Ok(hooks) if !minimax_hooks_contain_ownership_marker(&hooks) => {
+            return Err(anyhow::anyhow!(
+                "{} exists but wasn't written by tty7; not touching it",
+                hooks_path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", hooks_path.display())),
+    }
+
+    let result = (|| {
+        // Keep every package file behind a completed temporary write. This is
+        // particularly important for remote hosts, where Host::write_file is
+        // a direct server-side write and can otherwise leave a truncated
+        // hooks or icon file that blocks the next install.
+        minimax_publish_file(target, &hooks_path, &hooks_temp_path, hooks.as_bytes())?;
+        minimax_publish_file(target, &icon_path, &icon_temp_path, MINIMAX_PLUGIN_ICON)?;
+        minimax_publish_file(
+            target,
+            &manifest_path,
+            &manifest_temp_path,
+            manifest.as_bytes(),
+        )?;
+        Ok(())
+    })();
+    if result.is_err() {
+        for path in [&hooks_temp_path, &icon_temp_path, &manifest_temp_path] {
+            let _ = target.host.remove(path, false);
+        }
+        if !manifest_owned {
+            minimax_cleanup_partial_package(target, &hooks);
+        }
+    }
+    result
+}
+
+fn minimax_plugin_uninstall(target: &HookTarget) -> anyhow::Result<HookOutcome> {
+    minimax_reject_plugin_symlinks(target)?;
+    let root = target.minimax_plugin_root();
+    let manifest_path = target.minimax_plugin_manifest_path();
+    let hooks_path = target.minimax_plugin_hooks_path();
+    let icon_path = target.minimax_plugin_icon_path();
+    let hooks_temp_path = target.minimax_plugin_hooks_temp_path();
+    let icon_temp_path = target.minimax_plugin_icon_temp_path();
+    let manifest_temp_path = target.minimax_plugin_manifest_temp_path();
+
+    match target.host.stat(&root) {
+        Ok(meta) if !meta.is_dir => {
+            return Err(anyhow::anyhow!(
+                "{} is not a directory; not touching it",
+                root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(HookOutcome::NothingInstalled);
+        }
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
+    }
+
+    let manifest = match minimax_read_text(target, &manifest_path) {
+        Ok(manifest) => manifest,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(HookOutcome::NothingInstalled);
+        }
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", manifest_path.display())),
+    };
+    if !minimax_manifest_is_ours(&manifest) {
+        return Err(anyhow::anyhow!(
+            "{} wasn't written by tty7; not touching it",
+            manifest_path.display()
+        ));
+    }
+
+    let hooks = match minimax_read_text(target, &hooks_path) {
+        Ok(hooks) => Some(hooks),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", hooks_path.display())),
+    };
+    if hooks
+        .as_deref()
+        .is_some_and(|text| !minimax_hooks_contain_ownership_marker(text))
+    {
+        return Err(anyhow::anyhow!(
+            "{} wasn't written by tty7; not touching it",
+            hooks_path.display()
+        ));
+    }
+
+    let remove_icon = minimax_read_bytes(target, &icon_path)
+        .ok()
+        .is_some_and(|bytes| bytes == MINIMAX_PLUGIN_ICON);
+
+    if hooks.is_some() {
+        target.host.remove(&hooks_path, false)?;
+    }
+    target.host.remove(&manifest_path, false)?;
+    for path in [&hooks_temp_path, &icon_temp_path, &manifest_temp_path] {
+        let _ = target.host.remove(path, false);
+    }
+    if remove_icon {
+        target.host.remove(&icon_path, false)?;
+    }
+
+    for dir in [
+        target.under(&root, &["hooks"]),
+        target.under(&root, &[".minimax-plugin"]),
+        root,
+    ] {
+        let _ = target.host.remove(&dir, false);
+    }
+    Ok(HookOutcome::Removed)
+}
+
+fn minimax_publish_file(
+    target: &HookTarget,
+    final_path: &Path,
+    temp_path: &Path,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    if let Some(parent) = final_path.parent() {
+        target.host.create_dir(parent, true)?;
+    }
+    // This path is already tty7's managed staging file. Calling
+    // HookTarget::write here would wrap it in config::write_atomic on local
+    // hosts and create a second, untracked temporary file.
+    target.host.write_file(temp_path, bytes)?;
+    match target.host.stat(final_path) {
+        Ok(_) => target.host.remove(final_path, false)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", final_path.display())),
+    }
+    target.host.rename(temp_path, final_path)?;
+    Ok(())
+}
+
+fn minimax_reject_plugin_symlinks(target: &HookTarget) -> anyhow::Result<()> {
+    for path in target.minimax_plugin_guard_paths() {
+        minimax_reject_symlink(target, &path)?;
+    }
+    Ok(())
+}
+
+fn minimax_partial_package_is_ours(
+    target: &HookTarget,
+    expected_hooks: &str,
+    expected_manifest: &str,
+) -> anyhow::Result<bool> {
+    let root = target.minimax_plugin_root();
+    let mut has_hook_marker = false;
+    let mut has_unverified_file = false;
+    for entry in target.host.read_dir(&root, None)? {
+        if entry.is_symlink {
+            return Ok(false);
+        }
+        match entry.name.as_str() {
+            ".minimax-plugin" => {
+                if !entry.is_dir {
+                    return Ok(false);
+                }
+                for item in target
+                    .host
+                    .read_dir(&target.under(&root, &[".minimax-plugin"]), None)?
+                {
+                    if item.is_symlink || item.is_dir || item.name != MINIMAX_PLUGIN_MANIFEST_TEMP {
+                        return Ok(false);
+                    }
+                    match minimax_read_text(target, &target.minimax_plugin_manifest_temp_path()) {
+                        Ok(text) if text == expected_manifest => {}
+                        Ok(_) => has_unverified_file = true,
+                        Err(_) => return Ok(false),
+                    }
+                }
+            }
+            "hooks" => {
+                if !entry.is_dir {
+                    return Ok(false);
+                }
+                let hooks_dir = target.under(&root, &["hooks"]);
+                let entries = target.host.read_dir(&hooks_dir, None)?;
+                if entries.len() > 1
+                    || entries
+                        .iter()
+                        .any(|item| item.is_symlink || item.is_dir || item.name != "tty7.json")
+                {
+                    return Ok(false);
+                }
+                match minimax_read_text(target, &target.minimax_plugin_hooks_path()) {
+                    Ok(text) if minimax_hooks_are_owned(&text, expected_hooks) => {
+                        has_hook_marker = true;
+                    }
+                    Ok(_) => has_unverified_file = true,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return Ok(false),
+                }
+            }
+            "icon.png" => {
+                if entry.is_dir {
+                    return Ok(false);
+                }
+                if minimax_read_bytes(target, &target.minimax_plugin_icon_path())
+                    .ok()
+                    .as_deref()
+                    != Some(MINIMAX_PLUGIN_ICON)
+                {
+                    has_unverified_file = true;
+                }
+            }
+            MINIMAX_PLUGIN_HOOKS_TEMP => {
+                if entry.is_dir {
+                    return Ok(false);
+                }
+                match minimax_read_bytes(target, &target.minimax_plugin_hooks_temp_path()) {
+                    Ok(bytes)
+                        if std::str::from_utf8(&bytes)
+                            .is_ok_and(|text| minimax_hooks_are_owned(text, expected_hooks)) =>
+                    {
+                        has_hook_marker = true;
+                    }
+                    // A first write may stop before even the marker is complete.
+                    // Accept an exact prefix at this reserved staging path,
+                    // but do not use it to claim ownership of other files.
+                    Ok(bytes) if expected_hooks.as_bytes().starts_with(&bytes) => {}
+                    Ok(_) => has_unverified_file = true,
+                    Err(_) => return Ok(false),
+                }
+            }
+            MINIMAX_PLUGIN_ICON_TEMP => {
+                if entry.is_dir {
+                    return Ok(false);
+                }
+                has_unverified_file = true;
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(!has_unverified_file || has_hook_marker)
+}
+
+fn minimax_cleanup_partial_package(target: &HookTarget, expected_hooks: &str) {
+    let hook_owned = minimax_read_text(target, &target.minimax_plugin_hooks_path())
+        .ok()
+        .is_some_and(|text| minimax_hooks_are_owned(&text, expected_hooks));
+    let temp_hook_owned = minimax_read_text(target, &target.minimax_plugin_hooks_temp_path())
+        .ok()
+        .is_some_and(|text| minimax_hooks_are_owned(&text, expected_hooks));
+    if hook_owned || temp_hook_owned {
+        let _ = target
+            .host
+            .remove(&target.minimax_plugin_hooks_path(), false);
+        let _ = target
+            .host
+            .remove(&target.minimax_plugin_icon_path(), false);
+    }
+    for path in [
+        target.minimax_plugin_hooks_temp_path(),
+        target.minimax_plugin_icon_temp_path(),
+    ] {
+        let _ = target.host.remove(&path, false);
+    }
+    if target
+        .host
+        .stat(&target.minimax_plugin_manifest_path())
+        .is_ok()
+    {
+        let _ = target
+            .host
+            .remove(&target.minimax_plugin_manifest_path(), false);
+    }
+    for dir in [
+        target.under(&target.minimax_plugin_root(), &["hooks"]),
+        target.under(&target.minimax_plugin_root(), &[".minimax-plugin"]),
+        target.minimax_plugin_root(),
+    ] {
+        let _ = target.host.remove(&dir, false);
+    }
+}
+
+fn minimax_hooks_contain_ownership_marker(text: &str) -> bool {
+    text.contains(MINIMAX_PLUGIN_HOOKS_MARKER) || text.contains(&HookAgent::MiniMaxCode.marker())
+}
+
+fn minimax_hooks_are_owned(text: &str, expected_hooks: &str) -> bool {
+    text == expected_hooks || minimax_hooks_contain_ownership_marker(text)
+}
+
+fn minimax_plugin_manifest() -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "schemaVersion": 1,
+        "name": MINIMAX_PLUGIN_NAME,
+        "displayName": "tty7 Agent Hooks",
+        "version": MINIMAX_PLUGIN_VERSION,
+        "description": MINIMAX_PLUGIN_DESCRIPTION,
+        "author": MINIMAX_PLUGIN_AUTHOR,
+        "icon": "icon.png",
+        "category": "Other",
+        "exampleQueries": [],
+        "apps": [],
+        "mcpServers": [],
+        "skills": [],
+        "hooks": ["hooks/tty7.json"],
+        "hostBindings": []
+    }))?)
+}
+
+fn minimax_plugin_hooks(target: &HookTarget) -> anyhow::Result<String> {
+    let mut hooks = serde_json::Map::new();
+    for (hook_event, tty7_event) in MINIMAX_HOOK_EVENTS {
+        hooks.insert(
+            (*hook_event).to_string(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::MiniMaxCode, tty7_event)
+                }]
+            }]),
+        );
+    }
+    let mut package = serde_json::Map::new();
+    package.insert(
+        "_tty7".to_string(),
+        serde_json::Value::String(MINIMAX_PLUGIN_HOOKS_MARKER.to_string()),
+    );
+    package.insert("hooks".to_string(), serde_json::Value::Object(hooks));
+    Ok(serde_json::to_string_pretty(&serde_json::Value::Object(
+        package,
+    ))?)
+}
+
+fn minimax_manifest_is_ours(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value.get("name").and_then(|v| v.as_str()) == Some(MINIMAX_PLUGIN_NAME)
+        && value.get("author").and_then(|v| v.as_str()) == Some(MINIMAX_PLUGIN_AUTHOR)
+        && value.get("description").and_then(|v| v.as_str()) == Some(MINIMAX_PLUGIN_DESCRIPTION)
+}
+
+fn minimax_reject_symlink(target: &HookTarget, path: &Path) -> anyhow::Result<()> {
+    match target.host.stat(path) {
+        Ok(meta) if meta.is_symlink => Err(anyhow::anyhow!(
+            "{} is a symlink; not touching it",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    }
+}
+
+fn minimax_read_text(target: &HookTarget, path: &Path) -> io::Result<String> {
+    minimax_reject_symlink(target, path).map_err(|e| io::Error::other(e.to_string()))?;
+    target.read(path)
+}
+
+fn minimax_read_bytes(target: &HookTarget, path: &Path) -> io::Result<Vec<u8>> {
+    minimax_reject_symlink(target, path).map_err(|e| io::Error::other(e.to_string()))?;
+    target.host.read_file(path, MAX_CONFIG_BYTES)
+}
 
 fn hook_map_state(
     target: &HookTarget,
@@ -1261,7 +1896,8 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::QoderCLI
         | HookAgent::Crush
         | HookAgent::Kimi
-        | HookAgent::CommandCode => None,
+        | HookAgent::CommandCode
+        | HookAgent::MiniMaxCode => None,
     }
 }
 
@@ -1580,11 +2216,38 @@ mod tests {
 
     #[test]
     fn every_tty7_daemon_host_takes_the_console_fast_path() {
-        for name in ["tty7-app.exe", "tty7-server.exe", "tty7.exe"] {
+        for name in [
+            "tty7-app.exe",
+            "tty7-server.exe",
+            "tty7.exe",
+            "/Applications/tty7.app/Contents/MacOS/tty7-server",
+            "/home/me/.local/share/tty7/bin/tty7-server-c3p4",
+        ] {
             assert!(is_tty7_host_exe(name), "{name} hosts tty7 shells");
         }
-        for name in ["explorer.exe", "cmd.exe", "tty7", "tty7-app", "wt.exe"] {
+        for name in [
+            "explorer.exe",
+            "cmd.exe",
+            "wt.exe",
+            "tty7-server-cxpy",
+            "tty7-server-c3p4.bak",
+        ] {
             assert!(!is_tty7_host_exe(name), "{name} is not a tty7 host process");
+        }
+    }
+
+    #[test]
+    fn hook_ancestor_preserves_spaces_in_executable_paths() {
+        assert_eq!(
+            parse_hook_ancestor("  42 /Applications/My Apps/tty7.app/Contents/MacOS/tty7-app\n"),
+            Some((42, "/Applications/My Apps/tty7.app/Contents/MacOS/tty7-app"))
+        );
+        assert_eq!(
+            parse_hook_ancestor("7 /opt/Node Runtime/bin/node"),
+            Some((7, "/opt/Node Runtime/bin/node"))
+        );
+        for invalid in ["", "42", "42   ", "bad /bin/node"] {
+            assert_eq!(parse_hook_ancestor(invalid), None);
         }
     }
 
@@ -1704,6 +2367,15 @@ mod tests {
     }
 
     #[test]
+    fn minimax_hook_runner_requires_tty7_ownership_without_the_environment_marker() {
+        assert!(hook_runner_enabled("minimax-code", true, false));
+        assert!(hook_runner_enabled("minimax-code", false, true));
+        assert!(!hook_runner_enabled("minimax-code", false, false));
+        assert!(hook_runner_enabled("claude", true, false));
+        assert!(!hook_runner_enabled("claude", false, true));
+    }
+
+    #[test]
     fn every_installed_event_parses_as_a_sentinel_kind() {
         use crate::core::cli_agent::parse_agent_event;
 
@@ -1719,6 +2391,7 @@ mod tests {
             .chain(KIMI_HOOK_EVENTS)
             .chain(CRUSH_HOOK_EVENTS)
             .chain(COMMANDCODE_HOOK_EVENTS)
+            .chain(MINIMAX_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1772,6 +2445,10 @@ mod tests {
                 HookAgent::CommandCode,
                 "/home/me/.commandcode/settings.json",
             ),
+            (
+                HookAgent::MiniMaxCode,
+                "/home/me/.minimax/plugins/tty7-agent-hooks/.minimax-plugin/plugin.json",
+            ),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -1813,6 +2490,348 @@ mod tests {
             uninstall_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
             assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_data_dir_prefers_local_overrides_and_never_redirects_remote_hooks() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            minimax_data_dir_for(
+                home,
+                true,
+                Some(std::ffi::OsStr::new("/custom/minimax")),
+                Some(std::ffi::OsStr::new("/legacy/mavis")),
+            ),
+            PathBuf::from("/custom/minimax")
+        );
+        assert_eq!(
+            minimax_data_dir_for(
+                home,
+                true,
+                None,
+                Some(std::ffi::OsStr::new("/legacy/mavis")),
+            ),
+            PathBuf::from("/legacy/mavis")
+        );
+        assert_eq!(
+            minimax_data_dir_for(home, true, None, None),
+            PathBuf::from("/home/me/.minimax")
+        );
+        assert_eq!(
+            minimax_data_dir_for(
+                home,
+                false,
+                Some(std::ffi::OsStr::new("/local/override")),
+                Some(std::ffi::OsStr::new("/local/legacy")),
+            ),
+            PathBuf::from("/home/me/.minimax")
+        );
+    }
+
+    #[test]
+    fn minimax_installs_and_removes_a_native_plugin_package() {
+        let dir = std::env::temp_dir().join(format!("tty7-minimax-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::NotInstalled
+        );
+        install_hooks(&target, HookAgent::MiniMaxCode).expect("MiniMax install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::Installed
+        );
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(target.minimax_plugin_manifest_path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["schemaVersion"], 1);
+        assert_eq!(manifest["name"], MINIMAX_PLUGIN_NAME);
+        assert_eq!(manifest["hooks"], serde_json::json!(["hooks/tty7.json"]));
+        assert_eq!(manifest["icon"], "icon.png");
+
+        let hooks: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(target.minimax_plugin_hooks_path()).unwrap(),
+        )
+        .unwrap();
+        for (hook_event, tty7_event) in MINIMAX_HOOK_EVENTS {
+            let command = hooks["hooks"][*hook_event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                command,
+                target.hook_command(HookAgent::MiniMaxCode, tty7_event)
+            );
+        }
+        assert_eq!(
+            std::fs::read(target.minimax_plugin_icon_path()).unwrap(),
+            MINIMAX_PLUGIN_ICON
+        );
+
+        install_hooks(&target, HookAgent::MiniMaxCode).expect("re-install succeeds");
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::MiniMaxCode).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::NotInstalled
+        );
+        assert!(!target.minimax_plugin_root().exists());
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::MiniMaxCode).unwrap(),
+            HookOutcome::NothingInstalled
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_reinstalls_from_an_owned_partial_package() {
+        let dir = std::env::temp_dir().join(format!(
+            "tty7-minimax-plugin-partial-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let hooks_path = target.minimax_plugin_hooks_path();
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        std::fs::write(&hooks_path, minimax_plugin_hooks(&target).unwrap()).unwrap();
+
+        install_hooks(&target, HookAgent::MiniMaxCode)
+            .expect("an owned partial package must be recoverable");
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::Installed
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_recovers_from_truncated_remote_package_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "tty7-minimax-plugin-truncated-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let hooks_path = target.minimax_plugin_hooks_path();
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hooks_path,
+            format!(r#"{{"_tty7":"{MINIMAX_PLUGIN_HOOKS_MARKER}","hooks":{{"#),
+        )
+        .unwrap();
+        std::fs::write(target.minimax_plugin_icon_path(), b"truncated").unwrap();
+
+        install_hooks(&target, HookAgent::MiniMaxCode)
+            .expect("truncated owned files must not block a reinstall");
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::Installed
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.minimax_plugin_hooks_path()).unwrap(),
+            minimax_plugin_hooks(&target).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(target.minimax_plugin_icon_path()).unwrap(),
+            MINIMAX_PLUGIN_ICON
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_recovers_from_truncated_remote_temporary_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "tty7-minimax-plugin-temp-truncated-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        std::fs::create_dir_all(target.minimax_plugin_root()).unwrap();
+        std::fs::write(
+            target.minimax_plugin_hooks_temp_path(),
+            format!(r#"{{"_tty7":"{MINIMAX_PLUGIN_HOOKS_MARKER}","hooks":{{"#),
+        )
+        .unwrap();
+        std::fs::write(target.minimax_plugin_icon_temp_path(), b"truncated").unwrap();
+
+        install_hooks(&target, HookAgent::MiniMaxCode)
+            .expect("truncated temporary files must be recoverable");
+        assert_eq!(
+            hooks_state(&target, HookAgent::MiniMaxCode),
+            HooksState::Installed
+        );
+        assert!(!target.minimax_plugin_hooks_temp_path().exists());
+        assert!(!target.minimax_plugin_icon_temp_path().exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_recovers_before_the_first_marker_is_written() {
+        let dir =
+            std::env::temp_dir().join(format!("tty7-minimax-early-write-{}", std::process::id()));
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let hooks = minimax_plugin_hooks(&target).unwrap();
+        let marker_end =
+            hooks.find(MINIMAX_PLUGIN_HOOKS_MARKER).unwrap() + MINIMAX_PLUGIN_HOOKS_MARKER.len();
+        for end in 0..=marker_end {
+            std::fs::create_dir_all(target.minimax_plugin_root()).unwrap();
+            std::fs::write(
+                target.minimax_plugin_hooks_temp_path(),
+                &hooks.as_bytes()[..end],
+            )
+            .unwrap();
+            install_hooks(&target, HookAgent::MiniMaxCode).unwrap();
+            assert_eq!(
+                hooks_state(&target, HookAgent::MiniMaxCode),
+                HooksState::Installed
+            );
+            uninstall_hooks(&target, HookAgent::MiniMaxCode).unwrap();
+        }
+        std::fs::create_dir_all(target.minimax_plugin_root()).unwrap();
+        std::fs::write(target.minimax_plugin_hooks_temp_path(), b"").unwrap();
+        std::fs::write(target.minimax_plugin_icon_path(), b"foreign icon").unwrap();
+        assert!(install_hooks(&target, HookAgent::MiniMaxCode).is_err());
+        assert_eq!(
+            std::fs::read(target.minimax_plugin_icon_path()).unwrap(),
+            b"foreign icon"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_local_publish_recovers_from_each_partial_write() {
+        let dir =
+            std::env::temp_dir().join(format!("tty7-minimax-local-failure-{}", std::process::id()));
+        for (index, name) in [
+            MINIMAX_PLUGIN_HOOKS_TEMP,
+            MINIMAX_PLUGIN_ICON_TEMP,
+            MINIMAX_PLUGIN_MANIFEST_TEMP,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let host = FakeRemote(local_host(), Some(name), false.into());
+            let target = HookTarget {
+                host: &host,
+                home: dir.join(index.to_string()),
+                exe: dir.join("tty7-app"),
+            };
+            let temp = target.home.join(name);
+            let final_path = target.home.join(format!("published-{index}"));
+            let error = minimax_publish_file(&target, &final_path, &temp, b"complete")
+                .expect_err("local staging writes must pass through Host");
+            assert!(error.to_string().contains("injected partial write failure"));
+            assert_eq!(std::fs::read(&temp).unwrap(), b"comp");
+            minimax_publish_file(&target, &final_path, &temp, b"complete").unwrap();
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"complete");
+            let names = std::fs::read_dir(&target.home)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(names.len(), 1, "only the managed staging file is used");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minimax_uninstall_rejects_symlinked_plugin_subdirectories() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tty7-minimax-plugin-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        install_hooks(&target, HookAgent::MiniMaxCode).unwrap();
+
+        let hooks_path = target.minimax_plugin_hooks_path();
+        let hooks_dir = hooks_path.parent().unwrap().to_path_buf();
+        let external_hooks = dir.join("external-hooks");
+        std::fs::create_dir_all(&external_hooks).unwrap();
+        std::fs::copy(&hooks_path, external_hooks.join("tty7.json")).unwrap();
+        std::fs::remove_dir_all(&hooks_dir).unwrap();
+        symlink(&external_hooks, &hooks_dir).unwrap();
+
+        assert!(uninstall_hooks(&target, HookAgent::MiniMaxCode).is_err());
+        assert!(external_hooks.join("tty7.json").exists());
+        assert!(target.minimax_plugin_manifest_path().exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minimax_uninstall_rejects_dangling_plugin_subdirectory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tty7-minimax-plugin-dangling-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        install_hooks(&target, HookAgent::MiniMaxCode).unwrap();
+
+        let hooks_path = target.minimax_plugin_hooks_path();
+        let hooks_dir = hooks_path.parent().unwrap();
+        let missing_hooks = dir.join("missing-hooks");
+        std::fs::remove_dir_all(hooks_dir).unwrap();
+        symlink(&missing_hooks, hooks_dir).unwrap();
+
+        assert!(uninstall_hooks(&target, HookAgent::MiniMaxCode).is_err());
+        assert!(target.minimax_plugin_manifest_path().exists());
+        assert_eq!(std::fs::read_link(hooks_dir).unwrap(), missing_hooks);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimax_plugin_refuses_foreign_content_during_install_and_uninstall() {
+        let dir =
+            std::env::temp_dir().join(format!("tty7-minimax-plugin-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let root = target.minimax_plugin_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let foreign = target.under(&root, &["foreign.txt"]);
+        std::fs::write(&foreign, b"keep me").unwrap();
+
+        assert!(install_hooks(&target, HookAgent::MiniMaxCode).is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&root).unwrap();
+        install_hooks(&target, HookAgent::MiniMaxCode).unwrap();
+        std::fs::write(target.minimax_plugin_hooks_path(), b"{\"hooks\":{}}").unwrap();
+        assert!(uninstall_hooks(&target, HookAgent::MiniMaxCode).is_err());
+        assert!(target.minimax_plugin_manifest_path().exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2110,16 +3129,23 @@ mod tests {
         crate::host::local::LocalHost::new()
     }
 
-    struct FakeRemote(crate::host::SharedHost);
+    struct FakeRemote(
+        crate::host::SharedHost,
+        Option<&'static str>,
+        std::sync::atomic::AtomicBool,
+    );
 
     impl FakeRemote {
         fn shared() -> crate::host::SharedHost {
-            std::sync::Arc::new(FakeRemote(local_host()))
+            std::sync::Arc::new(FakeRemote(local_host(), None, false.into()))
         }
     }
 
     impl Host for FakeRemote {
         fn id(&self) -> crate::host::HostId {
+            if self.1.is_some() {
+                return crate::host::HostId::LOCAL;
+            }
             crate::host::HostId::from_connection_key("ssh-direct:me@box:22")
         }
         fn separator(&self) -> char {
@@ -2151,6 +3177,14 @@ mod tests {
             self.0.search(roots, query, limit, max_dirs, show_hidden)
         }
         fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<crate::host::Meta> {
+            if self
+                .1
+                .is_some_and(|name| p.file_name() == Some(std::ffi::OsStr::new(name)))
+                && !self.2.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.0.write_file(p, &bytes[..bytes.len() / 2])?;
+                return Err(io::Error::other("injected partial write failure"));
+            }
             self.0.write_file(p, bytes)
         }
         fn create_file_new(&self, p: &Path) -> io::Result<()> {
@@ -2227,6 +3261,14 @@ mod tests {
                 "{agent:?} display path"
             );
         }
+        assert_eq!(
+            HookAgent::MiniMaxCode.target_path(&target),
+            PathBuf::from("/home/me/.minimax/plugins/tty7-agent-hooks/.minimax-plugin/plugin.json")
+        );
+        assert_eq!(
+            HookAgent::MiniMaxCode.target_display(&target),
+            "~/.minimax/plugins/tty7-agent-hooks"
+        );
     }
 
     #[test]

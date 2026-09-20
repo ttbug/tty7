@@ -29,10 +29,11 @@ pub enum CLIAgent {
     QoderCLI,
     Crush,
     CommandCode,
+    MiniMaxCode,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 23] = [
+    pub const ALL: [CLIAgent; 24] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -56,6 +57,7 @@ impl CLIAgent {
         CLIAgent::QoderCLI,
         CLIAgent::Crush,
         CLIAgent::CommandCode,
+        CLIAgent::MiniMaxCode,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -105,6 +107,11 @@ impl CLIAgent {
             // excluded: stripping executable suffixes would make a Windows
             // `cmd.exe` shell indistinguishable from Command Code.
             CLIAgent::CommandCode => &["cmdc", "command-code", "commandcode"],
+            // The documented launcher is `mcode`; the running CLI can expose
+            // its package name as `minimax-code` in process argv. The published
+            // POSIX launcher may also exec node with the package entrypoint,
+            // which is detected separately below.
+            CLIAgent::MiniMaxCode => &["mcode", "minimax-code"],
         }
     }
 
@@ -133,6 +140,7 @@ impl CLIAgent {
             CLIAgent::QoderCLI => "qodercli",
             CLIAgent::Crush => "crush",
             CLIAgent::CommandCode => "command-code",
+            CLIAgent::MiniMaxCode => "minimax-code",
         }
     }
 
@@ -166,6 +174,7 @@ impl CLIAgent {
             CLIAgent::QoderCLI => "Qoder CLI",
             CLIAgent::Crush => "Crush",
             CLIAgent::CommandCode => "Command Code",
+            CLIAgent::MiniMaxCode => "MiniMax Code",
         }
     }
 
@@ -205,6 +214,7 @@ impl CLIAgent {
             // `command-code` is the spelling the docs guarantee on every
             // platform: the short shim is `cmd`, which is the Windows shell.
             CLIAgent::CommandCode => Some(format!("command-code{flags} --resume {session_id}")),
+            CLIAgent::MiniMaxCode => Some(format!("mcode{flags} --session {session_id}")),
             _ => None,
         }
     }
@@ -309,9 +319,10 @@ impl CLIAgent {
 
     fn replay_flags(self, argv: &[String]) -> Option<Vec<String>> {
         let names_self = |token: &str| {
-            token.split(['/', '\\']).any(|seg| {
-                CLIAgent::match_token(&base_stem(seg).to_ascii_lowercase()) == Some(self)
-            })
+            (self == CLIAgent::MiniMaxCode && CLIAgent::is_minimax_code_entrypoint(token))
+                || token.split(['/', '\\']).any(|seg| {
+                    CLIAgent::match_token(&base_stem(seg).to_ascii_lowercase()) == Some(self)
+                })
         };
         let argv = &argv[argv.iter().take_while(|t| is_env_assignment(t)).count()..];
         let named = argv.iter().position(|t| names_self(t))?;
@@ -477,6 +488,10 @@ impl CLIAgent {
                 "--worktree",
                 "-w",
             ],
+            // `--session`, `--continue`/`-c`, and the hidden compatibility
+            // `--resume` option all select the session that the generated
+            // command supplies itself.
+            CLIAgent::MiniMaxCode => &["--session", "--continue", "-c", "--resume"],
             _ => &[],
         };
         let mut i = 0;
@@ -546,6 +561,9 @@ impl CLIAgent {
             CLIAgent::Crush => 0x6B50FF,
             // The yellow the docs site accents commands and "New" badges with.
             CLIAgent::CommandCode => 0xFAD000,
+            // MiniMax Agent's official favicon uses this cyan field; the
+            // terminal-bubble mark is drawn black for contrast.
+            CLIAgent::MiniMaxCode => 0x65C7FF,
         }
     }
 
@@ -567,6 +585,8 @@ impl CLIAgent {
             CLIAgent::QoderCLI => 0x000000,
             // A white silhouette would vanish on the brand yellow disc.
             CLIAgent::CommandCode => 0x000000,
+            // The official MiniMax Agent mark is dark on its cyan field.
+            CLIAgent::MiniMaxCode => 0x000000,
             _ => 0xFFFFFF,
         }
     }
@@ -592,6 +612,7 @@ impl CLIAgent {
             CLIAgent::Crush => "icons/agents/crush.svg",
             // Command Code's mark: a rounded-square frame around the ⌘ glyph.
             CLIAgent::CommandCode => "icons/agents/command-code.svg",
+            CLIAgent::MiniMaxCode => "icons/agents/minimax-code.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -604,6 +625,12 @@ impl CLIAgent {
         CLIAgent::ALL
             .into_iter()
             .find(|a| a.aliases().contains(&token))
+    }
+
+    fn is_minimax_code_entrypoint(token: &str) -> bool {
+        let normalized = token.replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with("/@minimax-ai/code/cli.js")
+            || normalized.ends_with("/minimax-code/dist/cli.js")
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -623,6 +650,9 @@ impl CLIAgent {
         let launcher = rest.next()?;
         let launcher_stem = base_stem(launcher);
 
+        if CLIAgent::is_minimax_code_entrypoint(launcher) {
+            return Some(CLIAgent::MiniMaxCode);
+        }
         if let Some(agent) = CLIAgent::match_token(launcher_stem) {
             return Some(agent);
         }
@@ -637,6 +667,9 @@ impl CLIAgent {
             for arg in rest {
                 if arg.starts_with('-') {
                     continue;
+                }
+                if CLIAgent::is_minimax_code_entrypoint(arg) {
+                    return Some(CLIAgent::MiniMaxCode);
                 }
                 for segment in arg.split(['/', '\\']) {
                     if let Some(agent) =
@@ -972,6 +1005,73 @@ mod tests {
             CLIAgent::CommandCode.resume_command("abc123", Some(&ephemeral)),
             None
         );
+    }
+
+    #[test]
+    fn minimax_code_detects_launchers_and_resumes_sessions() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["mcode"])),
+            Some(CLIAgent::MiniMaxCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["minimax-code"])),
+            Some(CLIAgent::MiniMaxCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&[
+                "node",
+                "/Users/me/.minimax-code/releases/0.4.12/lib/node_modules/@minimax-ai/code/cli.js",
+            ])),
+            Some(CLIAgent::MiniMaxCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["node", "/Users/me/src/minimax-code/dist/cli.js",])),
+            Some(CLIAgent::MiniMaxCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&[
+                "node",
+                r"C:\Users\me\node_modules\@minimax-ai\code\cli.js",
+            ])),
+            Some(CLIAgent::MiniMaxCode)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["node", "/tmp/other-package/cli.js"])),
+            None
+        );
+        assert_eq!(
+            CLIAgent::MiniMaxCode
+                .resume_command("session-123", None)
+                .as_deref(),
+            Some("mcode --session session-123")
+        );
+
+        let launch = argv(&["mcode", "--session", "old", "--model", "MiniMax-M2"]);
+        assert_eq!(
+            CLIAgent::MiniMaxCode
+                .resume_command("session-123", Some(&launch))
+                .as_deref(),
+            Some("mcode --model MiniMax-M2 --session session-123")
+        );
+        let node_launch = argv(&[
+            "node",
+            "/Users/me/.minimax-code/releases/0.4.12/lib/node_modules/@minimax-ai/code/cli.js",
+            "--model",
+            "MiniMax-M2",
+            "--session",
+            "old",
+        ]);
+        assert_eq!(
+            CLIAgent::MiniMaxCode
+                .resume_command("session-123", Some(&node_launch))
+                .as_deref(),
+            Some("mcode --model MiniMax-M2 --session session-123")
+        );
+        assert_eq!(
+            CLIAgent::MiniMaxCode.fork_command("session-123", None),
+            None
+        );
+        assert_eq!(CLIAgent::MiniMaxCode.fork_label(), None);
     }
 
     #[test]

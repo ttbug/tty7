@@ -786,6 +786,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
         L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsAgentCrush => "Crush",
+        L10nKey::SettingsAgentCommandCode => "Command Code",
+        L10nKey::SettingsAgentMiniMaxCode => "MiniMax Code",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -928,6 +930,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchCrushKeywords => {
             "エージェント 統合 フック インストール crush agent integration hooks install"
+        }
+        L10nKey::SettingsSearchCommandCodeKeywords => {
+            "エージェント 統合 フック インストール Command Code commandcode cmdc agent integration hooks install"
+        }
+        L10nKey::SettingsSearchMiniMaxCodeKeywords => {
+            "エージェント 統合 フック インストール MiniMax Code minimax-code mcode agent integration hooks install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"

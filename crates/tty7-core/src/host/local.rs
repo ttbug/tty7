@@ -145,7 +145,18 @@ impl Host for LocalHost {
         guard_off_ui();
         let lmd = fs::symlink_metadata(p)?;
         let is_symlink = lmd.file_type().is_symlink();
-        let md = if is_symlink { fs::metadata(p)? } else { lmd };
+        let md = if is_symlink {
+            // Keep the link itself visible when its target is gone. Callers
+            // that protect paths from symlink traversal must be able to
+            // reject dangling links instead of treating them as missing.
+            match fs::metadata(p) {
+                Ok(md) => md,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => lmd,
+                Err(e) => return Err(e),
+            }
+        } else {
+            lmd
+        };
         Ok(Meta {
             is_dir: md.is_dir(),
             is_symlink,

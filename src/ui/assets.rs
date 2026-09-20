@@ -67,6 +67,9 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/command-code.svg" => {
             include_bytes!("../../assets/icons/agents/command-code.svg")
         }
+        "icons/agents/minimax-code.svg" => {
+            include_bytes!("../../assets/icons/agents/minimax-code.svg")
+        }
         _ => return None,
     };
     Some(bytes)

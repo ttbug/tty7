@@ -1,0 +1,5 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- MiniMax Agent favicon, reduced to a single-color terminal bubble mark. -->
+  <path fill-rule="evenodd" clip-rule="evenodd" d="M5 2H18C20.7614 2 23 4.23858 23 7V14C23 16.7614 20.7614 19 18 19H9.41421L5 23.4142V19.728C3.2824 18.9999 2 17.2986 2 15.2971V7C2 4.23858 4.23858 2 5 2ZM6 5C5.44772 5 5 5.44772 5 6V15.2971C5 15.8494 5.44772 16.2971 6 16.2971H10.6569L12.5858 18.226L14.5147 16.2971H18C19.1046 16.2971 20 15.4017 20 14.2971V7C20 5.89543 19.1046 5 18 5H6Z" fill="#000000"/>
+  <path d="M8 10H10V15H8V10ZM12 10H14V15H12V10ZM16 10H18V15H16V10Z" fill="#000000"/>
+</svg>

@@ -777,6 +777,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
         L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsAgentCrush => "Crush",
+        L10nKey::SettingsAgentCommandCode => "Command Code",
+        L10nKey::SettingsAgentMiniMaxCode => "MiniMax Code",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -874,6 +876,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchQoderCLIKeywords => "agent integration hooks install qoder qodercli",
         L10nKey::SettingsSearchCrushKeywords => "agent integration hooks install crush",
+        L10nKey::SettingsSearchCommandCodeKeywords => {
+            "agent integration hooks install command code commandcode cmdc"
+        }
+        L10nKey::SettingsSearchMiniMaxCodeKeywords => {
+            "agent integration hooks install minimax code minimax-code mcode"
+        }
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
