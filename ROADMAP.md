@@ -26,9 +26,12 @@
 - 已修复 MiniMax Hook 的三类边界问题：`LocalHost::stat` 保留悬空符号链接信息，避免路径保护把它当成不存在；hooks、icon、manifest 均先写临时文件再发布，并用自有标记恢复远程截断文件；无 `TTY7` 环境变量时仅允许祖先进程链包含 tty7 宿主进程的 MiniMax Hook 发出状态事件。
 - 已修复 MiniMax 本地发布的第二层临时文件问题：发布流程直接写入受管理的 staging path，避免 `config::write_atomic` 再创建不可恢复的临时文件；hooks、icon、manifest 的局部写入失败均有回归测试覆盖。
 - 已修复远程工作区 RSA SSH 认证兼容性：公钥认证优先尝试 `rsa-sha2-512`，服务端拒绝后回退 `rsa-sha2-256`，覆盖文件密钥和 SSH Agent；Apple Silicon DMG 已重新打包并通过镜像、签名、版本与架构校验。
+- 已实现首次远程认证的来源工作区回退；现有测试覆盖来源记录，真实密码／短信验证码弹窗显示仍待验证。
+- 已调整 SSH 认证弹窗绘制顺序，使其位于连接面板和命令面板之上；重新构建并生成 `authfix` Apple Silicon DMG 与 updater ZIP，包内主程序 UUID 已与最新 release 构建一致。
 
 ## 进行中
 
+- 认证弹窗回归：旧交付包曾因构建与打包并行而包含旧版主程序；现已重新构建并确认 `authfix` 包内主程序 UUID 为 `A20FA225-3EBA-3491-B266-63EDD990355C`，与最新 release 产物一致。真实密码／短信验证码服务器端到端显示仍待确认。
 - MiniMax Hook 三项补充修复已通过代码级验证：识别 `tty7-server-c{control}p{protocol}` 远程宿主；祖先进程解析保留带空格的路径；首次临时写入为空或标记未完整时按预期内容的字节前缀恢复，且不据此认领其他文件。真实 `mcode` 运行时端到端验证仍待完成。
 
 - 已实现品牌区、任务分区、仓库分组、两层 Agent 会话树和底部 workspace 入口，等待启动应用进行视觉检查。
@@ -43,6 +46,10 @@
 - 无。
 
 ## 最近验证
+
+- 首次远程认证弹窗修复：`cargo fmt --check`、`cargo test -p tty7 'ui::remote_workspace::' --no-fail-fast`（38 passed）、`cargo test -p tty7 'ui::remote_connect::' --no-fail-fast`（25 passed）、`git diff --check` 通过。
+- 认证弹窗层级修复：`cargo test -p tty7 ui::ssh_prompt:: --no-fail-fast`（16 passed）、`cargo test -p tty7 ui::remote_ --no-fail-fast`（63 passed）；`cargo build --release --locked --target aarch64-apple-darwin` 和 updater 构建通过。`dist/tty7-26.9.2-macos-arm64-authfix.dmg` 通过 CRC、应用签名、版本和 arm64 UUID 校验，SHA-256 为 `abdd339ad71a8c55d63a5b619fcebfc1c0fbe7cfbc5bb1d43096275aaf406731`；最新 updater ZIP SHA-256 为 `8eee2f1a250e561fbce1d90b1fed507deca3cf86a2ba03a5628372e104a3c10e`。
+- 2026-09-22 11:58 旧交付包：DMG SHA-256 `078f1d2b554f02693e71f69de0b2f077afcdc609742aace832d5db6591e4d8de`，ZIP SHA-256 `409ffc32132d73512fe676fffc5a889d59d7ac82aa93a8f64b4941620e9471b1`。CRC 和 staging bundle 签名／架构检查通过，但未等待 GUI release 构建结束，包内主程序仍为旧版，不能作为认证修复交付。此前 `hdiutil create` 的设备错误未完成权限排查，不能确定由旧挂载导致。
 
 - RSA SSH 认证修复：`cargo fmt --check`、`git diff --check` 通过；`cargo test -p tty7-core --lib daemon::ssh::auth` 因无法更新既有 `russh`／`zed` Git 依赖而未启动测试，待网络或本地 Cargo 缓存恢复后补跑。
 - RSA SSH 修复 DMG：`cargo build --release --locked --target aarch64-apple-darwin`、updater 构建和 `.github/scripts/bundle-macos.sh` 通过；DMG CRC、ad-hoc 签名、版本 `26.9.2`、三个 thin arm64 Mach-O 均通过校验。DMG SHA-256：`26d095ae5519ce0aedd50e0ddb8f64dfd203b36b75cbd29e3d50c919151ef0c8`；updater zip SHA-256：`12cfb79d009bf9be150575c05e61243124a6b13c2f6264799687f750bb1411bd`。

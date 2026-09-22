@@ -31,3 +31,4 @@ repomix-output.*
 
 # Lavish review artifacts (design surfaces rendered for a single review pass)
 /.lavish/
+.commandcode

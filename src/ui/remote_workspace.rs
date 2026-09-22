@@ -592,6 +592,7 @@ impl Tty7App {
         cx.notify();
 
         let host_id = choice.target.host_id();
+        remote_connect::note_auth_origin(host_id, self.workspace);
         remote_connect::clear_install_progress(host_id);
         self.watch_for_install_consent(host_id, cx);
         cx.spawn(async move |this, cx| {
@@ -2338,7 +2339,12 @@ pub(crate) enum SheetOutcome {
 
 fn raise_auth_sheet(cx: &mut gpui::App, pending: remote_connect::PendingAuth) -> SheetOutcome {
     let host = pending.host;
-    let Some((workspace, _)) = workspaces_on(cx, host).into_iter().next() else {
+    let workspace = workspaces_on(cx, host)
+        .into_iter()
+        .next()
+        .map(|(workspace, _)| workspace)
+        .or_else(|| remote_connect::auth_origin(host));
+    let Some(workspace) = workspace else {
         return SheetOutcome::GiveBack(pending);
     };
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {

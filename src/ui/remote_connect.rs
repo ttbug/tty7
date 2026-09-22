@@ -678,6 +678,27 @@ struct RouteOrigin {
 
 static ORIGINS: Mutex<Vec<RouteOrigin>> = Mutex::new(Vec::new());
 
+static AUTH_ORIGINS: Mutex<Vec<(HostId, WorkspaceId)>> = Mutex::new(Vec::new());
+
+pub fn note_auth_origin(host: HostId, workspace: WorkspaceId) {
+    let Ok(mut origins) = AUTH_ORIGINS.lock() else {
+        return;
+    };
+    match origins.iter_mut().find(|(known, _)| *known == host) {
+        Some((_, known_workspace)) => *known_workspace = workspace,
+        None => origins.push((host, workspace)),
+    }
+}
+
+pub fn auth_origin(host: HostId) -> Option<WorkspaceId> {
+    AUTH_ORIGINS
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(known, _)| *known == host)
+        .map(|(_, workspace)| *workspace)
+}
+
 pub fn note_origin(route: &crate::daemon::router::RouteTarget, target: &RemoteTarget) {
     let key = route.origin_key();
     let Ok(mut origins) = ORIGINS.lock() else {
@@ -916,6 +937,19 @@ mod tests {
             dialect_complaint("Connection refused (os error 61)", "java"),
             None
         );
+    }
+
+    #[test]
+    fn an_auth_origin_tracks_the_workspace_that_started_connecting() {
+        let host = HostId::from_connection_key("ssh:auth-origin-regression");
+        let first = WorkspaceId::new();
+        let second = WorkspaceId::new();
+
+        note_auth_origin(host, first);
+        assert_eq!(auth_origin(host), Some(first));
+
+        note_auth_origin(host, second);
+        assert_eq!(auth_origin(host), Some(second));
     }
 
     #[test]
