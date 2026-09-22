@@ -25,6 +25,7 @@
 - 已加入并修复 MiniMax Code 第二阶段 Plugin Hook 支持：新增 `HookAgent::MiniMaxCode`，按官方多文件 Plugin 结构在 `~/.minimax/plugins/tty7-agent-hooks/` 生成 manifest、Hook JSON 和 PNG 图标；支持 `MINIMAX_DATA_DIR`／`MAVIS_DATA_DIR` 本地覆盖、远程 home 路径、SessionStart/UserPromptSubmit/PermissionRequest/PostToolUse/Stop/SessionEnd 状态事件，以及外部内容冲突保护、全插件路径链符号链接保护、自有部分包恢复和 manifest 临时发布；官方 Hook 运行时的环境变量白名单不会阻断 MiniMax 事件，Node `cli.js` 入口 Resume 会保留启动参数；Settings 搜索索引同步补齐 Command Code 与 MiniMax Code 的中英文日文条目。
 - 已修复 MiniMax Hook 的三类边界问题：`LocalHost::stat` 保留悬空符号链接信息，避免路径保护把它当成不存在；hooks、icon、manifest 均先写临时文件再发布，并用自有标记恢复远程截断文件；无 `TTY7` 环境变量时仅允许祖先进程链包含 tty7 宿主进程的 MiniMax Hook 发出状态事件。
 - 已修复 MiniMax 本地发布的第二层临时文件问题：发布流程直接写入受管理的 staging path，避免 `config::write_atomic` 再创建不可恢复的临时文件；hooks、icon、manifest 的局部写入失败均有回归测试覆盖。
+- 已修复远程工作区 RSA SSH 认证兼容性：公钥认证优先尝试 `rsa-sha2-512`，服务端拒绝后回退 `rsa-sha2-256`，覆盖文件密钥和 SSH Agent；Apple Silicon DMG 已重新打包并通过镜像、签名、版本与架构校验。
 
 ## 进行中
 
@@ -42,6 +43,9 @@
 - 无。
 
 ## 最近验证
+
+- RSA SSH 认证修复：`cargo fmt --check`、`git diff --check` 通过；`cargo test -p tty7-core --lib daemon::ssh::auth` 因无法更新既有 `russh`／`zed` Git 依赖而未启动测试，待网络或本地 Cargo 缓存恢复后补跑。
+- RSA SSH 修复 DMG：`cargo build --release --locked --target aarch64-apple-darwin`、updater 构建和 `.github/scripts/bundle-macos.sh` 通过；DMG CRC、ad-hoc 签名、版本 `26.9.2`、三个 thin arm64 Mach-O 均通过校验。DMG SHA-256：`26d095ae5519ce0aedd50e0ddb8f64dfd203b36b75cbd29e3d50c919151ef0c8`；updater zip SHA-256：`12cfb79d009bf9be150575c05e61243124a6b13c2f6264799687f750bb1411bd`。
 
 - `cargo fmt --check`、`cargo test -p tty7-core --lib cli_agent`（36 passed）、`cargo check -p tty7`、`git diff --check` 通过；现有运行中的旧 tty7 daemon 尚未重启，需重启后验证已存在的 MiniMax Code 会话行。
 

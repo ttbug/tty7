@@ -846,28 +846,32 @@ async fn try_identity_file(
     };
 
     round.offered_files.push(raw_path.to_string());
-    let hash_alg = rsa_hash_alg(&key.algorithm());
-    let pk = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
-    match handle.authenticate_publickey(&spec.user, pk).await {
-        Ok(AuthResult::Success) => Outcome::Authenticated,
-        Ok(AuthResult::Failure {
-            remaining_methods, ..
-        }) => {
-            round.rejected_files.push(raw_path.to_string());
-            Outcome::Failed {
-                remaining_methods: Some(remaining_methods),
-                reason: None,
+    let key = Arc::new(key);
+    let mut last_remaining_methods = None;
+    for hash_alg in rsa_hash_algs(&key.algorithm()) {
+        let pk = PrivateKeyWithHashAlg::new(Arc::clone(&key), hash_alg);
+        match handle.authenticate_publickey(&spec.user, pk).await {
+            Ok(AuthResult::Success) => return Outcome::Authenticated,
+            Ok(AuthResult::Failure {
+                remaining_methods, ..
+            }) => {
+                last_remaining_methods = Some(remaining_methods);
+            }
+            Err(e) => {
+                round
+                    .errors
+                    .push(format!("public-key auth error with {raw_path}: {e}"));
+                return Outcome::Failed {
+                    remaining_methods: None,
+                    reason: None,
+                };
             }
         }
-        Err(e) => {
-            round
-                .errors
-                .push(format!("public-key auth error with {raw_path}: {e}"));
-            Outcome::Failed {
-                remaining_methods: None,
-                reason: None,
-            }
-        }
+    }
+    round.rejected_files.push(raw_path.to_string());
+    Outcome::Failed {
+        remaining_methods: last_remaining_methods,
+        reason: None,
     }
 }
 
@@ -931,19 +935,24 @@ where
             AgentIdentity::Certificate { .. } => continue,
         };
         round.agent_offered += 1;
-        let hash_alg = rsa_hash_alg(&pubkey.algorithm());
-        match handle
-            .authenticate_publickey_with(&spec.user, pubkey, hash_alg, &mut agent)
-            .await
-        {
-            Ok(AuthResult::Success) => return Outcome::Authenticated,
-            Ok(AuthResult::Failure {
-                remaining_methods, ..
-            }) => {
-                round.agent_rejected += 1;
-                last = Some(remaining_methods);
+        let mut key_last = None;
+        for hash_alg in rsa_hash_algs(&pubkey.algorithm()) {
+            match handle
+                .authenticate_publickey_with(&spec.user, pubkey.clone(), hash_alg, &mut agent)
+                .await
+            {
+                Ok(AuthResult::Success) => return Outcome::Authenticated,
+                Ok(AuthResult::Failure {
+                    remaining_methods, ..
+                }) => {
+                    key_last = Some(remaining_methods);
+                }
+                Err(_) => break,
             }
-            Err(_) => continue,
+        }
+        if let Some(remaining_methods) = key_last {
+            round.agent_rejected += 1;
+            last = Some(remaining_methods);
         }
     }
     Outcome::Failed {
@@ -1191,11 +1200,11 @@ async fn collect_ki_answers(
     })
 }
 
-fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
+fn rsa_hash_algs(algorithm: &Algorithm) -> Vec<Option<HashAlg>> {
     if matches!(algorithm, Algorithm::Rsa { .. }) {
-        Some(HashAlg::Sha256)
+        vec![Some(HashAlg::Sha512), Some(HashAlg::Sha256)]
     } else {
-        None
+        vec![None]
     }
 }
 
@@ -1457,12 +1466,12 @@ mod tests {
     }
 
     #[test]
-    fn rsa_gets_sha256_others_none() {
+    fn rsa_prefers_sha512_then_falls_back_to_sha256() {
         assert_eq!(
-            rsa_hash_alg(&Algorithm::Rsa { hash: None }),
-            Some(HashAlg::Sha256)
+            rsa_hash_algs(&Algorithm::Rsa { hash: None }),
+            vec![Some(HashAlg::Sha512), Some(HashAlg::Sha256)]
         );
-        assert_eq!(rsa_hash_alg(&Algorithm::Ed25519), None);
+        assert_eq!(rsa_hash_algs(&Algorithm::Ed25519), vec![None]);
     }
 
     #[test]
