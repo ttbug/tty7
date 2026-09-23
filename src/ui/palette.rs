@@ -74,6 +74,8 @@ pub enum CommandKind {
     ReportIssue,
     Quit,
     RestartDaemon,
+    UpdateLocalServer,
+    UpdateRemoteServer,
     ToggleSftp,
     ShowSshForwards,
     ToggleCodePanel,
@@ -182,6 +184,8 @@ impl CommandKind {
             ReportIssue => "report-issue",
             Quit => "quit",
             RestartDaemon => "restart-daemon",
+            UpdateLocalServer => "update-local-server",
+            UpdateRemoteServer => "update-remote-server",
             ToggleSftp => "ssh-remote-files",
             ShowSshForwards => "ssh-port-forwarding",
             ToggleCodePanel => "code-panel",
@@ -312,6 +316,8 @@ impl CommandKind {
             | SelectAllText
             | SendSelectionToAgent
             | SendGitDiffToAgent
+            | UpdateLocalServer
+            | UpdateRemoteServer
             | OpenWorkspacePicker
             | OpenThemePicker
             | OpenSshConnectInput
@@ -366,7 +372,7 @@ impl CommandGroup {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ChromeState {
     pub rail_collapsed: bool,
     pub right_panel_visible: bool,
@@ -375,6 +381,10 @@ pub struct ChromeState {
     /// only what a tab that has never been told starts from, so a tab that was
     /// told would have had the row offer it the state it is already in.
     pub document_filled: bool,
+    /// The machine this window's workspace lives on, named for the palette, when
+    /// it runs a server this build installs there. `None` for this computer and
+    /// for a `--stdio` program, where there is nothing of ours to update.
+    pub remote_server: Option<String>,
 }
 
 #[derive(Clone)]
@@ -581,6 +591,8 @@ impl Command {
             Command::localized(L10nKey::CmdReportIssue, ReportIssue),
             Command::localized(L10nKey::CmdRestartServer, RestartDaemon)
                 .with_subtitle(t(L10nKey::CmdRestartServerSubtitle)),
+            Command::localized(L10nKey::CmdUpdateLocalServer, UpdateLocalServer)
+                .with_subtitle(t(L10nKey::CmdUpdateLocalServerSubtitle)),
             // Beside Quit, because the pair is the whole point of the action:
             // both end the window you are looking at, and only one of them
             // takes your shells with it. Read together the subtitles say which.
@@ -602,6 +614,22 @@ impl Command {
         push(ssh.into(), CommandGroup::Ssh);
         push(agents.into(), CommandGroup::Agents);
         push(application.into(), CommandGroup::Application);
+
+        // Only where there is a server of ours over there to update. Named for
+        // the machine, because the confirmation ends every session on it and
+        // the row should already have said which one.
+        if let Some(machine) = &chrome.remote_server {
+            let mut update = Command::new(
+                t_fmt(L10nKey::CmdUpdateRemoteServer, &[("machine", machine)]),
+                UpdateRemoteServer,
+            )
+            .with_subtitle(t(L10nKey::CmdUpdateRemoteServerSubtitle))
+            .in_group(CommandGroup::Application);
+            update
+                .aliases
+                .extend(alias_translations(L10nKey::CmdUpdateRemoteServer));
+            out.push(update);
+        }
         out
     }
 
@@ -1584,6 +1612,7 @@ mod gpui_tests {
                 rail_collapsed: false,
                 right_panel_visible: false,
                 document_filled: false,
+                remote_server: None,
             };
             let mut seen = std::collections::HashSet::new();
             for cmd in Command::base_commands(cx, chrome) {
@@ -1609,6 +1638,7 @@ mod gpui_tests {
                 rail_collapsed: false,
                 right_panel_visible: false,
                 document_filled: false,
+                remote_server: None,
             };
             let cmds = Command::base_commands(cx, chrome);
             let git = cmds.iter().filter(|c| c.group == CommandGroup::Git).count();
@@ -1617,6 +1647,57 @@ mod gpui_tests {
             assert!(
                 !cmds.iter().any(|c| c.group == CommandGroup::View
                     && c.kind.id().unwrap_or("").starts_with("git-")),
+            );
+        });
+    }
+
+    fn chrome(remote_server: Option<&str>) -> ChromeState {
+        ChromeState {
+            rail_collapsed: false,
+            right_panel_visible: false,
+            document_filled: false,
+            remote_server: remote_server.map(str::to_string),
+        }
+    }
+
+    /// Updating this computer's server is always on offer; updating a remote
+    /// one only where the window's workspace has one of ours to update.
+    #[gpui::test]
+    fn the_remote_update_is_offered_only_with_a_remote_server(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            cx.set_global(Config::default());
+            crate::ui::i18n::set_locale("en");
+
+            let local = Command::base_commands(cx, chrome(None));
+            assert!(
+                local
+                    .iter()
+                    .any(|c| c.kind == CommandKind::UpdateLocalServer)
+            );
+            assert!(
+                !local
+                    .iter()
+                    .any(|c| c.kind == CommandKind::UpdateRemoteServer),
+                "a local window has no remote server to update"
+            );
+
+            let remote = Command::base_commands(cx, chrome(Some("build-box")));
+            let update = remote
+                .iter()
+                .find(|c| c.kind == CommandKind::UpdateRemoteServer)
+                .expect("a remote window offers to update its server");
+            assert!(
+                update.title.contains("build-box"),
+                "the row names the machine whose sessions it ends: {:?}",
+                update.title
+            );
+            assert_eq!(update.kind.id(), Some("update-remote-server"));
+            assert!(
+                remote
+                    .iter()
+                    .any(|c| c.kind == CommandKind::UpdateLocalServer),
+                "this computer's server can still be updated from a remote window"
             );
         });
     }

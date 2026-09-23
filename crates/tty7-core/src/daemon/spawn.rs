@@ -157,6 +157,33 @@ pub fn local_daemon_stale_build() -> Option<String> {
         .then(|| version.build.clone())
 }
 
+/// Whether the local daemon is known to be this build on both handshakes: the
+/// pane protocol and build string it last reported match ours, and no dialect
+/// or protocol mismatch is waiting to be put to the user.
+///
+/// "Known" is the point. A daemon nobody has probed yet, or one whose probe
+/// never finished, is not proven current, and the answer for it is `false` —
+/// the caller offers the restart rather than telling the user there is nothing
+/// to do on the strength of a question never asked.
+///
+/// The build string is the crate version, so two nightlies of one version look
+/// the same here. That is the same blind spot [`local_daemon_stale_build`] has,
+/// and the one Settings already lives with.
+pub fn local_daemon_is_this_build() -> bool {
+    let pending = MISMATCHED_DAEMON
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(true);
+    if pending {
+        return false;
+    }
+    LOCAL_DAEMON.lock().ok().is_some_and(|guard| {
+        guard
+            .as_ref()
+            .is_some_and(|v| v.protocol == PROTOCOL_VERSION && v.build == env!("CARGO_PKG_VERSION"))
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum VersionProbe {
     Speaks(DaemonVersion),
@@ -2245,6 +2272,33 @@ mod mismatch_record_tests {
         assert!(
             take_mismatched_daemon().is_some(),
             "the mismatched daemon is still running, so the prompt still has something to say"
+        );
+
+        // The palette's "already up to date" reads both records, and only a
+        // daemon known to be this build — with nothing waiting to be put to
+        // the user — counts.
+        let this_build = |build: &str| DaemonVersion {
+            protocol: PROTOCOL_VERSION,
+            build: build.to_string(),
+            features: Vec::new(),
+            instance: "current".to_string(),
+        };
+        note_local_daemon(Some(this_build(env!("CARGO_PKG_VERSION"))));
+        assert!(local_daemon_is_this_build());
+
+        note_daemon_mismatch(DaemonMismatch::Protocol(None));
+        assert!(
+            !local_daemon_is_this_build(),
+            "a mismatch waiting for the user is not a current daemon, whatever build it named"
+        );
+        take_mismatched_daemon();
+
+        note_local_daemon(Some(this_build("26.1.0")));
+        assert!(!local_daemon_is_this_build(), "the in-place update case");
+        note_local_daemon(None);
+        assert!(
+            !local_daemon_is_this_build(),
+            "a daemon never probed is not proven current"
         );
     }
 }

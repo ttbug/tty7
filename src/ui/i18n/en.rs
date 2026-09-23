@@ -1766,6 +1766,21 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaletteTryDifferentSearch => "Try a different search.",
         L10nKey::CompletionListingRemote => "listing remote…",
         L10nKey::CompletionRemoteListingFailed => "remote listing failed — {error}",
+        L10nKey::CmdUpdateLocalServer => "Update tty7 server on this computer…",
+        L10nKey::CmdUpdateLocalServerSubtitle => "restarts it onto this app's build",
+        L10nKey::CmdUpdateRemoteServer => "Update tty7 server on \"{machine}\"…",
+        L10nKey::CmdUpdateRemoteServerSubtitle => {
+            "reinstalls this build's server there; ends every session on it"
+        }
+        L10nKey::AppLocalServerAlreadyCurrent => {
+            "tty7 server on this computer is already running this build ({build})."
+        }
+        L10nKey::RemoteUpdateBody => {
+            "tty7 will install this build's server on {machine} — even over one that already speaks the same version — and restart it.\n\nEvery session running on {machine} ends, including any this window is not connected to."
+        }
+        L10nKey::RemoteUpdateNeedsLocalServer => {
+            "tty7 server on this computer is too old to update the one on {machine}. Update this computer's server first, then try again."
+        }
         L10nKey::PanelMoreChangedFiles => {
             "… and {count} more changed files — run git diff to see them."
         }

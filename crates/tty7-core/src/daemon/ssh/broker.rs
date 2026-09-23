@@ -7,7 +7,10 @@ use tokio::sync::oneshot;
 
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, DaemonMsg, SshPhase};
 
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a prompt waits for its answer before the handshake that raised it
+/// gives up. Public because whoever shows the question has to stop showing it
+/// by then: an answer that arrives later goes nowhere.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERY_WINDOW: Duration = Duration::from_secs(15);
 const DELIVERY_POLL: Duration = Duration::from_millis(100);
 

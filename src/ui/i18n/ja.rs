@@ -1842,6 +1842,21 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
         L10nKey::CompletionListingRemote => "リモートを一覧しています…",
         L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",
+        L10nKey::CmdUpdateLocalServer => "このコンピュータの tty7 server を更新…",
+        L10nKey::CmdUpdateLocalServerSubtitle => "このアプリのビルドで再起動",
+        L10nKey::CmdUpdateRemoteServer => "「{machine}」上の tty7 server を更新…",
+        L10nKey::CmdUpdateRemoteServerSubtitle => {
+            "このビルドのサーバーを再インストールし、そこのセッションはすべて終了"
+        }
+        L10nKey::AppLocalServerAlreadyCurrent => {
+            "このコンピュータの tty7 server はすでにこのビルド（{build}）で動いています"
+        }
+        L10nKey::RemoteUpdateBody => {
+            "tty7 は {machine} にこのビルドのサーバーをインストールし（同じバージョンのものがあっても上書きします）、再起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+        }
+        L10nKey::RemoteUpdateNeedsLocalServer => {
+            "このコンピュータの tty7 server は古すぎて、{machine} のサーバーを更新できません。先にこのコンピュータのサーバーを更新してから、もう一度お試しください"
+        }
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }

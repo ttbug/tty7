@@ -55,6 +55,11 @@ pub enum RouteAction {
     Forward,
     RestartServer,
     ReplaceServer,
+    /// [`RouteAction::ReplaceServer`] that uploads even over a server already
+    /// speaking our dialect. A daemon that predates it fails to decode the
+    /// header, so a client asks for it only where the local daemon advertises
+    /// [`crate::daemon::protocol::FEATURE_UPDATE_SERVER`].
+    UpdateServer,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +106,11 @@ impl RouteHeader {
 
     pub fn replace_server(mut self) -> RouteHeader {
         self.action = RouteAction::ReplaceServer;
+        self
+    }
+
+    pub fn update_server(mut self) -> RouteHeader {
+        self.action = RouteAction::UpdateServer;
         self
     }
 
@@ -740,7 +750,9 @@ async fn perform(header: &RouteHeader, setup: &RouteSetup) -> anyhow::Result<Per
             let (link, conn) = open_link(header, setup).await?;
             Ok(Performed::Linked(Box::new(link), conn))
         }
-        action @ (RouteAction::RestartServer | RouteAction::ReplaceServer) => {
+        action @ (RouteAction::RestartServer
+        | RouteAction::ReplaceServer
+        | RouteAction::UpdateServer) => {
             restart_server(header, setup, action).await?;
             Ok(Performed::Acted(action))
         }
@@ -758,6 +770,9 @@ async fn restart_server(
                 .replace_remote_server(spec, setup)
                 .await
         }
+        (RouteTarget::Ssh(spec), RouteAction::UpdateServer) => {
+            SshManager::global().update_remote_server(spec, setup).await
+        }
         (RouteTarget::Ssh(spec), _) => {
             SshManager::global()
                 .restart_remote_server(spec, setup)
@@ -770,6 +785,13 @@ async fn restart_server(
             let distro = distro.clone();
             setup
                 .blocking(move || crate::daemon::install::wsl::replace_wsl_server(&distro))
+                .await??;
+            Ok(())
+        }
+        (RouteTarget::Wsl { distro }, RouteAction::UpdateServer) => {
+            let distro = distro.clone();
+            setup
+                .blocking(move || crate::daemon::install::wsl::update_wsl_server(&distro))
                 .await??;
             Ok(())
         }
@@ -1292,6 +1314,45 @@ mod tests {
         let back = RouteHeader::decode(legacy).unwrap();
         assert_eq!(back.action, RouteAction::Forward);
         assert_eq!(back.channel, RouteChannel::Pane, "and nothing else moved");
+    }
+
+    #[test]
+    fn an_update_is_its_own_action_on_the_wire() {
+        let mut buf = Vec::new();
+        RouteHeader::local_stdio("cat", &[])
+            .update_server()
+            .write(&mut buf)
+            .unwrap();
+        let (_, payload) = protocol::read_frame(&mut buf.as_slice()).unwrap();
+        assert_eq!(
+            RouteHeader::decode(&payload).unwrap().action,
+            RouteAction::UpdateServer
+        );
+        assert!(
+            String::from_utf8(payload)
+                .unwrap()
+                .contains("update_server"),
+            "the action's wire tag changed"
+        );
+        // A replace answered is not an update performed: a daemon that heard
+        // something else must not read as having done this.
+        assert!(!RouteAck::acted(RouteAction::ReplaceServer).performed(RouteAction::UpdateServer));
+    }
+
+    /// Refused for a `--stdio` program the same way a restart is: there is no
+    /// server of ours behind it to put a build on.
+    #[tokio::test]
+    async fn an_update_is_refused_for_a_machine_that_has_no_remote_daemon() {
+        let header = RouteHeader::local_stdio("cat", &[]).update_server();
+        let setup = RouteSetup::unattended(header.channel);
+        let Err(err) = perform(&header, &setup).await else {
+            panic!("an update must be refused for a --stdio program");
+        };
+        assert!(
+            err.to_string()
+                .contains("only supported for machines it serves"),
+            "{err}"
+        );
     }
 
     #[test]

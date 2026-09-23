@@ -880,7 +880,7 @@ impl Tty7App {
     ) {
         let label = mismatch.host.clone();
         match remote_connect::mismatch_target(&mismatch) {
-            Some(target) => self.replace_remote_server(target, label, window, cx),
+            Some(target) => self.replace_remote_server(target, label, false, window, cx),
             None => {
                 let e = t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]);
                 self.report_remote_host_error(None, &label, &e, window, cx);
@@ -980,21 +980,73 @@ impl Tty7App {
                 return;
             }
             let _ = this.update_in(cx, |this, window, cx| {
-                this.replace_remote_server(target, label, window, cx);
+                this.replace_remote_server(target, label, false, window, cx);
             });
         })
         .detach();
     }
 
-    fn replace_remote_server(
+    /// The palette's "Update tty7 server" for a remote host: put this build's
+    /// server there even when one of our dialect already is. Between dialect
+    /// bumps that is the only way a daemon-side fix reaches a machine — the
+    /// mismatch path never fires, and a restart relaunches the same old file.
+    ///
+    /// Asked for only where the local daemon can route it. One that predates
+    /// the action cannot even decode the request and hangs up without a word,
+    /// so the user is told which server to update first instead.
+    pub(crate) fn confirm_update_remote_server(
         &mut self,
         target: RemoteTarget,
         label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !crate::daemon::spawn::local_daemon_supports(
+            crate::daemon::protocol::FEATURE_UPDATE_SERVER,
+        ) {
+            window.push_notification(
+                t_fmt(
+                    L10nKey::RemoteUpdateNeedsLocalServer,
+                    &[("machine", &label)],
+                ),
+                cx,
+            );
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &t_fmt(L10nKey::RemoteMismatchTitle, &[("machine", &label)]),
+            Some(&t_fmt(L10nKey::RemoteUpdateBody, &[("machine", &label)])),
+            &crate::ui::confirm_answers(
+                t(L10nKey::RemoteMismatchReplaceServer),
+                t(L10nKey::Cancel),
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if !matches!(answer.await, Ok(0)) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.replace_remote_server(target, label, true, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// `force` uploads even over a server that already speaks our dialect —
+    /// the update, as opposed to the mismatch repair.
+    fn replace_remote_server(
+        &mut self,
+        target: RemoteTarget,
+        label: String,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.clear_remote_host_error(&target);
         let route = match remote_connect::control_route(&target, cx) {
+            Ok(header) if force => header.update_server(),
             Ok(header) => header.replace_server(),
             Err(e) => {
                 log::warn!("could not address {label} to replace its server: {e}");
@@ -2313,7 +2365,18 @@ pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
         inbox.append(&mut parked);
     }
 
+    // First take down any sheet whose attempt has stopped listening, so the
+    // host's gate is free again for a prompt that is still wanted.
+    retract_abandoned_sheets(cx);
+
     for pending in inbox {
+        // Nobody is waiting for this answer any more. Raising it would put up
+        // a sheet whose password goes nowhere; parking it would bring that
+        // sheet up later, behind whichever one is on screen now (#820).
+        if pending.is_abandoned() {
+            log::debug!("dropping a routed auth prompt its attempt gave up on");
+            continue;
+        }
         let host = pending.host;
         if !cx.default_global::<RemoteLinks>().auth.request(host) {
             park(pending);
@@ -2328,6 +2391,29 @@ pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
                 }
             }
         }
+    }
+}
+
+/// A routed sheet stays up until someone answers it, and nothing on screen
+/// knows when the attempt that raised it has given up — so the pump looks, and
+/// takes those down itself.
+fn retract_abandoned_sheets(cx: &mut gpui::App) {
+    if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+        return;
+    }
+    for (workspace, app) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+        let Some(app) = app.upgrade() else {
+            continue;
+        };
+        if !app.read(cx).routed_auth_abandoned() {
+            continue;
+        }
+        let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+            continue;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            app.update(cx, |app, cx| app.retract_abandoned_routed_auth(window, cx))
+        });
     }
 }
 
@@ -3245,6 +3331,47 @@ mod tests {
                 ("error", crate::daemon::ssh::AUTH_DECLINED),
             ],
         )
+    }
+
+    /// #820. A reconnect that kept asking while nobody was at the keyboard
+    /// left one prompt behind per attempt, parked behind the sheet on screen.
+    /// Only the newest had anyone waiting on it; the rest came up one after
+    /// another once the user was back, and answering them went nowhere. The
+    /// pump has to drop a prompt its attempt gave up on — and still keep the
+    /// one that is live.
+    #[gpui::test]
+    fn the_pump_drops_a_prompt_its_attempt_gave_up_on(cx: &mut gpui::TestAppContext) {
+        let host = HostId(0x0820_0820);
+        let prompt = || crate::daemon::protocol::AuthPromptKind::Password {
+            user: "me".into(),
+            host: "dropped-box".into(),
+        };
+        let (stale, _stale_rx, stale_asker) = remote_connect::PendingAuth::for_test(host, prompt());
+        let (live, _live_rx, _live_asker) = remote_connect::PendingAuth::for_test(host, prompt());
+        drop(stale_asker);
+        {
+            let _turn = remote_connect::claim_mailbox();
+            remote_connect::post_pending_auth(stale);
+            remote_connect::post_pending_auth(live);
+        }
+
+        cx.update(|cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            pump_auth_sheets(cx);
+        });
+
+        // Under the mailbox turn, so no other test's pump is holding ours
+        // half-way through.
+        let _turn = remote_connect::claim_mailbox();
+        let mut parked = PARKED.lock().unwrap();
+        let ours: Vec<_> = parked.iter().filter(|p| p.host == host).collect();
+        assert_eq!(
+            ours.len(),
+            1,
+            "the live prompt waits for a window; the abandoned one is gone"
+        );
+        assert!(!ours[0].is_abandoned(), "and the one kept is the live one");
+        parked.retain(|p| p.host != host);
     }
 
     /// #820. Closing the sheet is an answer. The backoff put the same question

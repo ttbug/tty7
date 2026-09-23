@@ -33,6 +33,12 @@ pub const FEATURE_RESTORE_SCROLLBACK: &str = "restore-scrollback";
 /// that costs them every running command.
 pub const FEATURE_HANDOFF: &str = "handoff";
 
+/// The daemon's router understands `RouteAction::UpdateServer`: put this
+/// build's server on a remote host even when one speaking our dialect is
+/// already there. A daemon without it cannot decode a header asking for that
+/// and drops the route unanswered, so the client checks first and says why.
+pub const FEATURE_UPDATE_SERVER: &str = "update-server";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -50,6 +56,7 @@ impl DaemonVersion {
             FEATURE_PANE_OWNER.to_string(),
             FEATURE_RESIZE_ECHO.to_string(),
             FEATURE_RESTORE_SCROLLBACK.to_string(),
+            FEATURE_UPDATE_SERVER.to_string(),
         ];
         if cfg!(unix) {
             features.push(FEATURE_HANDOFF.to_string());

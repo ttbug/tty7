@@ -43,7 +43,17 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// there, and the handshake — which has nothing but the number — cannot tell
 /// the two apart. A v8 peer meeting this one must be turned away, and only a
 /// number it has never seen does that.
-pub const CONTROL_VERSION: u32 = 9;
+///
+/// v10, like v7, changes no message. It moves because the number is also the
+/// only thing that makes a client replace the server on a remote host: a
+/// same-dialect install trusts whatever binary already sits at
+/// `tty7-server-c9p6`, and "Update Server" only restarts that same file. So
+/// daemon-side fixes shipped under v9 — modes restored on re-attach (#828),
+/// the replay ring and clipboard sniffer that never cut an escape sequence in
+/// half (#857) — would have stayed on this machine and never reached a remote
+/// one. A new filename is what gets them uploaded, at the price of one Update
+/// Server per host, which ends the sessions on it.
+pub const CONTROL_VERSION: u32 = 10;
 
 const DIALECT_MARKER: &str = "speaks control v";
 

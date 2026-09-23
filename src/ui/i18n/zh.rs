@@ -1667,6 +1667,19 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
         L10nKey::CompletionListingRemote => "正在列出远程目录…",
         L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
+        L10nKey::CmdUpdateLocalServer => "更新本机的 tty7 server…",
+        L10nKey::CmdUpdateLocalServerSubtitle => "重启到当前应用的版本",
+        L10nKey::CmdUpdateRemoteServer => "更新“{machine}”上的 tty7 server…",
+        L10nKey::CmdUpdateRemoteServerSubtitle => {
+            "在那台机器上重新安装当前版本的 server；结束其上所有会话"
+        }
+        L10nKey::AppLocalServerAlreadyCurrent => "本机的 tty7 server 已经是当前版本（{build}）。",
+        L10nKey::RemoteUpdateBody => {
+            "tty7 会在 {machine} 上安装当前版本的 server（即使那里的 server 版本号相同也会覆盖），然后重启它。\n\n{machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
+        }
+        L10nKey::RemoteUpdateNeedsLocalServer => {
+            "本机的 tty7 server 版本过旧，无法更新 {machine} 上的 server。请先更新本机的 server，再重试。"
+        }
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",
         L10nKey::ScmStagedFileCount => "已暂存 {count} 个文件",

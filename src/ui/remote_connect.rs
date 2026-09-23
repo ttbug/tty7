@@ -660,11 +660,51 @@ pub struct PendingAuth {
     /// password prompt arriving anyway means the server turned it down.
     pub auto_supplied_password: bool,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
+    /// Alive for exactly as long as someone is waiting on `reply`. The asker
+    /// holds the only strong count and drops it the moment it stops waiting —
+    /// answered or timed out — so this reads whether an answer can still land.
+    asker: std::sync::Weak<()>,
 }
 
 impl PendingAuth {
     pub fn answer(self, response: AuthResponse) {
         let _ = self.reply.send(response);
+    }
+
+    /// The connection attempt that asked this has given up on it.
+    ///
+    /// Nothing else retires a prompt: it sits in the mailbox, in the parked
+    /// queue behind another host's sheet, or on screen, until someone answers
+    /// it. An attempt that stopped waiting leaves it there, so a reconnect
+    /// loop that kept asking while nobody was at the keyboard left one behind
+    /// per attempt. The user came back to a sheet, typed the password into it
+    /// — into nothing — and the next one was already queued behind it; the
+    /// one live prompt among them connected, and the dead ones went on coming
+    /// up one after another however they were closed (#820).
+    pub fn is_abandoned(&self) -> bool {
+        self.asker.strong_count() == 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        host: HostId,
+        prompt: AuthPromptKind,
+    ) -> (
+        PendingAuth,
+        std::sync::mpsc::Receiver<AuthResponse>,
+        Arc<()>,
+    ) {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        let asker = Arc::new(());
+        let pending = PendingAuth {
+            host,
+            prompt,
+            endpoint: None,
+            auto_supplied_password: false,
+            reply,
+            asker: Arc::downgrade(&asker),
+        };
+        (pending, rx, asker)
     }
 }
 
@@ -731,6 +771,11 @@ pub fn origin_target(key: &str) -> Option<RemoteTarget> {
         .map(|o| o.target.clone())
 }
 
+/// How long a routed prompt is waited on. No longer than the daemon's own
+/// handshake waits for it: past that, the attempt behind the sheet has already
+/// failed, and a password typed into it would go nowhere.
+const AUTH_TIMEOUT: Duration = crate::daemon::ssh::broker::PROMPT_TIMEOUT;
+
 pub struct GuiRouteAuth;
 
 impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
@@ -739,39 +784,55 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
         machine: &crate::daemon::router::RouteTarget,
         prompt: &AuthPromptKind,
     ) -> AuthResponse {
-        let key = machine.origin_key();
-        let host = origin_host(&key).unwrap_or_else(|| HostId::from_connection_key(&key));
-        let (endpoint, auto_supplied_password) = match machine {
-            crate::daemon::router::RouteTarget::Ssh(spec) => (
-                Some(crate::ui::ssh_prompt::PromptEndpoint {
-                    user: spec.user.clone(),
-                    host: spec.host.clone(),
-                    port: spec.port,
-                }),
-                spec.password.is_some(),
-            ),
-            _ => (None, false),
-        };
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        {
-            let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
-                return AuthResponse::Cancelled;
-            };
-            mailbox.push(PendingAuth {
-                host,
-                prompt: prompt.clone(),
-                endpoint,
-                auto_supplied_password,
-                reply: tx,
-            });
-        }
-        rx.recv_timeout(CONSENT_TIMEOUT)
-            .unwrap_or(AuthResponse::Cancelled)
+        ask_routed(machine, prompt, AUTH_TIMEOUT)
     }
+}
+
+fn ask_routed(
+    machine: &crate::daemon::router::RouteTarget,
+    prompt: &AuthPromptKind,
+    timeout: Duration,
+) -> AuthResponse {
+    let key = machine.origin_key();
+    let host = origin_host(&key).unwrap_or_else(|| HostId::from_connection_key(&key));
+    let (endpoint, auto_supplied_password) = match machine {
+        crate::daemon::router::RouteTarget::Ssh(spec) => (
+            Some(crate::ui::ssh_prompt::PromptEndpoint {
+                user: spec.user.clone(),
+                host: spec.host.clone(),
+                port: spec.port,
+            }),
+            spec.password.is_some(),
+        ),
+        _ => (None, false),
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    // Dropped on the way out of this function, whichever way it leaves —
+    // that is what marks the prompt abandoned for the pump and the sheet.
+    let asker = Arc::new(());
+    {
+        let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
+            return AuthResponse::Cancelled;
+        };
+        mailbox.push(PendingAuth {
+            host,
+            prompt: prompt.clone(),
+            endpoint,
+            auto_supplied_password,
+            reply: tx,
+            asker: Arc::downgrade(&asker),
+        });
+    }
+    rx.recv_timeout(timeout).unwrap_or(AuthResponse::Cancelled)
 }
 
 pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
+}
+
+#[cfg(test)]
+pub(crate) fn post_pending_auth(pending: PendingAuth) {
+    AUTH_MAILBOX.lock().unwrap().push(pending);
 }
 
 #[cfg(test)]
@@ -1119,6 +1180,64 @@ mod tests {
             handle.join().unwrap(),
             AuthResponse::Secret("hunter2".into())
         );
+    }
+
+    /// #820. A routed prompt outlives the attempt that asked it unless
+    /// something says the attempt is gone. Once the asker has stopped waiting
+    /// the prompt has to read as abandoned, or the pump keeps it and raises a
+    /// sheet whose password goes nowhere.
+    #[test]
+    fn a_routed_prompt_reads_abandoned_once_its_asker_gives_up() {
+        let _turn = claim_mailbox();
+        while take_pending_auth().is_some() {}
+        let target = RemoteTarget::direct("me", "gone-box", 22);
+        let route =
+            crate::daemon::router::RouteTarget::Ssh(Box::new(native_spec("me", "gone-box", 22)));
+        note_origin(&route, &target);
+
+        let handle = std::thread::spawn(move || {
+            ask_routed(
+                &route,
+                &AuthPromptKind::Password {
+                    user: "me".into(),
+                    host: "gone-box".into(),
+                },
+                Duration::from_millis(50),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pending = loop {
+            if let Some(p) = take_pending_auth() {
+                break p;
+            }
+            assert!(Instant::now() < deadline, "no routed prompt arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            handle.join().unwrap(),
+            AuthResponse::Cancelled,
+            "nobody answered in time"
+        );
+        assert!(
+            pending.is_abandoned(),
+            "the asker has given up, so the prompt must say so"
+        );
+    }
+
+    /// The other side: a prompt somebody is still waiting on is not
+    /// abandoned, and stops being live only when its asker goes.
+    #[test]
+    fn a_routed_prompt_is_live_while_its_asker_waits() {
+        let (pending, _rx, asker) = PendingAuth::for_test(
+            HostId(0x820),
+            AuthPromptKind::Password {
+                user: "me".into(),
+                host: "live-box".into(),
+            },
+        );
+        assert!(!pending.is_abandoned());
+        drop(asker);
+        assert!(pending.is_abandoned());
     }
 
     #[test]

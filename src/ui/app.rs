@@ -2031,6 +2031,46 @@ impl Tty7App {
         self.confirm_restart_remote_server(target, label, window, cx);
     }
 
+    /// The palette's "Update tty7 server" for this computer. The app bundle
+    /// already carries the new server, so updating it is restarting onto this
+    /// build — the same restart, with the same confirmation, as everywhere
+    /// else. Only when the running server is already this build is there
+    /// nothing to do, and then the user is told so rather than asked to end
+    /// their shells for no change.
+    fn update_local_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::daemon::spawn::local_daemon_is_this_build() {
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppLocalServerAlreadyCurrent,
+                    &[("build", env!("CARGO_PKG_VERSION"))],
+                ),
+                cx,
+            );
+            return;
+        }
+        self.restart_daemon(window, cx);
+    }
+
+    /// The same for the machine this window's workspace lives on. The palette
+    /// only offers it there, but the row can outlive a workspace switch, so the
+    /// checks are made again rather than trusted.
+    fn update_window_remote_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(remote) = WorkspaceStore::remote_ref(cx, self.workspace) else {
+            self.update_local_server(window, cx);
+            return;
+        };
+        let target = remote.target.clone();
+        let label = crate::ui::remote_connect::route_label(cx, &remote);
+        if !target.hosts_our_server() {
+            window.push_notification(
+                t_fmt(L10nKey::AppRestartServerNoServer, &[("label", &label)]),
+                cx,
+            );
+            return;
+        }
+        self.confirm_update_remote_server(target, label, window, cx);
+    }
+
     pub(crate) fn restart_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Two different actions wearing one name. Where the service can rewrite
         // itself in place, nothing in a pane is interrupted and promising the
@@ -4687,9 +4727,19 @@ impl Tty7App {
         })
     }
 
+    /// Zoom the pane being worked in over its siblings, or put the layout back.
+    ///
+    /// Both directions name the pane outright rather than leaving it to
+    /// whatever holds focus at the instant the toggle lands (#869). Un-zooming
+    /// hands the tab the pane that was zoomed as its answer before focusing it:
+    /// that pane was the only one on screen to work in, and the tab's memory is
+    /// written by focus-in alone, which nothing promises has caught up. Zooming
+    /// with focus off the panes — a palette just closed, the tab strip — takes
+    /// the pane the tab remembers, the one switching back to it would focus,
+    /// and not whichever leaf the layout happens to list first.
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.maximized.is_some() {
-            self.maximized = None;
+        if let Some(leaf) = self.maximized.take() {
+            remember_leaf_in(&mut self.tabs, leaf.entity_id());
             self.focus_active(window, cx);
             cx.notify();
             return;
@@ -4700,7 +4750,11 @@ impl Tty7App {
         if tab.pane.leaves().len() < 2 {
             return;
         }
-        let leaf = tab.pane.focused_or_first(window, cx);
+        let leaf = tab
+            .pane
+            .focused_leaf(window, cx)
+            .or_else(|| tab.focus_target())
+            .and_then(|slot| slot.terminal().cloned());
         if let Some(leaf) = leaf {
             let handle = leaf.read(cx).focus_handle.clone();
             self.maximized = Some(leaf);
@@ -5332,6 +5386,9 @@ impl Tty7App {
                 right_panel_visible: self.right_panel_visible,
                 document_filled: self.document_layout(cx)
                     == crate::core::config::DocumentLayout::Fill,
+                remote_server: WorkspaceStore::remote_ref(cx, self.workspace)
+                    .filter(|remote| remote.target.hosts_our_server())
+                    .map(|remote| crate::ui::remote_connect::route_label(cx, &remote)),
             },
         );
 
@@ -5565,6 +5622,8 @@ impl Tty7App {
             // tray icon.
             Quit => self.quit_stop_sessions(window, cx),
             RestartDaemon => self.restart_window_daemon(window, cx),
+            UpdateLocalServer => self.update_local_server(window, cx),
+            UpdateRemoteServer => self.update_window_remote_server(window, cx),
             ToggleSftp => self.toggle_sftp(window, cx),
             ShowSshForwards => self.show_ssh_forwards(window, cx),
             ToggleCodePanel => self.toggle_code_panel(window, cx),
@@ -12131,6 +12190,113 @@ mod tab_focus_memory_tests {
                 !left.read(cx).focus_handle.is_focused(window),
                 "and not to the first leaf"
             );
+        });
+    }
+
+    /// A split tab on screen with both panes watched the way every spawn path
+    /// watches them, plus a handle off the panes for focus to wander to.
+    #[allow(clippy::type_complexity)]
+    fn watched_split(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<super::Tty7App>,
+        gpui::VisualTestContext,
+        Entity<crate::terminal::view::TerminalView>,
+        Entity<crate::terminal::view::TerminalView>,
+        gpui::FocusHandle,
+        impl Sized,
+    ) {
+        use super::{test_window::harness, watch_pane_focus};
+        use crate::terminal::view::quiet_test_pane;
+
+        let (app, mut vcx) = harness(cx);
+        let (left, right, elsewhere, held) = app.update_in(&mut vcx, |app, window, cx| {
+            let (left, left_stream) = quiet_test_pane(1, window, cx);
+            let (right, right_stream) = quiet_test_pane(2, window, cx);
+            app.tabs.push(Tab::new(Pane::split_node(
+                Axis::Horizontal,
+                0.5,
+                Pane::leaf(PaneSlot::Ready(left.clone())),
+                Pane::leaf(PaneSlot::Ready(right.clone())),
+            )));
+            app.active = 0;
+            for view in [&left, &right] {
+                let handle = view.read(cx).focus_handle.clone();
+                watch_pane_focus(&handle, view.entity_id(), window, cx);
+            }
+            cx.notify();
+            (left, right, cx.focus_handle(), (left_stream, right_stream))
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, left, right, elsewhere, held)
+    }
+
+    /// Zoom in on a pane, zoom back out, and the cursor is still in that pane
+    /// (#869). The pane being un-zoomed is the answer outright — it is the one
+    /// that was on screen to work in — so it is not a question for the tab's
+    /// memory, which only focus-in writes and which nothing guarantees is
+    /// current at the instant the toggle lands.
+    #[gpui::test]
+    fn unzooming_leaves_focus_in_the_pane_that_was_zoomed(cx: &mut TestAppContext) {
+        let (app, mut vcx, left, right, _elsewhere, _held) = watched_split(cx);
+
+        // Into the right-hand pane by keyboard, the road the report took.
+        app.update_in(&mut vcx, |app, window, cx| {
+            left.read(cx).focus_handle.clone().focus(window, cx);
+            app.cycle_pane(true, window, cx);
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.toggle_maximize(window, cx);
+            assert_eq!(
+                app.maximized.as_ref().map(|l| l.entity_id()),
+                Some(right.entity_id()),
+                "the pane focus is in is the one zoomed"
+            );
+            // Whatever the tab's memory says while zoomed — here the stale
+            // answer the report found — must not decide where un-zooming goes.
+            app.tabs[0].last_focused = Some(left.entity_id());
+            app.toggle_maximize(window, cx);
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.maximized.is_none());
+            assert!(
+                right.read(cx).focus_handle.is_focused(window),
+                "#869: un-zooming keeps focus in the pane that was zoomed"
+            );
+            assert_eq!(
+                app.tabs[0].last_focused,
+                Some(right.entity_id()),
+                "and the tab remembers it, so a switch away and back agrees"
+            );
+        });
+    }
+
+    /// Zooming with focus off the panes — a palette just closed, the tab strip
+    /// clicked — zooms the pane the tab remembers, not whichever leaf happens
+    /// to be first: the same pane switching back to the tab would focus.
+    #[gpui::test]
+    fn zooming_from_off_the_panes_zooms_the_remembered_pane(cx: &mut TestAppContext) {
+        let (app, mut vcx, _left, right, elsewhere, _held) = watched_split(cx);
+
+        app.update_in(&mut vcx, |_, window, cx| {
+            right.read(cx).focus_handle.clone().focus(window, cx);
+        });
+        vcx.background_executor.run_until_parked();
+        app.update_in(&mut vcx, |_, window, cx| elsewhere.focus(window, cx));
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.toggle_maximize(window, cx);
+            assert_eq!(
+                app.maximized.as_ref().map(|l| l.entity_id()),
+                Some(right.entity_id()),
+                "the zoom lands on the pane the reader was last in"
+            );
+            assert!(right.read(cx).focus_handle.is_focused(window));
         });
     }
 }

@@ -12,6 +12,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
+use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 
 use std::collections::VecDeque;
@@ -276,6 +277,24 @@ const MAX_BACKLOG: usize = 4 << 20;
 /// around to discover that — the daemon reads the closed socket as a detach
 /// anyway.
 const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a resize the daemon promised to echo is taken to still be on its
+/// way. Past this, a grid that has not reached the requested geometry is not
+/// waiting on anything: the request or its echo went missing, and the size is
+/// sent again. The local daemon echoes in well under a millisecond and a
+/// routed one within a round trip; a resend that beats a slow echo costs one
+/// `TIOCSWINSZ` of the size the pty already has, which signals nobody.
+const RESIZE_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether `term`'s grid is `size`, as the emulator would size it — it never
+/// goes below `MIN_COLUMNS` × `MIN_SCREEN_LINES`, so a sliver of a pane asking
+/// for one column is already as narrow as it can get.
+fn grid_holds(term: &Term<EventProxy>, size: TermSize) -> bool {
+    use alacritty_terminal::grid::Dimensions as _;
+    use alacritty_terminal::term::{MIN_COLUMNS, MIN_SCREEN_LINES};
+    term.columns() == size.cols.max(MIN_COLUMNS)
+        && term.screen_lines() == size.rows.max(MIN_SCREEN_LINES)
+}
 
 /// What the sender thread needs to report a link that stopped taking input.
 /// The signals the pane holds, cloned out so the failure can be raised from the
@@ -556,6 +575,10 @@ pub struct RemoteTerminal {
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
     synced_cell: (u16, u16),
+    /// When the last `ClientMsg::Resize` went down the link. On an echoing
+    /// route it is what tells "the echo is still in flight" apart from "the
+    /// echo is never coming" — see [`RESIZE_ECHO_GRACE`].
+    resize_sent_at: Option<std::time::Instant>,
     link: LinkWriter,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell_state: Arc<Mutex<ShellState>>,
@@ -1065,6 +1088,7 @@ impl RemoteTerminal {
             size,
             synced_size: false,
             synced_cell: (0, 0),
+            resize_sent_at: None,
             link,
             cwd,
             shell_state,
@@ -1181,6 +1205,11 @@ impl RemoteTerminal {
                 let mut replaying_state = true;
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
+                // #837: the command marks, cut at exactly where they land so
+                // the cursor style a finished command left behind is judged
+                // against the bytes before its `D`, not the whole batch.
+                let mut command_tok = OscTokenizer::new(&[b"133"]);
+                let mut command_cursor = CommandCursorStyle::default();
                 let mut pending: Vec<u8> = buffered;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
@@ -1255,10 +1284,13 @@ impl RemoteTerminal {
                                 // the batch splits at each of them: advance the
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
-                                let mut cuts: Vec<(usize, CursorCut)> = Vec::new();
+                                let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
                                 if local_conpty.load(Ordering::Relaxed) {
-                                    cursor_scan.feed(&out_batch, |off, c| cuts.push((off, c)));
+                                    cursor_scan.feed(&out_batch, |off, c| {
+                                        cuts.push((off, ReaderCut::Parked(c)))
+                                    });
                                 }
+                                command_cuts(&mut command_tok, &out_batch, &mut cuts);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
@@ -1273,7 +1305,14 @@ impl RemoteTerminal {
                                         for (off, cut) in cuts {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
-                                            parked_cursor.apply(&mut term, cut);
+                                            match cut {
+                                                ReaderCut::Parked(cut) => {
+                                                    parked_cursor.apply(&mut term, cut)
+                                                }
+                                                ReaderCut::Command(mark) => {
+                                                    command_cursor.apply(&mut term, mark)
+                                                }
+                                            }
                                         }
                                         processor.advance(&mut *term, &out_batch[at..]);
                                     }
@@ -1379,15 +1418,22 @@ impl RemoteTerminal {
                             // this frame must be parsed into the old grid.
                             DaemonMsg::Size(ws) => {
                                 flush_batch!();
+                                // A live echo lands just before the shell's
+                                // SIGWINCH redraw; a replayed Size heads old
+                                // bytes that nothing is going to repaint.
+                                let shell_redraws = !replaying_state
+                                    && !local_conpty.load(Ordering::Relaxed)
+                                    && shell.lock().is_ok_and(|s| s.active && s.at_prompt);
                                 {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    term.resize(TermSize::new(
-                                        ws.cols as usize,
-                                        ws.rows as usize,
-                                    ));
+                                    super::prompt_reflow::resize(
+                                        &mut term,
+                                        TermSize::new(ws.cols as usize, ws.rows as usize),
+                                        shell_redraws,
+                                    );
                                 }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
@@ -1396,12 +1442,25 @@ impl RemoteTerminal {
                                 cursor_scan.reset();
                                 parked_cursor.reset();
                                 proxy.replaying.store(true, Ordering::Relaxed);
+                                // The replay carries the command marks too, so
+                                // a pane reattached after `nvim` exited in it
+                                // comes back with the prompt's cursor.
+                                let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
+                                command_cuts(&mut command_tok, &bytes, &mut cuts);
                                 {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    processor.advance(&mut *term, &bytes);
+                                    let mut at = 0usize;
+                                    for (off, cut) in cuts {
+                                        processor.advance(&mut *term, &bytes[at..off]);
+                                        at = off;
+                                        if let ReaderCut::Command(mark) = cut {
+                                            command_cursor.apply(&mut term, mark);
+                                        }
+                                    }
+                                    processor.advance(&mut *term, &bytes[at..]);
                                     if processor.sync_timeout().sync_timeout().is_some() {
                                         processor.stop_sync(&mut *term);
                                     }
@@ -1777,15 +1836,32 @@ impl RemoteTerminal {
         // and leave a pixel-aware child rendering for the old framebuffer.
         let cell = (cell_w, cell_h);
         if self.synced_size && size == self.size && cell == self.synced_cell {
+            // Already asked for, so the only question is whether the grid got
+            // there. It is not enough to trust the request (#893): on an
+            // echoing route the grid moves only when the daemon's `Size` comes
+            // back, and a request or an echo that went missing left a pane
+            // painting a grid shorter than its bounds — the bottom rows blank,
+            // the child still drawing for the old size — with every later
+            // frame asking for the same size and being skipped here, until a
+            // divider drag asked for a different one.
             if echoed {
-                // The grid follows the daemon's Size echoes; disagreement here
-                // just means an echo is still in flight (or a replay segment is
-                // mid-apply), not that the request needs re-sending.
-                return;
-            }
-            use alacritty_terminal::grid::Dimensions as _;
-            let term = self.term.lock();
-            if term.columns() == size.cols && term.screen_lines() == size.rows {
+                // Disagreement while an echo can still be on its way is just
+                // the echo (or a replay segment mid-apply) not having landed
+                // yet. Asked first because it needs no lock.
+                if self
+                    .resize_sent_at
+                    .is_some_and(|at| at.elapsed() < RESIZE_ECHO_GRACE)
+                {
+                    return;
+                }
+                // Tried rather than waited for, as the painter does: this runs
+                // every frame, and a held lock is the reader mid-batch — the
+                // next frame asks again.
+                match self.term.try_lock_unfair() {
+                    Some(term) if !grid_holds(&term, size) => {}
+                    _ => return,
+                }
+            } else if grid_holds(&self.term.lock(), size) {
                 return;
             }
         }
@@ -1793,11 +1869,13 @@ impl RemoteTerminal {
         self.size = size;
         self.synced_cell = cell;
         if !echoed {
-            self.term.lock().resize(size);
+            let shell_redraws = !self.is_local_conpty() && self.at_prompt();
+            super::prompt_reflow::resize(&mut self.term.lock(), size, shell_redraws);
         }
 
         let win = win_size(size, cell_w, cell_h);
         self.link.send(ClientMsg::Resize(win));
+        self.resize_sent_at = Some(std::time::Instant::now());
     }
 
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
@@ -3140,6 +3218,111 @@ mod config_tests {
         assert_eq!(config.conpty_resize, cfg!(windows));
         #[cfg(windows)]
         assert!(config.conpty_resize);
+    }
+}
+
+/// Issue #857 asked whether a read boundary can leave the grid different from
+/// the one the same bytes parse into in one go — a Pi response streamed as
+/// synchronized differential frames (cursor-up, erase-line, rewrite) with
+/// OSC 133 marks and CJK text. The reader hands the emulator whatever the
+/// socket delivers, so the grid has to come out the same for every split.
+#[cfg(test)]
+mod chunking_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Dimensions as _;
+    use alacritty_terminal::index::{Column, Line};
+
+    const COLS: usize = 24;
+    const ROWS: usize = 8;
+
+    fn parse(chunks: &[&[u8]]) -> Vec<String> {
+        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        let mut term = Term::new(config, &TermSize::new(COLS, ROWS), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        for chunk in chunks {
+            processor.advance(&mut term, chunk);
+        }
+        assert!(
+            processor.sync_timeout().sync_timeout().is_none(),
+            "every frame closes its synchronized update"
+        );
+        let grid = term.grid();
+        let mut rows: Vec<String> = (0..grid.screen_lines() as i32)
+            .map(|line| {
+                (0..COLS)
+                    .map(|col| {
+                        let cell = &grid[Line(line)][Column(col)];
+                        let mut s = format!("{}{:?}", cell.c, cell.flags);
+                        for z in cell.zerowidth().unwrap_or(&[]) {
+                            s.push(*z);
+                        }
+                        s
+                    })
+                    .collect()
+            })
+            .collect();
+        rows.push(format!("{:?}", grid.cursor.point));
+        rows
+    }
+
+    /// Three frames of a response streaming in, each redrawing the lines it
+    /// touched the way Pi's main-screen renderer does.
+    fn stream() -> Vec<u8> {
+        let mark = "\x1b]133;B\x07\x1b]133;C\x07";
+        let frames = [
+            format!("\x1b[?2026h\r\x1b[2K例{mark}Ex\x1b[?2026l"),
+            format!(
+                "\x1b[?2026h\r\x1b[2K例子：Example sentence.\r\n\r\n\x1b[2K## 资源{mark}N\x1b[?2026l"
+            ),
+            format!(
+                "\x1b[?2026h\x1b[2A\r\x1b[2K例子：Example.❤️\r\n\r\n\x1b[2K## 资源\r\n\
+                 \x1b[2K{mark}下一步：Next step.\x1b[?2026l"
+            ),
+        ];
+        frames.concat().into_bytes()
+    }
+
+    #[test]
+    fn a_streamed_response_parses_the_same_at_every_split() {
+        let bytes = stream();
+        let whole = parse(&[&bytes]);
+        assert!(
+            whole.iter().all(|row| !row.contains("33;")),
+            "no mark reaches the grid as text"
+        );
+        for cut in 0..=bytes.len() {
+            assert_eq!(
+                parse(&[&bytes[..cut], &bytes[cut..]]),
+                whole,
+                "split at byte {cut}"
+            );
+        }
+        let bytewise: Vec<&[u8]> = bytes.chunks(1).collect();
+        assert_eq!(parse(&bytewise), whole, "a byte at a time");
+    }
+}
+
+/// A point in a batch of pty output where the reader stops advancing the
+/// emulator to act on the state the bytes before it left behind.
+enum ReaderCut {
+    Parked(CursorCut),
+    Command(CommandMark),
+}
+
+/// Adds the batch's command marks to `cuts`, keeping them in stream order
+/// alongside whatever cuts are already there.
+fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, ReaderCut)>) {
+    let before = cuts.len();
+    tok.feed_at(bytes, |off, payload| {
+        if let Some(mark) = CommandMark::parse(payload) {
+            cuts.push((off, ReaderCut::Command(mark)));
+        }
+    });
+    if before > 0 && cuts.len() > before {
+        // Stable, so a mark that ends where a cursor show does keeps its place
+        // after it.
+        cuts.sort_by_key(|(off, _)| *off);
     }
 }
 
@@ -4923,6 +5106,7 @@ mod tests {
     fn cursor_style_sequence_overrides_and_resets_to_user_default() {
         use alacritty_terminal::vte::ansi::CursorShape;
 
+        crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
         let mut user_config = crate::core::config::Config::default();
@@ -4957,6 +5141,105 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(shape, CursorShape::Underline);
+    }
+
+    /// Feeds `output` to a pane configured with `configured`, one daemon frame
+    /// per chunk, and reports the cursor shape once all of it has been parsed.
+    fn cursor_shape_after(
+        configured: ConfigCursorStyle,
+        output: &[&[u8]],
+    ) -> alacritty_terminal::vte::ansi::CursorShape {
+        use alacritty_terminal::index::{Column, Line};
+
+        // The pane reads config.json when it is built; keep that off the
+        // user's real one.
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let mut user_config = crate::core::config::Config::default();
+        user_config.cursor_style = configured;
+        term.apply_user_config(&user_config);
+
+        for chunk in output {
+            DaemonMsg::Output(chunk.to_vec())
+                .encode(&mut daemon_side)
+                .unwrap();
+        }
+        // A sentinel painted after everything else: once it is on the grid,
+        // every chunk before it has been parsed, so the shape read below is
+        // the final one and not a transient match.
+        DaemonMsg::Output(b"\x1b[24;1H#".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        for _ in 0..400 {
+            if term.term.lock().grid()[Line(23)][Column(0)].c == '#' {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let term = term.term.lock();
+        assert_eq!(
+            term.grid()[Line(23)][Column(0)].c,
+            '#',
+            "output never parsed"
+        );
+        term.cursor_style().shape
+    }
+
+    /// #837: both spellings of the DECSCUSR reset land on `cursor_style`.
+    #[test]
+    fn cursor_style_reset_returns_to_a_configured_bar_or_underline() {
+        use alacritty_terminal::vte::ansi::CursorShape;
+
+        for reset in [&b"\x1b[0 q"[..], &b"\x1b[ q"[..]] {
+            for (configured, want) in [
+                (ConfigCursorStyle::Bar, CursorShape::Beam),
+                (ConfigCursorStyle::Underline, CursorShape::Underline),
+            ] {
+                assert_eq!(
+                    cursor_shape_after(configured, &[b"\x1b[6 q", b"\x1b[2 q", reset]),
+                    want,
+                    "{configured:?} after {reset:?}"
+                );
+            }
+        }
+    }
+
+    /// #837: what nvim actually sends on exit under `xterm-256color` is `Se`,
+    /// `\e[2 q` — a literal steady block. The command's `D` hands the prompt
+    /// its configured cursor back, whether the block arrives in the same
+    /// frame as the marks or in one of its own.
+    #[test]
+    fn a_block_an_exiting_command_left_is_undone_at_its_finish_mark() {
+        use alacritty_terminal::vte::ansi::CursorShape;
+
+        for (configured, want) in [
+            (ConfigCursorStyle::Bar, CursorShape::Beam),
+            (ConfigCursorStyle::Underline, CursorShape::Underline),
+        ] {
+            assert_eq!(
+                cursor_shape_after(
+                    configured,
+                    &[b"\x1b]133;C;nvim x\x07\x1b[2 q\x1b]133;D;0\x07$ "],
+                ),
+                want,
+                "{configured:?}, one frame"
+            );
+            assert_eq!(
+                cursor_shape_after(
+                    configured,
+                    &[
+                        b"\x1b]133;C;nvim x\x07",
+                        b"\x1b[6 q",
+                        b"\x1b[2 q\x1b[?1049l",
+                        b"\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+                    ],
+                ),
+                want,
+                "{configured:?}, split frames"
+            );
+        }
     }
 
     #[test]
@@ -5624,6 +5907,174 @@ mod tests {
         );
     }
 
+    /// A route whose daemon promised to echo every resize, over a socket pair
+    /// the test plays the daemon on. The switch tests build the same route
+    /// against a real pane.
+    fn echoing_pair() -> (RemoteTerminal, UnixStream) {
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.route = PaneRoute::Remote {
+            header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
+            resize_echo: true,
+        };
+        daemon_side
+            .set_read_timeout(Some(std::time::Duration::from_millis(150)))
+            .unwrap();
+        (term, daemon_side)
+    }
+
+    /// The geometry of the next frame the pane sent, if it sent one at all.
+    fn next_resize(daemon_side: &mut UnixStream) -> Option<(u16, u16)> {
+        match ClientMsg::read(daemon_side) {
+            Ok(ClientMsg::Resize(ws)) => Some((ws.cols, ws.rows)),
+            Ok(other) => panic!("expected a Resize, got {other:?}"),
+            Err(_) => None,
+        }
+    }
+
+    /// Makes the last resize old enough that an echo for it is no longer
+    /// expected, without the test sitting out the grace for real.
+    fn outlive_the_echo_grace(term: &mut RemoteTerminal) {
+        term.resize_sent_at = std::time::Instant::now()
+            .checked_sub(RESIZE_ECHO_GRACE + std::time::Duration::from_millis(1));
+    }
+
+    fn wait_for_columns(term: &RemoteTerminal, cols: usize) {
+        use alacritty_terminal::grid::Dimensions as _;
+        for _ in 0..400 {
+            if term.term.lock().columns() == cols {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the grid never reached {cols} columns");
+    }
+
+    /// #893: a pane came back from sleep or a workspace switch painting a grid
+    /// shorter than its bounds, and stayed that way until a divider drag. On an
+    /// echoing route the grid only moves when the daemon's `Size` comes back,
+    /// and the early-out trusted the request: once asked for, the same size
+    /// was never sent again, so a request or echo that went missing stranded
+    /// the grid — and the child — at the old geometry for good.
+    #[test]
+    fn an_echoed_resize_whose_echo_never_came_is_asked_for_again() {
+        use alacritty_terminal::grid::Dimensions as _;
+
+        let (mut term, mut daemon_side) = echoing_pair();
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(next_resize(&mut daemon_side), Some((120, 30)));
+
+        // Every frame asks again. While the echo can still be on its way that
+        // is not a reason to resend.
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(
+            next_resize(&mut daemon_side),
+            None,
+            "an echo still in flight must not be chased with duplicates"
+        );
+
+        // The echo never comes. Past the grace the grid is still 80x24, and
+        // the frame that notices must ask for the size again.
+        outlive_the_echo_grace(&mut term);
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(
+            next_resize(&mut daemon_side),
+            Some((120, 30)),
+            "a resize whose echo never arrived was never retried, so the grid \
+             stays at the old size until the layout asks for a different one"
+        );
+        assert_eq!(
+            term.term.lock().columns(),
+            80,
+            "the retry still waits for the echo rather than reflowing early"
+        );
+
+        // Once the echo lands the size is settled, however old the request.
+        DaemonMsg::Size(WinSize {
+            cols: 120,
+            rows: 30,
+            cell_w: 8,
+            cell_h: 17,
+        })
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+        wait_for_columns(&term, 120);
+        assert_eq!(term.term.lock().screen_lines(), 30);
+        outlive_the_echo_grace(&mut term);
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(
+            next_resize(&mut daemon_side),
+            None,
+            "a grid that reached the requested size must not be resized again"
+        );
+    }
+
+    /// The other way the grid and the request can part on an echoing route: a
+    /// `Size` frame that lands after the echo moves the grid off the size the
+    /// layout asked for. The non-echoing path already re-asserts there
+    /// (`layout_resize_reasserts_geometry_after_a_late_size_frame`); the
+    /// echoing one skipped it, since the request itself had not changed.
+    #[test]
+    fn an_echoed_resize_reasserts_geometry_after_a_late_size_frame() {
+        let (mut term, mut daemon_side) = echoing_pair();
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(next_resize(&mut daemon_side), Some((120, 30)));
+        for (cols, rows) in [(120, 30), (100, 12)] {
+            DaemonMsg::Size(WinSize {
+                cols,
+                rows,
+                cell_w: 8,
+                cell_h: 17,
+            })
+            .encode(&mut daemon_side)
+            .unwrap();
+        }
+        daemon_side.flush().unwrap();
+        wait_for_columns(&term, 100);
+
+        outlive_the_echo_grace(&mut term);
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(
+            next_resize(&mut daemon_side),
+            Some((120, 30)),
+            "a grid knocked off the requested size was left there"
+        );
+    }
+
+    /// A relink re-sends the geometry the pane has now — including a resize
+    /// made after the old link had already died, which reached no daemon.
+    #[test]
+    fn a_relink_delivers_the_resize_made_while_the_link_was_down() {
+        crate::core::config::pin_test_config_dir();
+        let (old_client, mut old_daemon) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(old_client, TermSize::new(80, 24)).unwrap();
+        term.resize(TermSize::new(100, 40), 8, 17);
+        assert!(matches!(
+            ClientMsg::read(&mut old_daemon).unwrap(),
+            ClientMsg::Resize(ws) if ws.cols == 100 && ws.rows == 40
+        ));
+
+        // The link drops; the layout keeps moving.
+        drop(old_daemon);
+        term.resize(TermSize::new(120, 30), 8, 17);
+
+        let (new_client, mut new_daemon) = UnixStream::pair().unwrap();
+        new_daemon
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        // What `relink_plan` hands the relink: the size the view has now.
+        let size = term.size();
+        term.adopt_relink(new_client, Vec::new(), &PaneRoute::Local, size, 8, 17)
+            .unwrap();
+        assert!(
+            matches!(
+                ClientMsg::read(&mut new_daemon).unwrap(),
+                ClientMsg::Resize(ws) if ws.cols == 120 && ws.rows == 30
+            ),
+            "the relinked daemon must be told the size the pane has now"
+        );
+    }
     #[test]
     fn a_remote_route_without_the_advertised_echo_reflows_at_request_time() {
         use alacritty_terminal::grid::Dimensions as _;
@@ -5714,6 +6165,89 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(at, "at_prompt should become true after the Prompt report");
+    }
+
+    /// #654, end to end on the reader: a shell at its prompt (the daemon's
+    /// `Prompt` report) whose clock sits one column short of the edge, the
+    /// pane narrowed by several columns at a time and widened back, each step
+    /// followed by zsh's SIGWINCH redraw. Every live echo has to hand the
+    /// prompt back before reflowing, or each narrowing strands the head of the
+    /// old prompt and the widening joins them into a line of fragments.
+    #[test]
+    fn a_live_size_echo_at_a_prompt_leaves_one_prompt() {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(98, 12)).unwrap();
+        // zsh 5.9's redraw for `PROMPT='[~] '` and an `RPROMPT` clock.
+        let redraw = |cols: u16, clock: &str| {
+            format!(
+                "\r\r\x1b[0m\x1b[J[~] \x1b[K\x1b[{}C{clock}\x1b[{}D",
+                cols - 13,
+                cols - 5
+            )
+            .into_bytes()
+        };
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(0),
+        }
+        .encode(&mut daemon_side)
+        .unwrap();
+        DaemonMsg::Output(redraw(98, "16:46:20"))
+            .encode(&mut daemon_side)
+            .unwrap();
+        for cols in [92, 86, 92, 98] {
+            DaemonMsg::Size(WinSize {
+                cols,
+                rows: 12,
+                cell_w: 8,
+                cell_h: 17,
+            })
+            .encode(&mut daemon_side)
+            .unwrap();
+            let clock = if cols == 98 { "16:46:33" } else { "16:46:2x" };
+            DaemonMsg::Output(redraw(cols, clock))
+                .encode(&mut daemon_side)
+                .unwrap();
+        }
+        daemon_side.flush().unwrap();
+
+        let text = || {
+            let t = term.term.lock();
+            let grid = t.grid();
+            let top = -(grid.history_size() as i32);
+            (top..grid.screen_lines() as i32)
+                .map(|line| {
+                    (0..grid.columns())
+                        .map(|col| grid[Line(line)][Column(col)].c)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .filter(|row| !row.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for _ in 0..400 {
+            if term.term.lock().columns() == 98 && text().contains("16:46:33") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let text = text();
+        assert!(
+            text.contains("16:46:33"),
+            "the last redraw never landed:\n{text}"
+        );
+        assert_eq!(
+            text.matches("[~]").count(),
+            1,
+            "a narrowing stranded part of an old prompt:\n{text}"
+        );
     }
 
     #[test]

@@ -1076,6 +1076,65 @@ fn process_graphics_output(
     }
 }
 
+/// Strip OSC 5522 clipboard writes and Kitty graphics out of one PTY read
+/// before anything else sees it. On the common path the original slice is
+/// borrowed unchanged; protocol payloads are decoded into out-of-band frames
+/// and never enter the replay ring.
+///
+/// `frames` receives the ordered list of out-of-band frames to forward *in
+/// stream position*: a kitty image anchors to the cursor cell as it stood when
+/// its command appeared, so the client must apply the text before an image,
+/// then the image, then the text after it, in that order. On the no-graphics
+/// fast path `frames` stays empty and the whole chunk is sent as one `Output`;
+/// only a chunk with graphics splits into interleaved frames.
+fn lift_out_of_band<'a>(
+    raw: &'a [u8],
+    clipboard: &mut ClipboardSniffer,
+    graphics: &mut GraphicsSniffer,
+    has_controller: bool,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    frames: &mut Vec<GraphicsFrame>,
+) -> std::borrow::Cow<'a, [u8]> {
+    match clipboard.sniff(raw) {
+        ClipboardSniffed::Plain(b) => match graphics.sniff(b) {
+            Sniffed::Plain(b) => std::borrow::Cow::Borrowed(b),
+            sniffed @ Sniffed::Segments(_) => {
+                let mut pass = Vec::new();
+                process_graphics_output(sniffed, false, &mut pass, frames, writer);
+                std::borrow::Cow::Owned(pass)
+            }
+        },
+        ClipboardSniffed::Segments(segs) => {
+            let mut pass = Vec::new();
+            for seg in segs {
+                match seg {
+                    ClipboardSegment::Output(b) => {
+                        let sniffed = graphics.sniff(&b);
+                        process_graphics_output(sniffed, true, &mut pass, frames, writer);
+                    }
+                    ClipboardSegment::Event(ClipboardEvent::Reply(reply)) => {
+                        if let Ok(mut w) = writer.lock() {
+                            let _ = w.write_all(&reply);
+                            let _ = w.flush();
+                        }
+                    }
+                    ClipboardSegment::Event(ClipboardEvent::Write(write)) => {
+                        if has_controller {
+                            frames.push(GraphicsFrame::ClipboardWrite(write.encode_frame()));
+                        } else if let Ok(mut w) = writer.lock() {
+                            let reply =
+                                crate::core::clipboard::response(write.id.as_deref(), "EBUSY");
+                            let _ = w.write_all(&reply);
+                            let _ = w.flush();
+                        }
+                    }
+                }
+            }
+            std::borrow::Cow::Owned(pass)
+        }
+    }
+}
+
 /// A live pane, reduced to what survives an `exec` plus what has to be written
 /// down because it does not.
 ///
@@ -1979,79 +2038,15 @@ impl DaemonPane {
                                 })
                                 .unwrap_or((None, false));
                             clipboard.set_controller(controller, allowed);
-                            // Strip OSC 5522 clipboard writes and Kitty graphics
-                            // before anything else sees them. On the common path the
-                            // original slice is borrowed unchanged; protocol payloads
-                            // are decoded into out-of-band frames and never enter the
-                            // replay ring.
-                            //
-                            // `frames` is the ordered list of out-of-band frames to
-                            // forward *in stream position*: a kitty image anchors to
-                            // the cursor cell as it stood when its command appeared,
-                            // so the client must apply the text before an image, then
-                            // the image, then the text after it, in that order. On
-                            // the no-graphics fast path `frames` stays empty and the
-                            // whole chunk is sent as one `Output`; only a chunk with
-                            // graphics splits into interleaved frames.
                             let mut frames: Vec<GraphicsFrame> = Vec::new();
-                            let passthrough: std::borrow::Cow<[u8]> = match clipboard.sniff(raw) {
-                                ClipboardSniffed::Plain(b) => match graphics.sniff(b) {
-                                    Sniffed::Plain(b) => std::borrow::Cow::Borrowed(b),
-                                    sniffed @ Sniffed::Segments(_) => {
-                                        let mut pass = Vec::new();
-                                        process_graphics_output(
-                                            sniffed,
-                                            false,
-                                            &mut pass,
-                                            &mut frames,
-                                            &writer,
-                                        );
-                                        std::borrow::Cow::Owned(pass)
-                                    }
-                                },
-                                ClipboardSniffed::Segments(segs) => {
-                                    let mut pass = Vec::new();
-                                    for seg in segs {
-                                        match seg {
-                                            ClipboardSegment::Output(b) => {
-                                                let sniffed = graphics.sniff(&b);
-                                                process_graphics_output(
-                                                    sniffed,
-                                                    true,
-                                                    &mut pass,
-                                                    &mut frames,
-                                                    &writer,
-                                                );
-                                            }
-                                            ClipboardSegment::Event(ClipboardEvent::Reply(
-                                                reply,
-                                            )) => {
-                                                if let Ok(mut w) = writer.lock() {
-                                                    let _ = w.write_all(&reply);
-                                                    let _ = w.flush();
-                                                }
-                                            }
-                                            ClipboardSegment::Event(ClipboardEvent::Write(
-                                                write,
-                                            )) => {
-                                                if controller.is_some() {
-                                                    frames.push(GraphicsFrame::ClipboardWrite(
-                                                        write.encode_frame(),
-                                                    ));
-                                                } else if let Ok(mut w) = writer.lock() {
-                                                    let reply = crate::core::clipboard::response(
-                                                        write.id.as_deref(),
-                                                        "EBUSY",
-                                                    );
-                                                    let _ = w.write_all(&reply);
-                                                    let _ = w.flush();
-                                                }
-                                            }
-                                        }
-                                    }
-                                    std::borrow::Cow::Owned(pass)
-                                }
-                            };
+                            let passthrough = lift_out_of_band(
+                                raw,
+                                &mut clipboard,
+                                &mut graphics,
+                                controller.is_some(),
+                                &writer,
+                                &mut frames,
+                            );
                             let bytes: &[u8] = &passthrough;
                             // Sniff first (cheap, over the same bytes); collect any
                             // cwd/prompt change to emit while we hold the lock.
@@ -2550,6 +2545,10 @@ struct ReplayRing {
     /// much output flows through it, which is precisely the busy pane whose
     /// snapshot is most stale.
     appended: u64,
+    /// Where the front of the ring stands in the escape grammar: every
+    /// evicted byte is folded through it, so it is the state a parser that had
+    /// read the whole stream would be in at the first byte still held.
+    head: HeadCut,
 }
 
 struct RingSegment {
@@ -2574,12 +2573,63 @@ impl RingSegment {
     }
 }
 
+/// Just enough of the VT escape grammar to tell whether a byte stands inside a
+/// sequence — the state transitions `vte` makes, minus everything it
+/// dispatches. A string (OSC, DCS, SOS, PM, APC) ends at an `ESC`, which also
+/// opens whatever follows it (a `\` makes that ST); an OSC also ends at BEL;
+/// CAN and SUB abort anything.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum HeadCut {
+    #[default]
+    Ground,
+    Esc,
+    EscIntermediate,
+    Csi,
+    Str {
+        osc: bool,
+    },
+}
+
+impl HeadCut {
+    fn step(&mut self, b: u8) {
+        *self = match (*self, b) {
+            (_, 0x18 | 0x1a) => Self::Ground,
+            (_, 0x1b) => Self::Esc,
+            (Self::Ground, _) => Self::Ground,
+            (Self::Esc, b'[') => Self::Csi,
+            (Self::Esc, b']') => Self::Str { osc: true },
+            (Self::Esc, b'P' | b'X' | b'^' | b'_') => Self::Str { osc: false },
+            (Self::Esc | Self::EscIntermediate, 0x20..=0x2f) => Self::EscIntermediate,
+            // C0 controls execute without ending the sequence, as in `vte`.
+            (state @ (Self::Esc | Self::EscIntermediate | Self::Csi), 0x00..=0x1f | 0x7f) => state,
+            (Self::Esc | Self::EscIntermediate, _) => Self::Ground,
+            (Self::Csi, 0x40..=0x7e) => Self::Ground,
+            (Self::Csi, _) => Self::Csi,
+            (Self::Str { osc: true }, 0x07) => Self::Ground,
+            (state @ Self::Str { .. }, _) => state,
+        };
+    }
+
+    fn fold(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.step(b);
+        }
+    }
+
+    /// Whether a replay could start at `next`: outside every sequence, and not
+    /// on a UTF-8 continuation byte, which never begins a character.
+    fn at_boundary(self, next: u8) -> bool {
+        self == Self::Ground && !(0x80..=0xbf).contains(&next)
+    }
+}
+
 impl ReplayRing {
     fn new(size: WinSize) -> Self {
         Self {
             segments: VecDeque::from([RingSegment::empty(size)]),
             len: 0,
             appended: 0,
+            head: HeadCut::default(),
         }
     }
 
@@ -2657,28 +2707,60 @@ impl ReplayRing {
         self.appended = self.appended.saturating_add(bytes.len() as u64);
         if bytes.len() >= RING_CAP {
             let size = self.tail().size;
-            self.segments.clear();
+            // Everything held goes, and so does the front of `bytes`; both
+            // still pass through `head` so it knows where the kept part begins.
+            for seg in self.segments.drain(..) {
+                let (a, b) = seg.bytes.as_slices();
+                self.head.fold(a);
+                self.head.fold(b);
+            }
+            let kept = bytes.len() - RING_CAP;
+            self.head.fold(&bytes[..kept]);
             let mut tail = RingSegment::empty(size);
-            tail.bytes.extend(&bytes[bytes.len() - RING_CAP..]);
+            tail.bytes.extend(&bytes[kept..]);
             self.segments.push_back(tail);
             self.len = RING_CAP;
+            self.evict(0);
             return;
         }
         self.tail().bytes.extend(bytes);
         self.len += bytes.len();
-        let mut overflow = self.len.saturating_sub(RING_CAP);
-        while overflow > 0 {
-            let head = self
-                .segments
-                .front_mut()
-                .expect("len > 0 implies a segment");
-            let drop = overflow.min(head.bytes.len());
-            head.bytes.drain(..drop);
-            self.len -= drop;
-            overflow -= drop;
-            if head.bytes.is_empty() && self.segments.len() > 1 {
-                self.segments.pop_front();
+        let overflow = self.len.saturating_sub(RING_CAP);
+        if overflow > 0 {
+            self.evict(overflow);
+        }
+    }
+
+    /// Drop `n` bytes from the front, then keep dropping until the front is a
+    /// place a parser can start from (#857).
+    ///
+    /// The cap alone falls wherever it falls — through an OSC, a CSI, or the
+    /// middle of a three-byte CJK character — and a replay starts the client's
+    /// emulator in its ground state, so the tail of a sequence was painted as
+    /// text (`33;C` out of `ESC ] 133;C BEL`) and half a character as a
+    /// replacement glyph. Moving on to the end of the sequence costs nothing
+    /// visible: the client would not have painted any of it.
+    fn evict(&mut self, mut n: usize) {
+        loop {
+            let head = &mut self.head;
+            let Some(front) = self.segments.front_mut() else {
+                return;
+            };
+            let mut take = 0;
+            for &b in front.bytes.iter() {
+                if n == 0 && head.at_boundary(b) {
+                    break;
+                }
+                head.step(b);
+                n = n.saturating_sub(1);
+                take += 1;
             }
+            front.bytes.drain(..take);
+            self.len -= take;
+            if !front.bytes.is_empty() || self.segments.len() == 1 {
+                return;
+            }
+            self.segments.pop_front();
         }
     }
 
@@ -2692,10 +2774,10 @@ impl ReplayRing {
     /// The modes a replay of this ring switches on by itself — the same fold
     /// the pane keeps, over the bytes that are actually left.
     ///
-    /// Folded rather than remembered per mode because the front of the ring cuts
-    /// wherever the cap fell, possibly through a sequence: the client's emulator
-    /// will not act on half a `?1049h` either, and the answer here has to be the
-    /// one the emulator will reach.
+    /// Folded rather than remembered per mode because the front of the ring
+    /// moves: a `?1049h` the cap fell through is evicted whole (see
+    /// [`Self::evict`]), and the answer here has to be the one the client's
+    /// emulator will reach from what is left.
     fn modes(&self) -> TerminalModes {
         let mut modes = TerminalModes::new();
         for seg in &self.segments {
@@ -3935,6 +4017,112 @@ mod tests {
         let flat = ring.flatten();
         assert_eq!(&flat[..RING_CAP - 100], &vec![b'a'; RING_CAP - 100][..]);
         assert_eq!(&flat[RING_CAP - 100..], &vec![b'b'; 100][..]);
+    }
+
+    /// Issue #857's `33;C`: Pi marks every streamed line with
+    /// `ESC ] 133;B BEL ESC ] 133;C BEL`, and a pane that streams long enough
+    /// has the cap fall through one of them sooner or later. A replay begins
+    /// in the client's ground state, so whatever tail the cut left in front
+    /// was painted as text — here `33;C`, next to the line it marked.
+    ///
+    /// Every cut, at every byte of the line: the head has to land where a
+    /// fresh parser can start, which is a sequence's `ESC` or the first byte
+    /// of a whole character.
+    #[test]
+    fn ring_eviction_never_leaves_a_sequence_tail_or_half_a_character_in_front() {
+        let line = "\x1b]133;B\x07\x1b]133;C\x07下一步。\r\n".as_bytes();
+        // The two marks, then each character (the CJK ones three bytes wide),
+        // then the end of the line, where the filler starts.
+        let starts = [0, 8, 16, 19, 22, 25, 28, 29, 30];
+        assert_eq!(*starts.last().unwrap(), line.len());
+        for cut in 0..=line.len() {
+            let mut ring = ReplayRing::new(ws(80, 24));
+            ring.append(line);
+            ring.append(&vec![b'.'; RING_CAP - line.len() + cut]);
+            let head = *starts.iter().find(|&&s| s >= cut).unwrap();
+            let flat = ring.flatten();
+            assert_eq!(
+                &flat[..line.len() - head],
+                &line[head..],
+                "a cut at byte {cut} must move the head on to byte {head}"
+            );
+            assert_eq!(ring.len, flat.len());
+        }
+    }
+
+    /// Issue #857: the two sniffers that rewrite the stream before the ring
+    /// and the client see it must hand every byte that is not theirs on
+    /// unchanged, wherever a read splits it — a Pi frame (synchronized update,
+    /// line marks, CJK text, cursor-up rewrite) at every split point, and a
+    /// byte at a time. Both what the ring records and what the client is sent.
+    #[test]
+    fn out_of_band_stripping_passes_a_streamed_frame_through_every_split() {
+        let frame = "\x1b[?2026h\x1b[2A\r\x1b[2K## 资源\r\n\x1b[2K\
+                     \x1b]133;B\x07\x1b]133;C\x07下一步。\x1b[?2026l"
+            .as_bytes();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(std::io::sink())));
+        let run = |chunks: &[&[u8]]| {
+            let mut clipboard = ClipboardSniffer::default();
+            clipboard.set_controller(Some(1), true);
+            let mut graphics = GraphicsSniffer::new_local(true);
+            let (mut recorded, mut sent) = (Vec::new(), Vec::new());
+            for chunk in chunks {
+                let mut frames = Vec::new();
+                let pass = lift_out_of_band(
+                    chunk,
+                    &mut clipboard,
+                    &mut graphics,
+                    true,
+                    &writer,
+                    &mut frames,
+                );
+                recorded.extend_from_slice(&pass);
+                if frames.is_empty() {
+                    sent.extend_from_slice(&pass);
+                }
+                for f in frames {
+                    match f {
+                        GraphicsFrame::Output(b) => sent.extend(b),
+                        _ => panic!("no out-of-band frame in a plain stream"),
+                    }
+                }
+            }
+            (recorded, sent)
+        };
+        for cut in 0..=frame.len() {
+            let (recorded, sent) = run(&[&frame[..cut], &frame[cut..]]);
+            assert_eq!(recorded, frame, "ring, split at byte {cut}");
+            assert_eq!(sent, frame, "client, split at byte {cut}");
+        }
+        let bytewise: Vec<&[u8]> = frame.chunks(1).collect();
+        assert_eq!(run(&bytewise), (frame.to_vec(), frame.to_vec()));
+    }
+
+    /// A string sequence the cap falls into is evicted up to its terminator
+    /// however far that is — the client would not have shown a byte of it —
+    /// and the state carries across appends, so a later eviction still knows
+    /// it is inside one.
+    #[test]
+    fn ring_eviction_carries_an_open_sequence_across_appends() {
+        let mut ring = ReplayRing::new(ws(80, 24));
+        ring.append(b"\x1b]52;c;");
+        ring.append(&vec![b'Q'; RING_CAP - 7]);
+        // Cuts two bytes into the OSC: the rest of it goes too.
+        ring.append(b"\x07ok");
+        assert!(ring.flatten().starts_with(b"ok"), "the payload is gone");
+        assert_eq!(ring.len, 2);
+    }
+
+    #[test]
+    fn ring_giant_chunk_starts_at_a_sequence_boundary() {
+        let mut ring = ReplayRing::new(ws(80, 24));
+        let mut big = b"\x1b]133;C\x07".to_vec();
+        big.extend(vec![b'x'; RING_CAP - 4]);
+        ring.append(&big);
+        let flat = ring.flatten();
+        assert!(flat.iter().all(|&b| b == b'x'), "no `C BEL` left in front");
+        assert_eq!(ring.len, RING_CAP - 4);
     }
 
     #[test]
@@ -5498,17 +5686,17 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// A mode the ring half-carries is a mode the ring cannot set: the front
-    /// cuts wherever the cap fell, and the emulator will not act on the tail of
-    /// a sequence any more than the fold does.
+    /// A mode the cap falls through is a mode the ring cannot set: the front
+    /// evicts the rest of the sequence too rather than replay its tail as
+    /// text, so the mode has to come from the fold.
     #[test]
     fn a_prefix_the_ring_cut_in_half_is_restored() {
         let mut st = test_state(true);
         record_output(&mut st, b"\x1b[?1049h");
-        // Four bytes over the cap, so the front eats exactly the `ESC [ ? 1`
-        // the sequence opens with and leaves the rest of it in place.
+        // Four bytes over the cap, so the cap falls just after the `ESC [ ? 1`
+        // the sequence opens with, and the `049h` after it goes as well.
         record_output(&mut st, &vec![b'.'; RING_CAP - 4]);
-        assert!(st.ring.flatten().starts_with(b"049h"));
+        assert!(st.ring.flatten().iter().all(|&b| b == b'.'));
 
         let (tx, rx) = mpsc::channel();
         attach_subscriber(&mut st, tx);

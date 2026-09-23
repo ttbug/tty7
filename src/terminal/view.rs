@@ -263,6 +263,23 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     }
 }
 
+/// The cwd a native SSH pane's remote shell reported, for the few readers that
+/// only need a name for it and not a host to act on it.
+///
+/// Such a pane belongs to this machine's daemon, so [`cwd_is_on_host`] rightly
+/// turns its paths away from every `Host` call — there is no host to hand them
+/// to. But the shell on the far end states them itself (OSC 7), unlike a shell
+/// that ssh'd onward from a local prompt, whose directory is only ever a guess.
+/// Only an absolute POSIX path counts: that is what a remote sshd's shell
+/// reports, and anything else is not a directory worth naming.
+fn native_ssh_cwd(
+    remote: Option<&RemoteContext>,
+    cwd: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    remote.filter(|r| r.kind == crate::daemon::protocol::RemoteKind::NativeSsh)?;
+    cwd.filter(|c| c.to_string_lossy().starts_with('/'))
+}
+
 /// Which path dialect a pane's output is written in.
 ///
 /// A pane running on this machine spells paths the way this OS does, and that
@@ -1078,6 +1095,35 @@ fn wsl_share_distro(
             crate::core::session::RemoteTarget::Wsl { distro } => Some(distro.clone()),
             _ => None,
         },
+    }
+}
+
+/// The directory the Files panel lists for a pane, spelled so the pane's
+/// host can read it — `None` when no spelling can.
+///
+/// A cwd the host resolves natively is used as-is. Past that, only a pane
+/// whose files sit in a WSL distro on this machine has another way in: its
+/// POSIX cwd goes through the distro's `\\wsl$` share (#896 — handed to a
+/// local `read_dir` raw, `/home/me` is `C:\home\me`, and the panel showed
+/// "Could not be read"). A cwd that is already a Windows path came from the
+/// Windows side of the pane and is readable as it stands. Anything else — a
+/// shell ssh'd onward to a machine tty7 has no link to — has no spelling
+/// here, and rooting the tree at it could only list nothing or the wrong
+/// machine's files.
+fn files_cwd(
+    host_cwd: Option<std::path::PathBuf>,
+    wsl_distro: Option<&str>,
+    cwd: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if host_cwd.is_some() {
+        return host_cwd;
+    }
+    let distro = wsl_distro?;
+    let cwd = cwd?;
+    let spelled = cwd.to_string_lossy();
+    match spelled.starts_with('/') {
+        true => wsl_share_path(distro, &spelled),
+        false => Some(cwd),
     }
 }
 
@@ -1952,6 +1998,12 @@ impl TerminalView {
         self.git_status_cwd.as_deref()
     }
 
+    /// See [`native_ssh_cwd`]. `None` for every pane that is not a native SSH
+    /// one — those either have a `git_status_cwd` or have no cwd to name.
+    pub fn native_ssh_cwd(&self) -> Option<std::path::PathBuf> {
+        native_ssh_cwd(self.remote_context().as_ref(), self.cwd())
+    }
+
     /// Plant the cwd the git-status poll would have found. For tests that
     /// need a pane to look like it is sitting somewhere known — a real poll
     /// needs a live shell reporting a directory, which a quiet test pane has
@@ -1984,6 +2036,25 @@ impl TerminalView {
     /// on — for callers that will hand the result to a `Host` call.
     pub fn effective_host_cwd(&self) -> Option<std::path::PathBuf> {
         self.git_status_cwd.clone().or_else(|| self.host_cwd())
+    }
+
+    /// The directory the Files panel roots its tree at — see [`files_cwd`].
+    ///
+    /// Follows a coding agent the way [`Self::effective_cwd`] does. A WSL
+    /// pane gets no `git_status_cwd` (its paths are not its host's), so the
+    /// agent's own cwd is read here directly before the shell's.
+    pub fn files_cwd(&self) -> Option<std::path::PathBuf> {
+        let distro = wsl_share_distro(
+            self.terminal.remote_context().as_ref(),
+            self.workspace.as_ref(),
+            self.host_id.is_local(),
+        );
+        let cwd = self
+            .terminal
+            .agent_session()
+            .and_then(|s| s.cwd)
+            .or_else(|| self.cwd());
+        files_cwd(self.effective_host_cwd(), distro.as_deref(), cwd)
     }
 
     pub fn refresh_git_status_now(&mut self, cx: &mut Context<Self>) {
@@ -8090,8 +8161,9 @@ mod tests {
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
-        TitleSettle, remote_paste_spec, settle_title, staged_path_for_pane, stages_clipboard_image,
-        staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
+        TitleSettle, files_cwd, remote_paste_spec, settle_title, staged_path_for_pane,
+        stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
+        wsl_share_path,
     };
     use super::{
         description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
@@ -8625,6 +8697,59 @@ mod tests {
         assert_eq!(wsl_share_path("", "/home/me"), None);
         assert_eq!(wsl_share_path(r"evil\distro", "/home/me"), None);
         assert_eq!(wsl_share_path("evil/distro", "/home/me"), None);
+    }
+
+    /// #896: the Files panel handed a WSL pane's `/home/me` to the local
+    /// `read_dir`, which on Windows is `C:\home\me`. The share is the only
+    /// spelling this machine can list — and drops into the tree land there too.
+    #[test]
+    fn a_wsl_panes_files_root_goes_through_its_distros_share() {
+        assert_eq!(
+            files_cwd(None, Some("Ubuntu"), Some(PathBuf::from("/home/me/repo"))),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu\home\me\repo"))
+        );
+        assert_eq!(
+            files_cwd(None, Some("Ubuntu"), Some(PathBuf::from("/mnt/c/Users/me"))),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu\mnt\c\Users\me"))
+        );
+    }
+
+    /// A cwd the host resolves itself — a local shell, a workspace pane on its
+    /// own server, a WSL workspace's distro daemon — is never rewritten.
+    #[test]
+    fn a_cwd_on_the_panes_own_host_roots_the_tree_as_is() {
+        let native = Some(PathBuf::from("/home/me/repo"));
+        assert_eq!(files_cwd(native.clone(), None, None), native);
+        assert_eq!(
+            files_cwd(
+                native.clone(),
+                Some("Ubuntu"),
+                Some(PathBuf::from("/elsewhere"))
+            ),
+            native
+        );
+    }
+
+    /// wsl.exe's own cwd on the Windows side is already a local path.
+    #[test]
+    fn a_wsl_pane_with_a_windows_cwd_keeps_it() {
+        assert_eq!(
+            files_cwd(None, Some("Ubuntu"), Some(PathBuf::from(r"C:\Users\me"))),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+    }
+
+    /// No host spelling and no local distro — a shell ssh'd onward, or a WSL
+    /// pane whose distro could not be named — roots nothing rather than a
+    /// path the tree could only fail to read.
+    #[test]
+    fn a_cwd_no_host_can_read_roots_nothing() {
+        assert_eq!(files_cwd(None, None, Some(PathBuf::from("/home/me"))), None);
+        assert_eq!(
+            files_cwd(None, Some(""), Some(PathBuf::from("/home/me"))),
+            None
+        );
+        assert_eq!(files_cwd(None, Some("Ubuntu"), None), None);
     }
 
     #[test]
@@ -9751,6 +9876,37 @@ mod tests {
 
         assert!(!cwd_is_on_host(true, true));
         assert!(!cwd_is_on_host(false, false));
+    }
+
+    #[test]
+    fn only_a_native_ssh_pane_names_its_remote_cwd() {
+        use super::{RemoteContext, native_ssh_cwd};
+        use std::path::PathBuf;
+        let native = RemoteContext {
+            kind: RemoteKind::NativeSsh,
+            argv: Vec::new(),
+            target: "ubuntu@box".into(),
+        };
+        let home = || Some(PathBuf::from("/home/ubuntu"));
+        assert_eq!(native_ssh_cwd(Some(&native), home()), home());
+
+        // `ssh` typed at a local prompt: the directory is a guess, not a
+        // report from the far end.
+        let typed = RemoteContext {
+            kind: RemoteKind::Ssh,
+            ..native.clone()
+        };
+        assert_eq!(native_ssh_cwd(Some(&typed), home()), None);
+        assert_eq!(native_ssh_cwd(Some(&wsl_context("Ubuntu")), home()), None);
+        // A local pane has its own path through `git_status_cwd`.
+        assert_eq!(native_ssh_cwd(None, home()), None);
+
+        assert_eq!(native_ssh_cwd(Some(&native), None), None);
+        assert_eq!(
+            native_ssh_cwd(Some(&native), Some(PathBuf::from("~"))),
+            None,
+            "only an absolute path names a directory"
+        );
     }
 
     /// Which machine's spelling a pane's paths are read in. Ungated on

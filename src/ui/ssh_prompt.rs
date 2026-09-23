@@ -455,6 +455,30 @@ impl Tty7App {
         SheetOutcome::Raised
     }
 
+    /// The routed sheet on screen belongs to an attempt that has stopped
+    /// waiting for it.
+    pub(crate) fn routed_auth_abandoned(&self) -> bool {
+        self.ssh_prompt
+            .routed
+            .as_ref()
+            .is_some_and(|pending| pending.is_abandoned())
+    }
+
+    /// Take down a routed sheet nobody is waiting on any more, and move on to
+    /// whatever else is asking. Answering it would have sent the secret into a
+    /// channel with no one on the other end, and closed it only to show the
+    /// next dead one queued behind it.
+    pub(crate) fn retract_abandoned_routed_auth(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.routed_auth_abandoned() {
+            return;
+        }
+        self.dismiss_and_advance(window, cx);
+    }
+
     pub(crate) fn submit_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = self.ssh_prompt.model.clone() else {
             return;
@@ -1388,6 +1412,58 @@ mod focus_tests {
         cx.background_executor.run_until_parked();
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (window, vcx)
+    }
+
+    fn host_key_sheet() -> PromptModel {
+        PromptModel::HostKeyUnknown {
+            host: "example".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:zzz".into(),
+            previously_known_as: None,
+        }
+    }
+
+    /// #820. A routed sheet whose attempt has stopped waiting is taken down
+    /// rather than left for the user to type a password into nothing — and a
+    /// sheet somebody is still waiting on is left exactly where it is.
+    #[gpui::test]
+    fn an_abandoned_routed_sheet_is_taken_down(cx: &mut TestAppContext) {
+        let (window, _vcx) = harness(cx);
+        let host = tty7_core::host::HostId(0x820);
+        let prompt = AuthPromptKind::Password {
+            user: "me".into(),
+            host: "example".into(),
+        };
+        let (pending, _rx, asker) = crate::ui::remote_connect::PendingAuth::for_test(host, prompt);
+
+        window
+            .update(cx, |app, window, cx| {
+                // Host-key model for the same reason as the test below: no
+                // `InputState` in this harness.
+                app.ssh_prompt.model = Some(host_key_sheet());
+                app.ssh_prompt.routed_host = Some(host);
+                app.ssh_prompt.routed = Some(pending);
+                app.retract_abandoned_routed_auth(window, cx);
+                assert!(
+                    app.ssh_prompt.model.is_some(),
+                    "somebody is still waiting on this one"
+                );
+            })
+            .unwrap();
+
+        drop(asker);
+        window
+            .update(cx, |app, window, cx| {
+                assert!(app.routed_auth_abandoned());
+                app.retract_abandoned_routed_auth(window, cx);
+                assert!(
+                    app.ssh_prompt.model.is_none(),
+                    "an answer to this sheet would go nowhere, so it is gone"
+                );
+                assert!(app.ssh_prompt.routed.is_none());
+            })
+            .unwrap();
     }
 
     /// The sheet takes focus into an input it owns, and dismissing it drops

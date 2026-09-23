@@ -404,6 +404,18 @@ impl SshManager {
         Ok(())
     }
 
+    pub async fn update_remote_server(
+        &self,
+        spec: &NativeSshSpec,
+        setup: &RouteSetup,
+    ) -> anyhow::Result<()> {
+        let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
+        setup
+            .blocking(move || crate::daemon::install::update_remote_server(&conn))
+            .await??;
+        Ok(())
+    }
+
     pub fn open_remote_link_blocking(
         &self,
         spec: &NativeSshSpec,

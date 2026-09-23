@@ -1424,6 +1424,13 @@ l10n_keys! {
     PaletteTryDifferentSearch,
     CompletionListingRemote,
     CompletionRemoteListingFailed,
+    CmdUpdateLocalServer,
+    CmdUpdateLocalServerSubtitle,
+    CmdUpdateRemoteServer,
+    CmdUpdateRemoteServerSubtitle,
+    AppLocalServerAlreadyCurrent,
+    RemoteUpdateBody,
+    RemoteUpdateNeedsLocalServer,
 }
 
 /// The source control strings that are translated but not yet displayed.

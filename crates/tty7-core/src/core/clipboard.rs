@@ -422,13 +422,20 @@ impl Tokenizer {
                     if bytes[i] == b'\\' {
                         self.finish(true, &mut on_output, &mut on_payload);
                         i += 1;
-                    } else if bytes[i] == b']' {
-                        self.buf.clear();
-                        self.state = TokenState::Osc;
-                        i += 1;
                     } else {
+                        // Any other byte means the `ESC` cut the OSC short and
+                        // opened a sequence of its own. A clipboard write it
+                        // interrupted is ours and goes unanswered, but anything
+                        // held while the identifier was still undecided was
+                        // the terminal's, and so is the `ESC`: hand them on and
+                        // let `Esc` judge this byte. Dropping them left the
+                        // tail of the new sequence (`[31m`) printed as text.
+                        if !self.buf.starts_with(b"5522;") {
+                            on_output(b"\x1b]");
+                            on_output(&self.buf);
+                        }
                         self.buf.clear();
-                        self.state = TokenState::Ground;
+                        self.state = TokenState::Esc;
                     }
                 }
                 TokenState::PassOsc => match memchr::memchr2(0x07, 0x1b, &bytes[i..]) {
@@ -566,6 +573,42 @@ mod tests {
         let (output, events) = collect(&[input]);
         assert_eq!(output, input);
         assert!(events.is_empty());
+    }
+
+    /// Everything that is not OSC 5522 must come out byte for byte however the
+    /// reads split it — a held `ESC ]` the tokenizer loses turns the rest of the
+    /// sequence into text on screen (#857). Pi's line marks around CJK text, an
+    /// OSC an `ESC` interrupts before its identifier is known, and one
+    /// interrupted by a new OSC, at every split point and a byte at a time.
+    #[test]
+    fn foreign_sequences_survive_every_split() {
+        let streams: [&[u8]; 5] = [
+            "\x1b[?2026h\x1b]133;B\x07\x1b]133;C\x07下一步。\r\n\x1b[?2026l".as_bytes(),
+            b"a\x1b]\x1b[31mred",
+            b"a\x1b]55\x1b[0mb",
+            b"a\x1b]552\x1b]0;title\x07b",
+            b"a\x1b]5522\x1bXb",
+        ];
+        for input in streams {
+            for cut in 0..=input.len() {
+                let (output, events) = collect(&[&input[..cut], &input[cut..]]);
+                assert_eq!(output, input, "split at byte {cut} of {input:?}");
+                assert!(events.is_empty());
+            }
+            let chunks: Vec<&[u8]> = input.chunks(1).collect();
+            assert_eq!(collect(&chunks).0, input);
+        }
+    }
+
+    /// An `ESC` that breaks into a clipboard write abandons the write, whose
+    /// bytes are ours to drop — but the escape it starts is the terminal's.
+    #[test]
+    fn an_escape_interrupting_a_write_still_reaches_the_terminal() {
+        let input = b"a\x1b]5522;type=write\x1b[31mred";
+        for cut in 0..=input.len() {
+            let (output, _) = collect(&[&input[..cut], &input[cut..]]);
+            assert_eq!(output, b"a\x1b[31mred", "split at byte {cut}");
+        }
     }
 
     #[test]

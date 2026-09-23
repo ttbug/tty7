@@ -2128,15 +2128,25 @@ impl Tty7App {
                 if stated.as_ref().is_some_and(GroupKey::is_custom) {
                     return stated;
                 }
-                let cwd = tab.pane.first_leaf().and_then(|leaf| {
+                let resolved = tab.pane.first_leaf().and_then(|leaf| {
                     let view = leaf.terminal()?.read(cx);
-                    Some((view.host_id(), view.git_status_cwd()?.to_path_buf()))
-                });
-                if let Some((id, cwd)) = cwd {
-                    let known = cx.global::<GitStatusCache>().known_repo_for(id, &cwd);
-                    if let Some(group) = resolved_group(grouping, known, &cwd) {
-                        *tab.sidebar_group.borrow_mut() = group;
+                    match view.git_status_cwd() {
+                        Some(cwd) => {
+                            let known = cx
+                                .global::<GitStatusCache>()
+                                .known_repo_for(view.host_id(), cwd);
+                            resolved_group(grouping, known, cwd)
+                        }
+                        // A native SSH pane never gets a `git_status_cwd`:
+                        // its paths are on a machine no `Host` reaches, so
+                        // nothing probes them (#891). Its shell still says
+                        // where it is, though, and that is enough for the
+                        // folder fallback.
+                        None => unprobed_group(grouping, &view.native_ssh_cwd()?),
                     }
+                });
+                if let Some(group) = resolved {
+                    *tab.sidebar_group.borrow_mut() = group;
                 }
                 tab.sidebar_group.borrow().clone()
             })
@@ -2226,6 +2236,20 @@ fn resolved_group(
         }
         None => None,
     })
+}
+
+/// The group for a cwd no repo probe can ever run in — a native SSH pane's.
+/// "Never probed" would leave such a tab in Scratch for good, so it is read
+/// as a settled "no repo": repo-or-directory grouping files it under the
+/// folder, the same as a local shell in a plain directory, and repo grouping
+/// leaves it in Scratch. A remote repo therefore groups by the folder the
+/// shell is in, not its root — there is nothing to ask for the root.
+///
+/// The key is the bare path, the same as every other derived group: a remote
+/// `/home/ubuntu` and a local one share a header, as two remote workspaces'
+/// identical paths already would.
+fn unprobed_group(grouping: SidebarGrouping, cwd: &Path) -> Option<Option<GroupKey>> {
+    resolved_group(grouping, Some(None), cwd)
 }
 
 #[derive(Debug, PartialEq)]
@@ -2946,6 +2970,24 @@ mod tests {
             resolved_group(SidebarGrouping::RepoOrDirectory, None, &cwd),
             None
         );
+    }
+
+    #[test]
+    fn a_native_ssh_cwd_groups_by_its_remote_folder() {
+        let home = p("/home/ubuntu");
+        assert_eq!(
+            unprobed_group(SidebarGrouping::RepoOrDirectory, &home),
+            Some(Some(g("/home/ubuntu")))
+        );
+        assert_eq!(
+            unprobed_group(SidebarGrouping::Repo, &home),
+            Some(None),
+            "under Repo there is no repo to find, so Scratch"
+        );
+        // Named by the last segment, like a local folder group.
+        let keys = [Some(g("/home/ubuntu")), None];
+        let sections = sidebar_sections(&keys);
+        assert_eq!(sections[0].name.as_deref(), Some("ubuntu"));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 远程 server 下载源已切换为 `https://github.com/ttbug/tty7/releases/download`，同步更新正式版、nightly 与校验文件下载地址断言；目标仓库发布资产和真实 SSH 安装仍待确认。
 - 已创建项目级开发约定并明确 UI 修改与验证规则。
 - 侧边栏改动已通过 `cargo fmt --check` 和 `git diff --check`。
 - 侧边栏改动已通过 `cargo build` 完整编译验证。
@@ -46,6 +47,9 @@
 - 无。
 
 ## 最近验证
+
+- 2026-09-23 server 下载源切换：`cargo test -p tty7-core --lib daemon::install:: --offline` 在沙箱外 142 项通过（沙箱内 8 项受本地端口绑定与 `ps` 权限限制）；`cargo fmt --check`、`git diff --check` 通过。未重新打包客户端。
+- 2026-09-23 12:53 DMG 重新交付（xview 1.9）：代码在上次 11:57 出包后仍有 12:37–12:42 的改动，故重新构建。`cargo build --release --locked --target aarch64-apple-darwin`（6m32s，25 条既有警告）与 `cargo build --release --locked --features updater --bin tty7-updater --target aarch64-apple-darwin` 通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 `dist/xview-1.9-macos-arm64.dmg`（28164367 bytes，脚本内原名 `tty7-26.9.2-macos-arm64.dmg`，按上次 `xview-1.8` 递增重命名）与 `dist/tty7-26.9.2-macos-arm64.zip`（24012652 bytes）。包内三个主程序 UUID 与 release 产物逐一比对一致（tty7-app `18286FCE-436C-3943-B219-FD85A37F11A7`、tty7 `620925C8-A034-3D82-B092-8051238BBB1A`、tty7-updater `5AC20CD3-6444-3EA0-8136-4C2D7C9962F3`），排除旧版混入。DMG CRC VALID，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.2`，ad-hoc 签名 arm64。DMG SHA-256 `d6ee301f5fea03008e25b423e4fdfa5f02d020dea3b1479178e4c45e40a063d8`，ZIP SHA-256 `e9c36856b2f1349d6fcb8b08eab5529069e46563532f7c35214be8a2cd631144`。旧 dist 产物已备份至 `/private/tmp/tty7-dist-backup-20260923`（打包脚本会清空 dist）。
 
 - 2026-09-23 11:57 DMG 重新交付：`cargo build --release --locked --target aarch64-apple-darwin`（6m48s，含 25 条既有警告）与 updater 构建通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 `dist/tty7-26.9.2-macos-arm64.dmg`（28087681 bytes）与 updater ZIP（24000458 bytes）。`hdiutil create` 在沙箱内报「设备未配置」，在沙箱外重跑通过；根因是设备节点与磁盘映像服务不可达，与旧挂载无关（`mount` 无残留 tty7 卷）。DMG CRC 校验 VALID，只读挂载后含 `tty7.app` 与 `/Applications` 入口，ad-hoc 签名、版本 `26.9.2`、三个 thin arm64 Mach-O 与新 UUID（tty7-app `3F8738C6-9822-3B92-9CA3-5F3CDD48C952`、tty7 `73A934F6-C1B6-3532-A8DE-898ED108F74C`、tty7-updater `06AA1C9A-5411-3350-95CC-08DF478FC466`）均通过。DMG SHA-256 `ad998cccb37de418a5bb150d4e08e1e59cdfca58c5728079ad86e52e829fccbb`，ZIP SHA-256 `1bee825b6c5ff4515ab73eeb0e9e92768f2abfe349f7fe836d56c9ca2abcf818`。旧 dist 产物已备份至 `/private/tmp/tty7-dist-backup-115616`（打包脚本会清空 dist）。
 - 首次远程认证弹窗修复：`cargo fmt --check`、`cargo test -p tty7 'ui::remote_workspace::' --no-fail-fast`（38 passed）、`cargo test -p tty7 'ui::remote_connect::' --no-fail-fast`（25 passed）、`git diff --check` 通过。

@@ -670,10 +670,29 @@ impl<'a> Installer<'a> {
     }
 
     pub fn replace(&self) -> Result<(), InstallError> {
+        self.put_ours_and_cycle(false)
+    }
+
+    /// [`Installer::replace`] without the "already there" shortcut: upload this
+    /// build's server over whatever sits at the dialect's path, then restart.
+    ///
+    /// The shortcut is right for a mismatch and wrong for an update. The path
+    /// is named after the dialect alone, so a server from any build that
+    /// speaks it passes the check — and between two dialect bumps that is
+    /// every build, which is how a host keeps running the first server ever
+    /// installed on it while daemon-side fixes pile up on this machine. The
+    /// upload goes through the same temp-name-then-rename as a first install,
+    /// so the running server keeps its file until the new one is proven to
+    /// speak our dialect.
+    pub fn replace_forced(&self) -> Result<(), InstallError> {
+        self.put_ours_and_cycle(true)
+    }
+
+    fn put_ours_and_cycle(&self, force: bool) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
 
-        if !self.published_binary_serves_us(&paths)? {
+        if force || !self.published_binary_serves_us(&paths)? {
             let uname = self
                 .ops
                 .run("uname -sm")
@@ -1515,13 +1534,28 @@ pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
 }
 
 pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
+    put_server_on_remote(conn, false)
+}
+
+/// Install this build's server over the one already there, even when it speaks
+/// our dialect, and restart it. See [`Installer::replace_forced`].
+pub fn update_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
+    put_server_on_remote(conn, true)
+}
+
+fn put_server_on_remote(conn: &Arc<SshConnection>, force: bool) -> io::Result<()> {
     let host = connection_label(conn);
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
     let source = BundledOrRelease::discover(fetch.as_ref());
     while_changing_the_server(conn, || {
-        Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
+        let installer = Installer::with_source(&ops, &source, confirm.as_ref(), host);
+        if force {
+            installer.replace_forced()?;
+        } else {
+            installer.replace()?;
+        }
         Ok(())
     })
 }

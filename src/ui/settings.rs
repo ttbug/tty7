@@ -8553,9 +8553,18 @@ impl Tty7App {
             list = list.child(
                 hand_rolled_row(div().py_1p5())
                     .when(!last_in_group, |s| s.border_b_1().border_color(border))
+                    // An action name is a line, never a paragraph: wrapped, it
+                    // came out one or three CJK glyphs a line on Linux (#919),
+                    // spilling over the rows below it while the keycaps beside
+                    // it had room to spare. Beside the keycaps the name takes
+                    // what they leave rather than sizing itself to its own
+                    // measured text, so its box no longer depends on that
+                    // measurement either; stacked, it has the whole row.
                     .child(
                         div()
+                            .when(!stacked, |d| d.flex_1())
                             .min_w_0()
+                            .whitespace_nowrap()
                             .text_sm()
                             .text_color(foreground)
                             .child(label),

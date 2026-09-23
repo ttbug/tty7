@@ -691,6 +691,16 @@ pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
 /// build's. The bundled server is already on this computer, so unlike SSH there
 /// is nothing to download — the copy is the whole install.
 pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
+    put_server_in_distro(distro, false)
+}
+
+/// Copy this build's server in over the one already there, even when it
+/// speaks our dialect, and restart it. See [`Installer::replace_forced`].
+pub fn update_wsl_server(distro: &str) -> io::Result<()> {
+    put_server_in_distro(distro, true)
+}
+
+fn put_server_in_distro(distro: &str, force: bool) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -698,7 +708,12 @@ pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
     let lock = install_lock(distro);
     let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     forget_wsl_server(distro);
-    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).replace()?;
+    let installer = Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro));
+    if force {
+        installer.replace_forced()?;
+    } else {
+        installer.replace()?;
+    }
     Ok(())
 }
 

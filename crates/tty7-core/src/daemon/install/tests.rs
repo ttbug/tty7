@@ -548,9 +548,9 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(
         release.fetched(),
         vec![
-            format!("https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/checksums.txt"),
+            format!("https://github.com/ttbug/tty7/releases/download/v{VERSION}/checksums.txt"),
             format!(
-                "https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
+                "https://github.com/ttbug/tty7/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
             ),
         ]
     );
@@ -1195,6 +1195,122 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
         "install before kill, so the window with no server is as short as it can be: {journal:?}"
     );
     assert!(*remote.daemon_running.lock().unwrap());
+}
+
+/// A host that already runs a server of our dialect — just an older build of
+/// it. `replace` trusts the file at the dialect's path and only restarts it,
+/// which is how daemon fixes never reached remote hosts between bumps.
+fn a_same_dialect_host_on_an_older_build() -> FakeRemote {
+    let remote = FakeRemote::new()
+        .with_previous_install()
+        .serving(BINARY)
+        .speaking(
+            BINARY,
+            RemoteProtocol {
+                build: OTHER_BUILD.to_string(),
+                ..ours()
+            },
+        );
+    remote
+        .files
+        .lock()
+        .unwrap()
+        .get_mut(BINARY)
+        .expect("preinstalled")
+        .bytes = b"last month's tty7-server".to_vec();
+    remote
+}
+
+#[test]
+fn a_plain_replace_keeps_a_same_dialect_server_it_finds() {
+    // The shortcut the forced path exists to skip, pinned so the two are seen
+    // to differ on the very same machine.
+    let remote = a_same_dialect_host_on_an_older_build();
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stale-box:22")
+        .replace()
+        .expect("replace restarts what is there");
+
+    assert!(release.fetched().is_empty(), "{:?}", release.fetched());
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        b"last month's tty7-server".to_vec()
+    );
+}
+
+#[test]
+fn a_forced_replace_uploads_over_a_same_dialect_server_and_restarts_into_it() {
+    let remote = a_same_dialect_host_on_an_older_build();
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stale-box:22")
+        .replace_forced()
+        .expect("an update installs even over a server that speaks our dialect");
+
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        SERVER_BYTES.to_vec(),
+        "this build's server replaced the one that was there"
+    );
+    assert!(
+        user.asked().is_empty(),
+        "a machine we already installed onto is not asked for consent again"
+    );
+    let journal = remote.journal();
+    let written = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Rename { from, to } if to == BINARY && from != BINARY))
+        .expect("the upload lands under a temp name and is renamed into place");
+    assert!(
+        !journal
+            .iter()
+            .any(|j| matches!(j, Journal::Put { path, .. } if path == BINARY)),
+        "never written in place over the file the running server was started from: {journal:?}"
+    );
+    let killed = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .expect("the old daemon is asked to stop");
+    let launched = journal
+        .iter()
+        .rposition(|j| *j == Journal::Launch)
+        .expect("and the new one started");
+    assert!(
+        written < killed && killed < launched,
+        "install, then stop, then start: {journal:?}"
+    );
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn a_forced_upload_that_speaks_the_wrong_dialect_leaves_the_running_server_alone() {
+    let remote = a_same_dialect_host_on_an_older_build().uploads_speaking(None);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@stale-box:22")
+        .replace_forced()
+        .expect_err("an upload that cannot prove its dialect is not published");
+
+    assert!(
+        matches!(err, InstallError::DialectMismatch { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        b"last month's tty7-server".to_vec(),
+        "the old server's file is untouched"
+    );
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
+        "and nothing was stopped"
+    );
 }
 
 #[test]
