@@ -150,8 +150,7 @@ impl Tty7App {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        self.open_settings_section(crate::ui::settings::SettingsSection::Ssh, window, cx);
-        self.add_new_profile(window, cx);
+        self.open_ssh_profile_form(SshProfile::new(String::new()), window, cx);
     }
 
     /// The connection in the focused pane, when it was dialled by hand rather
@@ -199,17 +198,18 @@ impl Tty7App {
     ) {
         let profile = profile_from_live_spec(spec);
         let jumped = spec.jump.is_some();
-        self.open_settings_section(crate::ui::settings::SettingsSection::Ssh, window, cx);
-        self.ssh_form_load(&profile, window, cx);
-        if jumped {
-            use gpui_component::WindowExt as _;
-            // Silently dropping the hop would leave a host that saves fine and
-            // then cannot be reached.
-            window.push_notification(
-                crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshSaveDroppedJumpHost),
-                cx,
-            );
-        }
+        self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+            this.open_ssh_profile_form(profile, window, cx);
+            if jumped {
+                use gpui_component::WindowExt as _;
+                // Silently dropping the hop would leave a host that saves fine and
+                // then cannot be reached.
+                window.push_notification(
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshSaveDroppedJumpHost),
+                    cx,
+                );
+            }
+        });
     }
 
     /// The host form for a machine you are looking at somewhere else: its own
@@ -234,12 +234,7 @@ impl Tty7App {
                     profile.id = Uuid::new_v4();
                     profile.name = alias.clone();
                     profile.group = None;
-                    self.open_settings_section(
-                        crate::ui::settings::SettingsSection::Ssh,
-                        window,
-                        cx,
-                    );
-                    self.ssh_form_load(&profile, window, cx);
+                    self.open_ssh_profile_form(profile, window, cx);
                 }
                 None => self.open_ssh_profile_new_from_target(alias.clone(), window, cx),
             },

@@ -14,32 +14,51 @@ section something is in.
 ## The eight sections
 
 <CardGroup cols={2}>
+  <Card title="General" icon="sliders">
+    Interface language, startup and layout restore, tray icon, default terminal,
+    command completion notifications, update preferences and proxy, and the
+    tty7 server.
+  </Card>
   <Card title="Appearance" icon="palette" href="/customization/themes">
-    Theme, sync with system, typography, cursor, transparency, language.
+    Theme and colors, interface and terminal fonts, cursor, background image,
+    transparency, and inactive panes.
   </Card>
   <Card title="Terminal" icon="terminal">
-    Shell and start directory, scrollback and scrolling, mouse, bell, per-pane
-    history.
+    Shell and starting directory, prompt editor, completion and command history,
+    scrollback, scrolling, bell, and opening links and files.
   </Card>
-  <Card title="Input" icon="keyboard">
-    Prompt features, selection & clipboard, keyboard (Option as Meta), links.
-  </Card>
-  <Card title="SSH" icon="server" href="/remote/ssh">
-    Hosts, defaults, security, and every per-profile field.
-  </Card>
-  <Card title="Agents" icon="robot" href="/agents/status">
-    Hook installation per agent and per machine, and the CLI on PATH.
+  <Card title="Keyboard & Mouse" icon="keyboard" href="/customization/keybindings">
+    Keyboard shortcuts, Option as Meta, mouse behavior, selection, and clipboard.
   </Card>
   <Card title="Window & Tabs" icon="window-maximize">
-    Startup window, tab bar position and grouping, notifications, tray icon.
+    Tab position and placement, sidebar grouping, and diff previews.
   </Card>
-  <Card title="Keybindings" icon="command" href="/customization/keybindings">
-    Every shortcut, the tmux preset, the prefix.
+  <Card title="SSH" icon="server" href="/remote/ssh">
+    Hosts, connection defaults, security, authentication, proxies, and forwarding.
+  </Card>
+  <Card title="Integrations" icon="robot" href="/agents/status">
+    AI agent hooks per machine and the tty7 command on PATH.
   </Card>
   <Card title="About" icon="circle-info" href="/reference/updates">
-    Version, update channel, and the updater.
+    App information, version, manual update checks, and available updates.
   </Card>
 </CardGroup>
+
+## Search and edit
+
+Search matches setting names, descriptions, English aliases, and configuration
+keys such as `mouse_zoom_modifier`. Ordinary results are editable directly;
+use the path above a result to open its category. SSH, theme editors, and
+keyboard shortcuts have dedicated views.
+
+Use **Modified only** to find settings that differ from their defaults. A
+modified setting offers **Reset setting**; installation and maintenance actions
+do not have a generic reset.
+
+Ordinary controls save automatically. Text fields commit valid values on Enter
+or when focus leaves the field. Custom theme edits are previewed until you save;
+cancel restores the original theme. SSH profiles also use explicit saving.
+Leaving an edited form offers save, discard, or continue editing.
 
 ## The settings file
 
@@ -75,7 +94,7 @@ The file is written atomically, and read forgivingly:
 
 ## Language
 
-**Settings → Appearance → Language** switches the interface between English,
+**Settings → General → Language** switches the interface between English,
 简体中文, and 日本語. The choice is explicit — the system language is never
 inferred — and CLI output stays English regardless, so agent and script
 integrations keep a stable surface.

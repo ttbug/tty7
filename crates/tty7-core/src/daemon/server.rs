@@ -306,6 +306,11 @@ macro_rules! startup_note {
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
+    // First, before a handoff is adopted: the re-exec keeps every inherited
+    // descriptor open, and adopting one marks it close-on-exec again.
+    #[cfg(target_os = "macos")]
+    crate::daemon::responsibility::disclaim_inherited();
+
     #[cfg(unix)]
     if let Some(inheritance) = crate::daemon::handoff::requested() {
         return run_adopting(inheritance);

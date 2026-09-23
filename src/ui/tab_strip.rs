@@ -543,10 +543,17 @@ pub(crate) fn chrome_tile_variant(cx: &gpui::App) -> ButtonCustomVariant {
 pub(crate) fn chrome_tile_variant_for(selected: bool, cx: &gpui::App) -> ButtonCustomVariant {
     ButtonCustomVariant::new(cx)
         .color(cx.theme().transparent)
+        // Resting chrome is *not* body ink. `sidebar_foreground` is the rung a
+        // tab title is written at, so a toolbar drawn in it made the two
+        // controls at the top of the rail the darkest marks in the whole
+        // sidebar — louder than the twenty rows they exist to act on, which is
+        // the opposite of how a native sidebar ranks itself. One rung down puts
+        // them level with the workspace chip beside them, and the hover fill
+        // this variant already carries is what answers the pointer.
         .foreground(if selected {
             cx.theme().foreground
         } else {
-            cx.theme().sidebar_foreground
+            cx.theme().muted_foreground
         })
         // `sidebar_accent` is the surface's *selected* step, and it was handed
         // to hover as well — so a hovered tile wore the fill of a selected one

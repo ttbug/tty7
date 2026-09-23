@@ -2,6 +2,24 @@ use super::L10nKey;
 
 pub fn translate_en(key: L10nKey) -> &'static str {
     match key {
+        L10nKey::SettingsSaveError => "Changes could not be saved: {error}",
+        L10nKey::SettingsRetrySave => "Retry saving",
+
+        L10nKey::SettingsNavGeneral => "General",
+        L10nKey::SettingsEditShortcuts => "Edit shortcuts…",
+        L10nKey::SettingsModifiedOnly => "Modified only",
+        L10nKey::SettingsModified => "Modified",
+        L10nKey::SettingsResetValue => "Reset to default",
+        L10nKey::SettingsSearchResults => "Search results",
+        L10nKey::SettingsOpenSetting => "Open setting",
+        L10nKey::SettingsNoModified => "No modified settings match this filter.",
+        L10nKey::SettingsTerminalFontGroup => "Terminal text",
+        L10nKey::SettingsInterfaceFontGroup => "Interface text",
+        L10nKey::SettingsUnsavedTitle => "Save changes before leaving?",
+        L10nKey::SettingsUnsavedBody => "Save your changes, discard them, or continue editing.",
+        L10nKey::SettingsSaveChanges => "Save changes",
+        L10nKey::SettingsThemeDraft => "Theme changes are previewed until you save.",
+
         L10nKey::SearchTabs => "Search tabs…",
         L10nKey::SearchFiles => "Search files…",
         L10nKey::SearchThemes => "Search themes…",
@@ -57,9 +75,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RememberKeychain => "Remember (keychain)",
         L10nKey::Cancel => "Cancel",
         L10nKey::Close => "Close",
-        L10nKey::QuitStopServerTitle => "Quit and Stop Server?",
+        L10nKey::QuitStopServerTitle => "Quit and stop tty7 server?",
         L10nKey::QuitStopServerBody => {
-            "This quits tty7 and stops the background server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires tty7 to the tray — the shells keep running.)"
+            "This quits tty7 and stops tty7 server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires tty7 to the tray — the shells keep running.)"
         }
         L10nKey::QuitAndStop => "Quit and Stop",
         L10nKey::CloseSshConnectionTitle => "Close this SSH connection?",
@@ -71,11 +89,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Keep => "Keep",
         L10nKey::SettingsNavAppearance => "Appearance",
         L10nKey::SettingsNavTerminal => "Terminal",
-        L10nKey::SettingsNavInput => "Input",
+        L10nKey::SettingsNavInput => "Keyboard & Mouse",
         L10nKey::SettingsNavSsh => "SSH",
-        L10nKey::SettingsNavAgents => "Agents",
+        L10nKey::SettingsNavAgents => "Integrations",
         L10nKey::SettingsNavWindowTabs => "Window & Tabs",
-        L10nKey::SettingsNavKeybindings => "Keybindings",
+        L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
         L10nKey::Reset => "Reset",
@@ -88,20 +106,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Pick a color theme. Each one sets its own light or dark look."
         }
         L10nKey::SettingsTypography => "Typography",
-        L10nKey::SettingsFontSize => "Font size",
+        L10nKey::SettingsFontSize => "Terminal font size",
         L10nKey::SettingsFontSizeDesc => "Terminal text size in pixels.",
         L10nKey::SettingsUiFontSize => "Interface font size",
         L10nKey::SettingsUiFontSizeDesc => {
             "Text size everywhere outside the terminal — tabs, panels and settings. \
              Raise it on a display that is not Retina."
         }
-        L10nKey::SettingsUiFontFamily => "Interface font family",
+        L10nKey::SettingsUiFontFamily => "Interface font",
         L10nKey::SettingsUiFontFamilyDesc => {
             "Face used for tabs, sidebars, dialogs and settings; Default uses the system UI font."
         }
         L10nKey::SettingsLineHeight => "Line height",
         L10nKey::SettingsLineHeightDesc => "Row spacing as a multiple of the font size.",
-        L10nKey::SettingsFontFamily => "Font family",
+        L10nKey::SettingsFontFamily => "Terminal font",
         L10nKey::SettingsFontFamilyDesc => "Pick from fonts installed on your system.",
         L10nKey::SettingsBoldFont => "Bold font",
         L10nKey::SettingsBoldFontDesc => {
@@ -400,20 +418,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsOff => "Off",
         L10nKey::SettingsShell => "Shell",
         L10nKey::SettingsShellIntro => {
-            "The program each new terminal launches. Leave Program empty to use the platform default ({default})."
+            "The program each new terminal launches. Leave Shell program empty to use the platform default ({default})."
         }
-        L10nKey::SettingsProgram => "Program",
+        L10nKey::SettingsProgram => "Shell program",
         L10nKey::SettingsProgramDesc => {
             "Executable name on PATH or an absolute path (e.g. zsh, fish, pwsh)."
         }
-        L10nKey::SettingsArguments => "Arguments",
+        L10nKey::SettingsArguments => "Shell arguments",
         L10nKey::SettingsArgumentsDesc => {
             "Launch flags, split like a command line — quote anything containing spaces (e.g. -l, or -c \"echo hi\")."
         }
         L10nKey::SettingsArgumentsInvalid => {
             "The quotes do not balance — this value was not saved."
         }
-        L10nKey::SettingsStartIn => "Start in",
+        L10nKey::SettingsStartIn => "Starting directory",
         L10nKey::SettingsStartInDesc => {
             "What a fresh shell starts in: tty7's launch directory, your home folder, or a fixed path."
         }
@@ -429,7 +447,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Applies to shells with nothing to inherit, like a window's first tab. New tabs and splits still inherit the active pane's directory; open shells keep running."
         }
         L10nKey::SettingsScrolling => "Scrolling",
-        L10nKey::SettingsScrollback => "Scrollback",
+        L10nKey::SettingsScrollback => "Scrollback buffer",
         L10nKey::SettingsScrollbackDesc => "Lines of history kept per pane. Applies to new panes.",
         L10nKey::SettingsScrollSpeed => "Scroll speed",
         L10nKey::SettingsScrollSpeedDesc => "Multiplier applied to mouse-wheel scrolling.",
@@ -491,11 +509,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeVisual => "Visual",
         L10nKey::SettingsBellModeAudible => "Audible",
         L10nKey::SettingsBellModeBoth => "Both",
-        L10nKey::SettingsPrompt => "Prompt",
+        L10nKey::SettingsPrompt => "Prompt & command history",
         L10nKey::SettingsPromptIntro => {
             "tty7's own editor and menus at the shell prompt. Turn one off to hand that much back to the shell."
         }
-        L10nKey::SettingsPromptEditor => "Prompt editor",
+        L10nKey::SettingsPromptEditor => "tty7 prompt editor",
         L10nKey::SettingsPromptEditorDesc => {
             "tty7 edits the line you type at the shell prompt: selection, undo, and the menus below. Off hands the prompt back to the shell's own editor — ZLE, readline, fish."
         }
@@ -506,7 +524,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTabCompletionDesc => {
             "Tab at the prompt opens tty7's completion menu. When off, Tab goes to the shell's own completion instead."
         }
-        L10nKey::SettingsHistorySearch => "History search",
+        L10nKey::SettingsHistorySearch => "Command history search",
         L10nKey::SettingsHistorySearchDesc => {
             "⌃R at the prompt opens tty7's fuzzy history menu. Off sends ⌃R to the shell — its own reverse-i-search, or whatever you bound there (fzf, percol)."
         }
@@ -532,7 +550,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsOptionAsMetaDesc => {
             "⌥+key sends the escape chord shells expect (⌥B = back one word) instead of typing a special character (∫)."
         }
-        L10nKey::SettingsAgentsIntro => "Agents",
+        L10nKey::SettingsAgentsIntro => "AI agents",
         L10nKey::SettingsAgentsIntroDesc => {
             "Hooks give panes running these agents live status (working / waiting / done) in the tab bar. Only inside tty7."
         }
@@ -605,11 +623,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNotifyOnCommandFinishDesc => {
             "Desktop alert after a long foreground command completes."
         }
-        L10nKey::SettingsNotifyThreshold => "Notify threshold",
+        L10nKey::SettingsNotifyThreshold => "Minimum command duration",
         L10nKey::SettingsNotifyThresholdDesc => {
-            "How long a command must run to qualify as \"long\"."
+            "Notify only when a command runs for at least this long."
         }
-        L10nKey::SettingsWindow => "Window",
+        L10nKey::SettingsWindow => "Startup & restore",
         L10nKey::NotifyModeNever => "Never",
         L10nKey::NotifyModeUnfocused => "When unfocused",
         L10nKey::NotifyModeAlways => "Always",
@@ -693,16 +711,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsUpdateChannelStable => "Stable",
         L10nKey::SettingsUpdateChannelNightly => "Nightly",
-        L10nKey::SettingsDaemonStale => "The background server is still running {build}.",
+        L10nKey::SettingsDaemonStale => "tty7 server is still running {build}.",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 was updated in place: the app is new, your panes are still served by the old build. Restarting the server picks up the new one and ends everything running in your panes. No hurry — do it when they're idle."
+            "tty7 was updated in place: the app is new, your panes are still served by the old build. Restarting tty7 server picks up the new one and ends everything running in your panes. No hurry — do it when they're idle."
         }
         L10nKey::UpdateDialogTitle => "Update available",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} is available — you're on {current}. Installing restarts the app; the background server keeps running, so your panes survive."
+            "tty7 {version} is available — you're on {current}. Installing restarts the app; tty7 server keeps running, so your panes survive."
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} is available — you're on {current}. Installing restarts the app and the background service: processes in your panes are ended, and your tabs and layout come back with fresh shells."
+            "tty7 {version} is available — you're on {current}. Installing restarts the app and tty7 server: processes in your panes are ended, and your tabs and layout come back with fresh shells."
         }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} is available — you're on {current}. {hint}"
@@ -747,14 +765,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCheckUpdatesOnLaunch => "Check for updates on launch",
         L10nKey::SettingsCommandLine => "Command line",
         L10nKey::SettingsCommandLineDesc => {
-            "Put the bundled tty7 command on your PATH, so scripts and agents can drive tty7 from any terminal — inside a pane it works either way. Turn off to keep your own build unshadowed. Applies at next launch."
+            "Make the bundled tty7 command available to scripts and AI agents. Takes effect on the next launch; turning this off does not remove an existing installation."
         }
         L10nKey::SettingsInstallCliOnPath => "Install the tty7 command on PATH",
-        L10nKey::SettingsServer => "Server",
+        L10nKey::SettingsServer => "tty7 server",
         L10nKey::SettingsServerDesc => {
-            "Restarts the background server that keeps your shells running. Every shell on this computer ends; your tabs and layout reopen with fresh ones."
+            "Manages terminal sessions on this computer and keeps them running in the background."
         }
-        L10nKey::SettingsRestartServer => "Restart server…",
+        L10nKey::SettingsRestartServer => "Restart tty7 server…",
         L10nKey::SettingsAppHttpProxy => "Proxy for updates",
         L10nKey::SettingsAppHttpProxyDesc => {
             "Used only for tty7's update checks and downloads, not for programs in your panes. Empty follows the system proxy."
@@ -842,7 +860,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchKeybindingsKeywords => {
             "shortcut hotkey keyboard binding chord tmux preset rebind prefix"
         }
-        L10nKey::SettingsSearchKeybindingsTitle => "Keybindings",
+        L10nKey::SettingsSearchKeybindingsTitle => "Keyboard shortcuts",
         L10nKey::SettingsSearchLineHeightKeywords => "typography leading spacing",
         L10nKey::SettingsSearchUiFontFamilyKeywords => {
             "interface font family ui typeface typography chrome sidebar tab"
@@ -956,7 +974,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherNoMatch => "No workspace or machine matches.",
         L10nKey::AddSshHost => "Add SSH Host…",
         L10nKey::ClickForNewWindow => "click for a new window",
-        L10nKey::RestartServer => "Restart Server",
+        L10nKey::RestartServer => "Restart tty7 server",
         L10nKey::OtherMachines => "Other Machines",
         L10nKey::Ok => "OK",
         L10nKey::SftpNoTransfers => "No transfers yet.",
@@ -1440,7 +1458,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::IoBusy => "Something else has it open.",
         L10nKey::IoTimedOut => "The machine did not answer in time.",
         L10nKey::TreeWindowOpenedEmpty => {
-            "The server never handed over this window's tabs, so it opened empty. Nothing was lost — they come back when it answers. If it doesn't, run \"Restart Server\" from the command palette."
+            "The server never handed over this window's tabs, so it opened empty. Nothing was lost — they come back when it answers. If it doesn't, run \"Restart tty7 server\" from the command palette."
         }
         L10nKey::CmdGroupTabsPanes => "Tabs & Panes",
         L10nKey::CmdGroupWorkspaces => "Workspaces",
@@ -1554,26 +1572,26 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdDocumentation => "Documentation",
         L10nKey::CmdJoinDiscord => "Join the Discord",
         L10nKey::CmdReportIssue => "Report an Issue…",
-        L10nKey::CmdRestartServer => "Restart Server…",
+        L10nKey::CmdRestartServer => "Restart tty7 server…",
         L10nKey::CmdRestartServerSubtitle => "ends every running shell; layout is kept",
         L10nKey::CmdQuitTty7 => "Quit tty7",
         L10nKey::CmdQuitTty7Subtitle => "stops the server; every running shell ends",
         L10nKey::CmdQuickConnect => "Connect to \"{target}\"",
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",
-        L10nKey::AppRestartServerTitle => "Restart Server?",
-        L10nKey::AppRestartServerFailed => "Could not restart the background server: {error}",
+        L10nKey::AppRestartServerTitle => "Restart tty7 server?",
+        L10nKey::AppRestartServerFailed => "Could not restart tty7 server: {error}",
         L10nKey::AppRestartServerMismatchDetail => {
-            "The server holding your shells speaks protocol {protocol} (build v{build}); this app speaks {ours}, so your tabs are out of reach.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
+            "tty7 server holding your shells speaks protocol {protocol} (build v{build}); this app speaks {ours}, so your tabs are out of reach.\n\nQuit: nothing changes — tty7 server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "The server holding your shells speaks control dialect v{dialect} (build v{build}); this app speaks v{ours}, so every window opens empty.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
+            "tty7 server holding your shells speaks control dialect v{dialect} (build v{build}); this app speaks v{ours}, so every window opens empty.\n\nQuit: nothing changes — tty7 server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "The server holding your shells speaks control dialect v{dialect} (build v{build}); this app speaks v{ours}, so every window opens empty.\n\nQuit and install the newer build: the real fix — your shells survive it.\nRestart: tabs come back with fresh shells; anything running now is killed."
+            "tty7 server holding your shells speaks control dialect v{dialect} (build v{build}); this app speaks v{ours}, so every window opens empty.\n\nQuit and install the newer build: the real fix — your shells survive it.\nRestart: tabs come back with fresh shells; anything running now is killed."
         }
         L10nKey::AppRestartServerOldDetail => {
-            "The server holding your shells predates the version handshake, so this app can't tell what it speaks.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
+            "tty7 server holding your shells predates the version handshake, so this app can't tell what it speaks.\n\nQuit: nothing changes — tty7 server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
         }
         L10nKey::AppRestart => "Restart",
         L10nKey::AppRestartServerNoServer => {
@@ -1719,15 +1737,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Replace => "Replace",
         L10nKey::SftpErrorInvalidOctalMode => "invalid octal mode",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 was updated in place: the app is new, your panes still run on the old build. The server can swap itself for the new one without stopping, so your shells carry straight over. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
+            "tty7 was updated in place: the app is new, your panes still run on the old build. tty7 server can swap itself for the new one without stopping, so your shells carry straight over. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "The server swaps itself for this build in place: your shells keep running, and the window reconnects a moment later. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
+            "tty7 server swaps itself for this build in place: your shells keep running, and the window reconnects a moment later. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
         }
         L10nKey::PaneRestoredScreenBanner => {
             "restored screen — this shell is new, nothing above it is still running"
         }
-        L10nKey::SettingsPerPaneHistory => "Give each pane its own shell history",
+        L10nKey::SettingsPerPaneHistory => "Separate command history per pane",
         L10nKey::SettingsPerPaneHistoryDescription => {
             "Up walks through what you ran in this pane, not every pane interleaved. A new pane starts from your existing history and writes back what it adds when it closes. Applies to bash and zsh panes tty7 can set up; a shell started with your own arguments is left alone."
         }
@@ -1813,7 +1831,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuKeyboardShortcuts => "Keyboard Shortcuts",
         L10nKey::AppMenuJoinDiscord => "Join the Discord",
         L10nKey::AppMenuReportIssue => "Report an Issue…",
-        L10nKey::AppMenuRestartServer => "Restart Server…",
+        L10nKey::AppMenuRestartServer => "Restart tty7 server…",
         L10nKey::WindowUntitled => "Untitled",
         L10nKey::TrayShowTty7 => "Show tty7",
         L10nKey::TrayNotifications => "Notifications",
@@ -1853,7 +1871,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuEnterFullscreen => "Enter Full Screen",
         L10nKey::HomeTimeOverWeekAgo => "over a week ago",
         L10nKey::Search => "Search",
-        L10nKey::SettingsDaemonStaleRestart => "Restart Service",
+        L10nKey::SettingsDaemonStaleRestart => "Restart tty7 server",
         L10nKey::SettingsNoneLower => "none",
         L10nKey::SettingsSearchCommandLineToolTitle => "Command line tool",
         L10nKey::TabContextMarkUnread => "Mark as Unread",

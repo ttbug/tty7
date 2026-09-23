@@ -28,7 +28,7 @@ runs it. <kbd>Esc</kbd> closes without touching it.
 ### Handing <kbd>⌃ R</kbd> back
 
 If you already have an fzf, percol, atuin or McFly binding you like, turn off
-**Settings → Input → Prompt → History search** (`history_search: false`).
+**Settings → Terminal → Prompt & command history → Command history search** (`history_search: false`).
 <kbd>⌃ R</kbd> then goes to the shell, and whatever you bound there keeps
 working.
 
@@ -52,7 +52,7 @@ never seen still appears; it just arrives without a timestamp or an exit code.
 By default every pane shares your shell's history file, which is what a terminal
 has always done: a command typed in one pane is available in the next.
 
-**Settings → Input → Prompt → Give each pane its own shell history**
+**Settings → Terminal → Prompt & command history → Separate command history per pane**
 (`per_pane_history: true`) changes that. Each pane gets a private history file:
 
 - **seeded** from your real history when the pane opens, so it is not blank

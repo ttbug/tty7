@@ -45,7 +45,7 @@ inheriting the active pane's directory either way.
 
 ## 3. macOS only: decide what Option does
 
-**Settings → Input → Keyboard → Option (⌥) acts as Meta.**
+**Settings → Keyboard & Mouse → Keyboard → Option (⌥) acts as Meta.**
 
 Off (the default), <kbd>⌥ B</kbd> types `∫`, which is what macOS has always
 done. On, it sends the escape chord shells expect, so <kbd>⌥ B</kbd> moves back
@@ -54,7 +54,7 @@ leave it off if you type accented characters.
 
 ## 4. If you use coding agents, install the hooks
 
-**Settings → Agents.** tty7 detects 22 coding CLIs by process name on its own —
+**Settings → Integrations.** tty7 detects 22 coding CLIs by process name on its own —
 you get brand avatars and tab labels for free. The *status dots*, the "needs
 your permission" notifications, and `tty7 wait` all need one more thing: a small
 hook the agent calls to report what it is doing.
@@ -84,7 +84,7 @@ shells.
 
 ## 6. Tune the notifications
 
-**Settings → Window & Tabs → Notifications.** By default tty7 posts a desktop
+**Settings → General → Notifications.** By default tty7 posts a desktop
 notification when a foreground command that ran longer than 10 seconds
 finishes — but only while the window is unfocused. Set **Notify on command
 finish** to *Never* or *Always*, and move the threshold if 10 seconds is the
@@ -95,7 +95,7 @@ same policy.
 
 ## 7. Coming from tmux?
 
-**Settings → Keybindings → Preset → tmux** remaps pane and tab actions onto a
+**Settings → Keyboard & Mouse → Keyboard shortcuts → Preset → tmux** remaps pane and tab actions onto a
 prefix, <kbd>⌃ B</kbd> by default. <kbd>⌃ B</kbd> <kbd>C</kbd> opens a tab,
 <kbd>⌃ B</kbd> <kbd>%</kbd> splits, <kbd>⌃ B</kbd> then an arrow moves focus.
 

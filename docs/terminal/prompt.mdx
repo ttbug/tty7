@@ -42,8 +42,8 @@ build up first, and it carries across sessions and reboots.
 When tty7 has nothing useful to offer, the <kbd>⇥</kbd> falls through to your
 shell's own completion, so a carefully configured zsh setup is not lost.
 
-To hand <kbd>⇥</kbd> back to the shell entirely, turn off **Settings → Input →
-Prompt → Tab completion** (`tab_completion` in `config.json`).
+To hand <kbd>⇥</kbd> back to the shell entirely, turn off **Settings → Terminal →
+Prompt & command history → Tab completion** (`tab_completion` in `config.json`).
 
 ## Syntax highlighting
 
@@ -63,7 +63,7 @@ The prompt behaves like a text field, because it is one:
 Everything readline does still works — this sits on top, it does not replace it.
 
 <Tip>
-  On macOS, turn on **Settings → Input → Keyboard → Option (⌥) acts as Meta** if
+  On macOS, turn on **Settings → Keyboard & Mouse → Keyboard → Option (⌥) acts as Meta** if
   you want <kbd>⌥ B</kbd> / <kbd>⌥ F</kbd> to move by word instead of typing
   `∫` and `ƒ`.
 </Tip>
@@ -126,12 +126,12 @@ to the shell:
 
 | Setting | Key it releases |
 |---|---|
-| **Settings → Input → Prompt → Tab completion** | <kbd>⇥</kbd> → your shell's completion |
-| **Settings → Input → Prompt → History search** | <kbd>⌃ R</kbd> → your shell's reverse-i-search, or your fzf binding |
+| **Settings → Terminal → Prompt & command history → Tab completion** | <kbd>⇥</kbd> → your shell's completion |
+| **Settings → Terminal → Prompt & command history → Command history search** | <kbd>⌃ R</kbd> → your shell's reverse-i-search, or your fzf binding |
 
 ### Giving the whole prompt back to the shell
 
-Turning off **Settings → Input → Prompt → Prompt editor**
+Turning off **Settings → Terminal → Prompt & command history → tty7 prompt editor**
 (`prompt_editor: false`) hands over not one key but the line itself. Every
 keystroke at the prompt — printable characters, arrows, IME commits, paste — goes
 straight to the PTY, and your shell's own line editor does the editing: zsh's

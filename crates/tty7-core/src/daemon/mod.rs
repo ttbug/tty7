@@ -15,6 +15,9 @@ pub mod procinfo;
 pub mod protocol;
 pub(crate) mod remote;
 pub mod remote_link;
+/// Disclaiming the launcher's privacy attribution at startup (#909).
+#[cfg(target_os = "macos")]
+pub mod responsibility;
 pub mod router;
 pub mod scrollback;
 pub mod server;

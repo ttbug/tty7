@@ -17,7 +17,7 @@ machine links exist. Most of what follows is a specific answer this gives you.
 
 The CLI is put on PATH the first time the app launches. If it is missing:
 
-- Check **Settings → Agents → Install the tty7 command on PATH** is on.
+- Check **Settings → Integrations → Install the tty7 command on PATH** is on.
 - On Unix it symlinks into whichever of `/opt/homebrew/bin`, `/usr/local/bin`,
   `~/.local/bin`, `~/bin`, `~/.cargo/bin` your PATH already covers — if none of
   those are on your PATH, add one.
@@ -77,8 +77,8 @@ the local server already holds. Connect from the GUI first.
 Both are switches, and turning one off hands the key straight back to your
 shell:
 
-- **Settings → Input → Prompt → Tab completion**
-- **Settings → Input → Prompt → History search**
+- **Settings → Terminal → Prompt & command history → Tab completion**
+- **Settings → Terminal → Prompt & command history → Command history search**
 
 If they do nothing at all in a particular pane, the shell there probably has no
 [shell integration](/reference/shell-integration) — elvish, xonsh and friends
@@ -157,7 +157,7 @@ on the far end) or for a local pane on **Windows**.
 
 ## <kbd>⌥ B</kbd> types `∫` instead of moving a word
 
-That is macOS's default. Turn on **Settings → Input → Keyboard → Option (⌥) acts
+That is macOS's default. Turn on **Settings → Keyboard & Mouse → Keyboard → Option (⌥) acts
 as Meta**.
 
 ## CJK characters have a gap on the right
@@ -187,7 +187,7 @@ If the file cannot be parsed, tty7 starts on defaults and keeps your original at
 ## Selecting text inside vim / less selects the app's own thing
 
 Hold <kbd>⇧</kbd> while dragging to keep the gesture local, or turn off
-**Settings → Terminal → Mouse → Report mouse to apps**.
+**Settings → Keyboard & Mouse → Mouse → Report mouse to apps**.
 
 ## `tty7 capture … | head -1` printed a Rust panic
 

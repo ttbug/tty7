@@ -866,6 +866,7 @@ pub struct Tty7App {
     /// the live search matched, so exactly one row per page carries the anchor
     /// the page scrolls to.
     pub(crate) settings_hit_anchored: Cell<bool>,
+    last_settings_location: (SettingsSection, gpui::Point<gpui::Pixels>),
     pub(crate) right_panel_width: Rc<Cell<f32>>,
     pub(crate) right_panel_dragging: Rc<Cell<bool>>,
     /// The docked document column's share of the terminal column, live. Held
@@ -1501,6 +1502,7 @@ impl Tty7App {
             settings_row_width: Cell::new(f32::MAX),
             settings_viewport_w: Cell::new(f32::MAX),
             settings_hit_anchored: Cell::new(false),
+            last_settings_location: (SettingsSection::General, gpui::point(px(0.), px(0.))),
             right_panel_width: Rc::new(Cell::new(right_panel_width)),
             right_panel_dragging: Rc::new(Cell::new(false)),
             document_ratio: Rc::new(Cell::new(document_ratio)),
@@ -2174,7 +2176,7 @@ impl Tty7App {
         }
         let cfg = cx.global_mut::<Config>();
         cfg.font_size = size;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -2194,7 +2196,7 @@ impl Tty7App {
             return;
         }
         cfg.ui_font_size = size;
-        cfg.save();
+        self.persist_settings_config(cx);
         // Unlike the settings that only redraw the window they were changed
         // in, this one re-lays-out every open window, and each reads the new
         // rem from the global on its own next frame.
@@ -2227,7 +2229,7 @@ impl Tty7App {
         }
         let cfg = cx.global_mut::<Config>();
         cfg.line_height = mul;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -2240,6 +2242,13 @@ impl Tty7App {
     }
 
     pub(crate) fn set_preset(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_draft_dirty() {
+            let id = id.to_string();
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.set_preset(&id, window, cx)
+            });
+            return;
+        }
         // A confirmed pick ends any preview: there is nothing left to roll back.
         self.theme_preview_restore = None;
         self.write_preset(id, cx);
@@ -2287,6 +2296,13 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.theme_draft_dirty() {
+            let id = id.to_string();
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.set_slot_preset(dark_slot, &id, window, cx)
+            });
+            return;
+        }
         let cfg = cx.global_mut::<Config>();
         if dark_slot {
             cfg.theme_preset_dark = id.to_string();
@@ -2302,6 +2318,12 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.set_theme_follow_system(on, window, cx)
+            });
+            return;
+        }
         if on {
             let manual = cx.global::<Config>().theme_preset.clone();
             let manual_dark = crate::ui::presets::by_id(cx, &manual).dark;
@@ -2354,7 +2376,7 @@ impl Tty7App {
         apply_theme(Some(window), cx);
         set_menus(cx);
         if persist {
-            cx.global::<Config>().save();
+            self.persist_settings_config(cx);
         }
         self.rebuild_theme_editor(window, cx);
         self.sync_window_opacity_slider(window, cx);
@@ -2456,6 +2478,54 @@ impl Tty7App {
         }
     }
 
+    pub(crate) fn theme_draft_dirty(&self) -> bool {
+        self.active_settings()
+            .is_some_and(|s| s.theme_draft.is_some())
+    }
+
+    pub(crate) fn save_theme_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((_, draft)) = self.active_settings().and_then(|s| s.theme_draft.clone()) else {
+            return true;
+        };
+        if let Err(error) = crate::ui::presets::write_theme_file(&draft) {
+            if let Some(s) = self.active_settings_mut() {
+                s.theme_draft_error = Some(error.to_string());
+            }
+            crate::ui::host_ops::HostOps::notify_err(
+                window,
+                cx,
+                t(L10nKey::ThemeSaveFailed),
+                &error,
+            );
+            return false;
+        }
+        if let Some(s) = self.active_settings_mut() {
+            s.theme_draft = None;
+            s.theme_draft_error = None;
+        }
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn cancel_theme_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.theme_draft_error = None;
+        }
+        if let Some((original, _)) = self
+            .active_settings_mut()
+            .and_then(|s| s.theme_draft.take())
+        {
+            let mut themes = crate::ui::presets::all(cx);
+            if let Some(slot) = themes.iter_mut().find(|t| t.id == original.id) {
+                *slot = original;
+            }
+            cx.set_global(crate::ui::presets::Themes(themes));
+            apply_theme(Some(window), cx);
+            self.rebuild_theme_editor(window, cx);
+            cx.notify();
+        }
+    }
+
     fn mutate_active_theme(
         &mut self,
         mutate: impl FnOnce(&mut crate::ui::presets::Theme),
@@ -2468,14 +2538,35 @@ impl Tty7App {
             return;
         }
         mutate(&mut theme);
-        if let Err(e) = crate::ui::presets::write_theme_file(&theme) {
-            // Every colour edit runs through here. Without this the picker
-            // moves, the theme does not, and nothing says why.
-            log::warn!("failed to write theme file: {e}");
-            crate::ui::host_ops::HostOps::notify_err(window, cx, t(L10nKey::ThemeSaveFailed), &e);
-            return;
+        if let Some(state) = self.active_settings_mut() {
+            let original = state
+                .theme_draft
+                .as_ref()
+                .filter(|(original, _)| original.id == id)
+                .map(|(original, _)| original.clone())
+                .unwrap_or_else(|| crate::ui::presets::by_id(cx, &id));
+            if crate::ui::presets::to_yaml(&original) == crate::ui::presets::to_yaml(&theme) {
+                state.theme_draft = None;
+            } else {
+                state.theme_draft = Some((original, theme.clone()));
+            }
+            let mut themes = crate::ui::presets::all(cx);
+            if let Some(slot) = themes.iter_mut().find(|t| t.id == id) {
+                *slot = theme;
+            }
+            cx.set_global(crate::ui::presets::Themes(themes));
+        } else {
+            if let Err(error) = crate::ui::presets::write_theme_file(&theme) {
+                crate::ui::host_ops::HostOps::notify_err(
+                    window,
+                    cx,
+                    t(L10nKey::ThemeSaveFailed),
+                    &error,
+                );
+                return;
+            }
+            crate::ui::presets::load_registry(cx);
         }
-        crate::ui::presets::load_registry(cx);
         apply_theme(Some(window), cx);
         cx.notify();
     }
@@ -2519,7 +2610,7 @@ impl Tty7App {
     ) {
         cx.global_mut::<Config>().window_opacity = Some(v.clamp(0.2, 1.0));
         apply_theme(Some(window), cx);
-        cx.global::<Config>().save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -2531,7 +2622,7 @@ impl Tty7App {
     ) {
         cx.global_mut::<Config>().window_blur = Some(on);
         apply_theme(Some(window), cx);
-        cx.global::<Config>().save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -2544,7 +2635,7 @@ impl Tty7App {
     ) {
         cx.global_mut::<Config>().window_backdrop = backdrop;
         apply_theme(Some(window), cx);
-        cx.global::<Config>().save();
+        self.persist_settings_config(cx);
         // A material changes the default opacity (SYSTEM_MATERIAL_OPACITY
         // vs 1.0), so the slider must track the new effective value.
         self.sync_window_opacity_slider(window, cx);
@@ -2562,7 +2653,7 @@ impl Tty7App {
             clear_window_override_values(config, cfg!(target_os = "windows"));
         }
         apply_theme(Some(window), cx);
-        cx.global::<Config>().save();
+        self.persist_settings_config(cx);
         self.sync_window_opacity_slider(window, cx);
         #[cfg(target_os = "windows")]
         self.sync_window_backdrop_select(window, cx);
@@ -2760,7 +2851,7 @@ impl Tty7App {
         }
         let cfg = cx.global_mut::<Config>();
         cfg.font_features = features;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -2783,15 +2874,42 @@ impl Tty7App {
         self.apply_terminal_config_to_panes(&cfg, cx);
     }
 
+    pub(crate) fn persist_settings_config(&mut self, cx: &mut Context<Self>) {
+        let config = cx.global::<Config>().clone();
+        let error = config.try_save().err().map(|error| error.to_string());
+        if let Some(message) = &error {
+            log::warn!("failed to save settings: {message}");
+        }
+        if let Some(s) = self.active_settings_mut() {
+            if error.is_none() {
+                s.saved_config = config;
+            }
+            s.save_error = error;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn discard_unsaved_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self
+            .active_settings()
+            .filter(|s| s.save_error.is_some())
+            .map(|s| s.saved_config.clone());
+        if let Some(snapshot) = snapshot {
+            cx.set_global(snapshot);
+            if let Some(s) = self.active_settings_mut() {
+                s.save_error = None;
+            }
+            self.reload_from_config(window, cx);
+        }
+    }
+
     pub(crate) fn update_config(
         &mut self,
         cx: &mut Context<Self>,
         mutate: impl FnOnce(&mut Config),
     ) {
-        let cfg = cx.global_mut::<Config>();
-        mutate(cfg);
-        cfg.save();
-        cx.notify();
+        mutate(cx.global_mut::<Config>());
+        self.persist_settings_config(cx);
     }
 
     pub(crate) fn set_link_url(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -5586,6 +5704,246 @@ impl Tty7App {
         );
     }
 
+    pub(crate) fn reset_settings_value(
+        &mut self,
+        title: L10nKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let defaults = Config::default();
+        match title {
+            L10nKey::SettingsDimInactivePanes => {
+                self.set_dim_inactive_panes(defaults.dim_inactive_panes, cx)
+            }
+            L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
+            L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
+            L10nKey::SettingsScrollback => self.set_scrollback_limit(defaults.scrollback_limit, cx),
+            L10nKey::SettingsNewTabPosition => {
+                self.set_new_tab_position(defaults.new_tab_position, cx)
+            }
+            L10nKey::SettingsTabBarPosition => {
+                self.set_tab_bar_position(defaults.tab_bar_position, cx)
+            }
+            L10nKey::SettingsSidebarGrouping => {
+                self.set_sidebar_grouping(defaults.sidebar_grouping, cx)
+            }
+            L10nKey::SettingsDiffPreviewFromCounts => {
+                self.set_sidebar_diff_preview(defaults.sidebar_diff_preview, cx)
+            }
+            L10nKey::SettingsNotifyOnCommandFinish => {
+                self.set_notify_mode(defaults.notify_on_command_finish, cx)
+            }
+            L10nKey::SettingsNotifyThreshold => {
+                self.set_notify_threshold(defaults.notify_threshold_secs, cx)
+            }
+            L10nKey::SettingsTerminalBell => self.set_bell_mode(defaults.bell, cx),
+            L10nKey::SettingsRestoreLastLayout => {
+                self.set_restore_session(defaults.restore_session, cx)
+            }
+            L10nKey::SettingsPerPaneHistory => {
+                self.set_per_pane_history(defaults.per_pane_history, cx)
+            }
+            L10nKey::SettingsShowTrayIcon => self.set_show_tray_icon(defaults.show_tray_icon, cx),
+            L10nKey::SettingsOptionAsMeta => {
+                self.set_macos_option_as_alt(defaults.macos_option_as_alt, cx)
+            }
+            L10nKey::SettingsHideMouseWhileTyping => {
+                self.set_mouse_hide_while_typing(defaults.mouse_hide_while_typing, cx)
+            }
+            L10nKey::SettingsFocusFollowsMouse => {
+                self.set_focus_follows_mouse(defaults.focus_follows_mouse, cx)
+            }
+            L10nKey::SettingsReportMouseToApps => {
+                self.set_mouse_reporting(defaults.mouse_reporting, cx)
+            }
+            L10nKey::SettingsScrollSpeed => {
+                self.set_mouse_scroll_multiplier(defaults.mouse_scroll_multiplier, cx)
+            }
+            L10nKey::SettingsSmoothScroll => self.set_smooth_scroll(defaults.smooth_scroll, cx),
+            L10nKey::SettingsMouseZoom => {
+                self.set_mouse_zoom_modifier(defaults.mouse_zoom_modifier, cx)
+            }
+            L10nKey::SettingsTrimTrailingSpaces => {
+                self.set_clipboard_trim(defaults.clipboard_trim_trailing_spaces, cx)
+            }
+            L10nKey::SettingsCopyOnSelect => self.set_copy_on_select(defaults.copy_on_select, cx),
+            L10nKey::SettingsSmartSelection => self.set_smart_select(defaults.smart_select, cx),
+            L10nKey::SettingsPromptEditor => self.set_prompt_editor(defaults.prompt_editor, cx),
+            L10nKey::SettingsTabCompletion => self.set_tab_completion(defaults.tab_completion, cx),
+            L10nKey::SettingsHistorySearch => self.set_history_search(defaults.history_search, cx),
+            L10nKey::SettingsStartupWindow => self.set_startup_mode(defaults.startup_mode, cx),
+            L10nKey::SettingsRememberWindowSize => {
+                self.set_remember_window_size(defaults.remember_window_size, cx)
+            }
+            L10nKey::SettingsCheckUpdatesOnLaunch => {
+                self.set_check_for_updates(defaults.check_for_updates, cx)
+            }
+            L10nKey::SettingsAutoDownload => {
+                self.set_auto_download_updates(defaults.auto_download_updates, cx)
+            }
+            L10nKey::SettingsUpdateChannel => self.set_update_channel(defaults.update_channel, cx),
+            L10nKey::DetectUrls => self.set_link_url(defaults.link_url, cx),
+            L10nKey::ForwardSshLoopbackLinks => {
+                self.set_ssh_loopback_forward(defaults.ssh_loopback_forward, cx)
+            }
+            L10nKey::SettingsVerifyHostKeys => {
+                self.set_verify_host_keys(defaults.verify_host_keys, cx)
+            }
+            L10nKey::WarnBeforeClosing => {
+                self.set_ssh_warn_on_close(defaults.ssh_warn_on_close, cx)
+            }
+            L10nKey::SettingsLanguage => self.set_gui_language(
+                Self::normalize_gui_language(&defaults.gui_language),
+                window,
+                cx,
+            ),
+            L10nKey::SettingsFontSize => self.reset_font_size(cx),
+            L10nKey::SettingsUiFontSize => self.reset_ui_font_size(cx),
+            L10nKey::SettingsLineHeight => self.reset_line_height(cx),
+            L10nKey::SettingsFontFamily => {
+                self.commit_font_family(defaults.font_family.clone(), cx)
+            }
+            L10nKey::SettingsBoldFont => self.commit_font_family_emphasis(
+                true,
+                crate::ui::settings::font_default_label().to_string(),
+                cx,
+            ),
+            L10nKey::SettingsItalicFont => self.commit_font_family_emphasis(
+                false,
+                crate::ui::settings::font_default_label().to_string(),
+                cx,
+            ),
+            L10nKey::SettingsUiFontFamily => self.commit_ui_font_family(
+                crate::ui::settings::ui_font_default_label().to_string(),
+                window,
+                cx,
+            ),
+            L10nKey::SettingsSyncWithSystem => {
+                self.set_theme_follow_system(defaults.theme_follow_system, window, cx)
+            }
+            L10nKey::SettingsLegiblePalette => {
+                self.set_theme_legible_palette(defaults.theme_legible_palette, window, cx)
+            }
+            L10nKey::SettingsOpacity => {
+                self.update_config(cx, |cfg| cfg.window_opacity = None);
+                apply_theme(Some(window), cx);
+            }
+            L10nKey::SettingsBlur => {
+                self.update_config(cx, |cfg| cfg.window_blur = None);
+                apply_theme(Some(window), cx);
+            }
+            #[cfg(target_os = "windows")]
+            L10nKey::SettingsBackdrop => {
+                self.set_window_backdrop(defaults.window_backdrop, window, cx)
+            }
+            L10nKey::SettingsFontLigatures => self.set_font_ligatures(
+                defaults
+                    .font_features
+                    .as_ref()
+                    .is_some_and(|f| f.is_calt_enabled() == Some(true)),
+                cx,
+            ),
+            L10nKey::OpenFilesWith => {
+                self.update_config(cx, |cfg| cfg.link_file_open = defaults.link_file_open);
+            }
+            L10nKey::SettingsProgram => {
+                self.update_config(cx, |cfg| cfg.shell = defaults.shell.clone())
+            }
+            L10nKey::SettingsArguments => self.update_config(cx, |cfg| {
+                if let Some(shell) = &mut cfg.shell {
+                    shell.args.clear();
+                }
+            }),
+            L10nKey::SettingsStartIn => self.update_config(cx, |cfg| {
+                cfg.working_directory.strategy = defaults.working_directory.strategy
+            }),
+            L10nKey::SettingsCustomPath => self.update_config(cx, |cfg| {
+                cfg.working_directory.path = defaults.working_directory.path.clone()
+            }),
+            L10nKey::SettingsAppHttpProxy => {
+                self.update_config(cx, |cfg| cfg.http_proxy = defaults.http_proxy.clone())
+            }
+            L10nKey::SettingsOpenFilesCommand => self.update_config(cx, |cfg| {
+                cfg.link_file_command = defaults.link_file_command.clone()
+            }),
+            _ => return,
+        }
+        self.refresh_settings_controls(title, window, cx);
+    }
+
+    fn refresh_settings_controls(
+        &mut self,
+        title: L10nKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut subs = Vec::new();
+        match title {
+            L10nKey::SettingsFontFamily
+            | L10nKey::SettingsBoldFont
+            | L10nKey::SettingsItalicFont
+            | L10nKey::SettingsUiFontFamily => {
+                let (font, bold, italic, ui) = self.build_font_selects(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.font_select = font;
+                    s.font_bold_select = bold;
+                    s.font_italic_select = italic;
+                    s.ui_font_select = ui;
+                }
+            }
+            L10nKey::SettingsLanguage => {
+                let value = self.build_language_select(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.language_select = value;
+                }
+            }
+            L10nKey::SettingsProgram | L10nKey::SettingsArguments => {
+                let (program, args, _) = self.build_shell_inputs(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.shell_program_input = program;
+                    s.shell_args_input = args;
+                }
+            }
+            L10nKey::SettingsCustomPath => {
+                let value = cx.global::<Config>().working_directory.path.clone();
+                if let Some(s) = self.active_settings() {
+                    s.wd_path_input
+                        .clone()
+                        .update(cx, |s, cx| s.set_value(value, window, cx));
+                }
+            }
+            L10nKey::SettingsOpenFilesCommand => {
+                let value = self.build_link_file_command_input(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.link_file_command_input = value;
+                }
+            }
+            L10nKey::SettingsAppHttpProxy => {
+                let value = self.build_http_proxy_input(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.http_proxy_input = value;
+                }
+            }
+            L10nKey::SettingsScrollSpeed => {
+                let value = self.build_scroll_slider(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.scroll_slider = value;
+                }
+            }
+            L10nKey::SettingsOpacity | L10nKey::SettingsBlur | L10nKey::SettingsBackdrop => {
+                let value = self.build_window_opacity_slider(&mut subs, window, cx);
+                if let Some(s) = self.active_settings_mut() {
+                    s.window_opacity_slider = value;
+                }
+            }
+            _ => {}
+        }
+        if let Some(s) = self.active_settings_mut() {
+            s._subs.extend(subs);
+        }
+        cx.notify();
+    }
+
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_some() {
             self.close_settings_checked(window, cx);
@@ -5630,6 +5988,16 @@ impl Tty7App {
             }),
         );
 
+        let shortcut_search = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::SettingsNavKeybindings)));
+        subs.push(
+            cx.subscribe_in(&shortcut_search, window, |_, _, ev, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+        );
+
         let ssh_filter = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::FilterHosts))
         });
@@ -5653,12 +6021,20 @@ impl Tty7App {
         );
 
         let content_scroll = gpui::ScrollHandle::new();
+        content_scroll.set_offset(self.last_settings_location.1);
         let search_anchor = gpui::ScrollAnchor::for_handle(content_scroll.clone());
 
         self.settings = Some(SettingsState {
             focus_handle: focus_handle.clone(),
-            section: SettingsSection::Appearance,
+            section: self.last_settings_location.0,
             search: settings_search,
+            shortcut_search,
+            modified_only: false,
+            search_active: false,
+            search_return_offset: self.last_settings_location.1,
+            search_selection: 0,
+            search_rows: std::cell::RefCell::new(None),
+            focused_setting: None,
             content_scroll,
             ssh_master_scroll: gpui::ScrollHandle::new(),
             ssh_detail_scroll: gpui::ScrollHandle::new(),
@@ -5680,6 +6056,10 @@ impl Tty7App {
             scroll_slider,
             window_opacity_slider,
             theme_editor: None,
+            theme_draft: None,
+            theme_draft_error: None,
+            save_error: None,
+            saved_config: cx.global::<Config>().clone(),
             theme_panel_open: false,
             theme_panel_slot: crate::ui::settings::ThemeSlot::Manual,
             theme_search,
@@ -5929,7 +6309,7 @@ impl Tty7App {
             cfg.gui_language = code.to_string();
         }
         set_locale(code);
-        cx.global::<Config>().save();
+        self.persist_settings_config(cx);
         set_menus(cx);
         // Explorer reads its menu wording from the registry, so it is the one
         // surface a language change does not reach on its own. No-op unless
@@ -6141,7 +6521,7 @@ impl Tty7App {
             return;
         }
         cfg.http_proxy = value;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -6165,7 +6545,7 @@ impl Tty7App {
             return;
         }
         cfg.link_file_command = command;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -6183,13 +6563,18 @@ impl Tty7App {
                 .step(0.01)
                 .default_value(eff)
         });
-        subs.push(
-            cx.subscribe_in(&slider, window, |this, _s, ev: &SliderEvent, window, cx| {
-                if let SliderEvent::Change(v) = ev {
-                    this.set_window_opacity(v.start(), window, cx);
+        subs.push(cx.subscribe_in(
+            &slider,
+            window,
+            |this, _s, ev: &SliderEvent, window, cx| match ev {
+                SliderEvent::Change(v) => {
+                    cx.global_mut::<Config>().window_opacity = Some(v.start().clamp(0.2, 1.0));
+                    apply_theme(Some(window), cx);
+                    cx.notify();
                 }
-            }),
-        );
+                SliderEvent::Release(_) => this.persist_settings_config(cx),
+            },
+        ));
         slider
     }
 
@@ -6210,17 +6595,27 @@ impl Tty7App {
         subs.push(cx.subscribe_in(
             &scroll_slider,
             window,
-            |this, _s, ev: &SliderEvent, _w, cx| {
-                if let SliderEvent::Change(v) = ev {
-                    this.set_mouse_scroll_multiplier(v.start(), cx);
+            |this, _s, ev: &SliderEvent, _w, cx| match ev {
+                SliderEvent::Change(v) => {
+                    cx.global_mut::<Config>().mouse_scroll_multiplier = v.start().clamp(0.1, 10.0);
+                    cx.notify();
                 }
+                SliderEvent::Release(_) => this.persist_settings_config(cx),
             },
         ));
         scroll_slider
     }
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.take().is_some() {
+        if let Some(s) = self.settings.take() {
+            self.last_settings_location = (
+                s.section,
+                if s.search_active {
+                    s.search_return_offset
+                } else {
+                    s.content_scroll.offset()
+                },
+            );
             self.focus_active(window, cx);
             cx.notify();
         }
@@ -6235,7 +6630,21 @@ impl Tty7App {
         if self.settings.is_none() {
             self.toggle_settings(window, cx);
         }
-        self.select_settings_section(section, cx);
+        self.navigate_settings(section, None, window, cx);
+    }
+
+    /// Resolve a pending form before performing both parts of an external
+    /// navigation. Opening the page and loading its form must be one action.
+    pub(crate) fn open_ssh_profile_form(
+        &mut self,
+        profile: crate::core::ssh_profile::SshProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+            this.open_settings_section(SettingsSection::Ssh, window, cx);
+            this.ssh_form_load(&profile, window, cx);
+        });
     }
 
     pub(crate) fn open_ssh_profile_in_settings(
@@ -6244,16 +6653,21 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_section(SettingsSection::Ssh, window, cx);
-        if let Some(profile) = cx
-            .global::<Config>()
-            .ssh_profiles
-            .iter()
-            .find(|p| p.id == id)
-            .cloned()
-        {
-            self.ssh_form_load(&profile, window, cx);
-        }
+        self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+            // Read after resolving edits, so saving and reopening the same
+            // profile cannot load a snapshot from before that save.
+            if let Some(profile) = cx
+                .global::<Config>()
+                .ssh_profiles
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+            {
+                this.open_ssh_profile_form(profile, window, cx);
+            } else {
+                this.open_settings_section(SettingsSection::Ssh, window, cx);
+            }
+        });
     }
 
     pub(crate) fn open_ssh_profile_new_from_target(
@@ -6262,7 +6676,6 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_section(SettingsSection::Ssh, window, cx);
         let mut profile = crate::core::ssh_profile::SshProfile::new(String::new());
         if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target) {
             profile.port = qc.port_or_default();
@@ -6274,7 +6687,7 @@ impl Tty7App {
                 profile.name = profile.host.clone();
             }
         }
-        self.ssh_form_load(&profile, window, cx);
+        self.open_ssh_profile_form(profile, window, cx);
     }
 
     fn commit_font_family(&mut self, family: String, cx: &mut Context<Self>) {
@@ -6287,7 +6700,7 @@ impl Tty7App {
         }
         let cfg = cx.global_mut::<Config>();
         cfg.font_family = family;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -6316,7 +6729,7 @@ impl Tty7App {
         } else {
             cfg.font_family_italic = family;
         }
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -6327,7 +6740,7 @@ impl Tty7App {
             return;
         }
         cfg.ui_font_family = family;
-        cfg.save();
+        self.persist_settings_config(cx);
         apply_theme(Some(window), cx);
         cx.refresh_windows();
         cx.notify();
@@ -6519,7 +6932,7 @@ impl Tty7App {
                 return;
             }
             cfg.shell = shell;
-            cfg.save();
+            self.persist_settings_config(cx);
         }
         // Shell discovery runs off the UI thread and now includes the saved
         // configured shell, so refresh the menu without blocking Settings.
@@ -6536,7 +6949,7 @@ impl Tty7App {
             return;
         }
         cfg.working_directory.strategy = strategy;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -6562,7 +6975,7 @@ impl Tty7App {
             return;
         }
         cfg.working_directory.path = path;
-        cfg.save();
+        self.persist_settings_config(cx);
         cx.notify();
     }
 
@@ -7008,19 +7421,23 @@ impl Tty7App {
     }
 
     pub(crate) fn autoselect_settings_search(&mut self, cx: &mut Context<Self>) {
-        let Some(settings) = self.settings.as_ref() else {
-            return;
-        };
-        let query = settings.search.read(cx).value().trim().to_lowercase();
-        if query.is_empty() {
-            return;
+        if let Some(s) = self.settings.as_mut() {
+            let active = !s.search.read(cx).value().trim().is_empty() || s.modified_only;
+            if active && !s.search_active {
+                s.search_return_offset = s.content_scroll.offset();
+            }
+            if active {
+                s.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            } else if s.search_active {
+                s.content_scroll.set_offset(s.search_return_offset);
+            }
+            s.search_active = active;
+            s.search_selection = 0;
+            if active {
+                s.focused_setting = None;
+            }
         }
-        if crate::ui::settings::section_match_count(settings.section, &query) > 0 {
-            return;
-        }
-        if let Some(best) = crate::ui::settings::best_matching_section(&query) {
-            self.select_settings_section(best, cx);
-        }
+        cx.notify();
     }
 
     pub(crate) fn start_recording_key(

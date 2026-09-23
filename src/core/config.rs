@@ -21,8 +21,19 @@ impl Config {
 
     #[cfg(test)]
     pub fn save(&self) {
-        assert_scratch_config_dir("Config::save");
-        self.0.save();
+        if let Err(error) = self.try_save() {
+            log::warn!("failed to save config: {error}");
+        }
+    }
+
+    #[cfg(test)]
+    pub fn try_save(&self) -> std::io::Result<()> {
+        assert_scratch_config_dir("Config::try_save");
+        // GUI tests have separate App globals but share the process's scratch
+        // directory. Serialize their writes just as a real UI event loop does.
+        static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        self.0.try_save()
     }
 }
 

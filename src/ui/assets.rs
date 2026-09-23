@@ -200,6 +200,9 @@ mod tests {
             "plus.svg's arms are {v_len} and {h_len} long, so it is not square"
         );
 
+        // Round caps reach `stroke/2` past each end, so what the eye measures
+        // is the arm plus one whole stroke — and that total, not the path, is
+        // what has to sit inside the set's 19.3.
         let ink = v_len + stroke;
         assert!(
             ink / 19.3 >= 0.85,
@@ -207,17 +210,22 @@ mod tests {
              set puts 19.3, so it will read a size small beside them"
         );
 
-        // The toolbar now uses one size and one stroke weight, including
-        // open shapes such as the plus.
+        // One *weight* for the set is not one *density*. The cross is two
+        // hairlines and nothing else — about 22 units of stroke — where the
+        // closed glyph beside it in the toolbar spends 54 on a perimeter and a
+        // divider. Drawn at the family weight the `+` ends up the largest mark
+        // in the row and the faintest one at the same time, which is what reads
+        // as the odd glyph out. An open form carries a sixth more weight to
+        // land at the same optical density; SF Symbols compensates `plus`
+        // against `sidebar.left` the same way.
+        const OPEN_FORM: f32 = 7. / 6.;
         let family: f32 = attr(&glyph("panel-left"), "stroke-width").parse().unwrap();
-        let shipped = family * crate::ui::app::TILE_GLYPH_LINE / crate::ui::app::TILE_GLYPH;
+        let want = family * OPEN_FORM;
         assert!(
-            (stroke - shipped).abs() < 0.01,
-            "plus.svg strokes {stroke} where the set strokes {family}; off the \
-             family weight it should be off it by exactly the {}/{} the call \
-             site used to scale it by, which is {shipped}",
-            crate::ui::app::TILE_GLYPH_LINE,
-            crate::ui::app::TILE_GLYPH,
+            (stroke - want).abs() < 0.01,
+            "plus.svg strokes {stroke} where the set's closed shapes stroke \
+             {family}; an open form needs {OPEN_FORM} of that to match them, \
+             which is {want}"
         );
 
         // Extent and weight are only two thirds of it; the last is landing on
@@ -225,11 +233,23 @@ mod tests {
         // solid fills, so a soft edge costs them little — a cross is two
         // hairlines and nothing else, and an arm end that straddles pixel rows
         // turns the tip into a smudge. A round cap reaches stroke/2 past the
-        // path, so that is where the whole pixel has to land.
+        // path, so that is where the grid has to be met.
+        //
+        // Half a CSS pixel, not a whole one, because of what the whole-pixel
+        // rungs cost. The tip sits at `k * TILE_GLYPH / 24` for the `k` the
+        // path is drawn on, which quantises the cross's *visual* diameter —
+        // arm plus one stroke, whatever the weight — to 10px, 12px or 14px in
+        // a 16px box. 12 is a size too big beside the closed glyph next to it
+        // and 10 is a size too small; there is no third whole-pixel rung to
+        // move to. Landing the cap on a half instead buys 11px, which is
+        // device-aligned at 2x and only misses the grid at 1x, where a cross
+        // this small is already the least of it.
         let tip = (v_top - stroke / 2.) * crate::ui::app::TILE_GLYPH / 24.;
+        let grid = tip * 2.;
         assert!(
-            (tip - tip.round()).abs() < 0.01,
-            "plus.svg's cap tip lands at {tip} CSS px, not on a whole pixel"
+            (grid - grid.round()).abs() < 0.01,
+            "plus.svg's cap tip lands at {tip} CSS px, which is not even a half \
+             pixel"
         );
     }
 

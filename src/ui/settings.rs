@@ -1,7 +1,7 @@
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Background, Context, Div, Entity, FontWeight,
-    Image, ImageFormat, KeyDownEvent, MouseButton, SharedString, Stateful, Subscription, Window,
-    div, img, prelude::*, px, relative, rgb,
+    Animation, AnimationExt as _, AnyElement, App, Background, Context, Div, Entity,
+    Focusable as _, FontWeight, Image, ImageFormat, KeyDownEvent, MouseButton, SharedString,
+    Stateful, Subscription, Window, div, img, prelude::*, px, relative, rgb,
 };
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -14,10 +14,10 @@ use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
+    WindowExt as _, h_flex, v_flex,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -314,11 +314,27 @@ fn group_thousands(n: usize) -> String {
 }
 
 fn settings_row_id(label: &str, _desc: &str) -> SharedString {
-    SharedString::from(format!("settings-row-{label}"))
+    let id = settings_search_entries()
+        .iter()
+        .find(|entry| t(entry.title) == label)
+        .map(|entry| format!("{:?}", entry.title))
+        .or_else(|| {
+            L10nKey::ALL
+                .iter()
+                .find(|&&key| t(key) == label)
+                .map(|key| format!("{key:?}"))
+        })
+        .unwrap_or_else(|| label.to_string());
+    SharedString::from(format!("settings-row-{id}"))
 }
 
 fn settings_header_id(title: &str) -> SharedString {
-    SharedString::from(format!("settings-header-{title}"))
+    let id = L10nKey::ALL
+        .iter()
+        .find(|&&key| t(key) == title)
+        .map(|key| format!("{key:?}"))
+        .unwrap_or_else(|| title.to_string());
+    SharedString::from(format!("settings-header-{id}"))
 }
 
 /// Whether the reset control has any effective override to clear on this
@@ -332,9 +348,10 @@ fn window_overrides_active(config: &Config, backdrop_is_local: bool) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
+    General,
     Appearance,
     Terminal,
-    Input,
+    KeyboardMouse,
     Ssh,
     Agents,
     WindowTabs,
@@ -344,21 +361,56 @@ pub(crate) enum SettingsSection {
 
 impl SettingsSection {
     pub(crate) const ALL: [SettingsSection; 8] = [
+        SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Terminal,
-        SettingsSection::Input,
+        SettingsSection::KeyboardMouse,
+        SettingsSection::WindowTabs,
         SettingsSection::Ssh,
         SettingsSection::Agents,
-        SettingsSection::WindowTabs,
-        SettingsSection::Keybindings,
         SettingsSection::About,
     ];
 
+    pub(crate) fn navigation_section(self) -> Self {
+        match self {
+            Self::Keybindings => Self::KeyboardMouse,
+            other => other,
+        }
+    }
+
+    fn title(self) -> L10nKey {
+        match self {
+            Self::General => L10nKey::SettingsNavGeneral,
+            Self::Appearance => L10nKey::SettingsNavAppearance,
+            Self::Terminal => L10nKey::SettingsNavTerminal,
+            Self::KeyboardMouse => L10nKey::SettingsNavInput,
+            Self::Ssh => L10nKey::SettingsNavSsh,
+            Self::Agents => L10nKey::SettingsNavAgents,
+            Self::WindowTabs => L10nKey::SettingsNavWindowTabs,
+            Self::Keybindings => L10nKey::SettingsNavKeybindings,
+            Self::About => L10nKey::SettingsNavAbout,
+        }
+    }
+
+    fn icon(self) -> Icon {
+        Icon::new(match self {
+            Self::General => IconName::Settings2,
+            Self::Appearance => IconName::Palette,
+            Self::Terminal => IconName::SquareTerminal,
+            Self::KeyboardMouse | Self::Keybindings => IconName::CaseSensitive,
+            Self::Ssh => IconName::Globe,
+            Self::Agents => IconName::Bot,
+            Self::WindowTabs => IconName::WindowRestore,
+            Self::About => return Icon::empty().path("icons/circle-info.svg"),
+        })
+    }
+
     fn profile_label(self) -> &'static str {
         match self {
+            SettingsSection::General => "settings:general",
             SettingsSection::Appearance => "settings:appearance",
             SettingsSection::Terminal => "settings:terminal",
-            SettingsSection::Input => "settings:input",
+            SettingsSection::KeyboardMouse => "settings:keyboard-mouse",
             SettingsSection::Ssh => "settings:ssh",
             SettingsSection::Agents => "settings:agents",
             SettingsSection::WindowTabs => "settings:window-tabs",
@@ -382,6 +434,42 @@ fn settings_search_entries() -> &'static [SearchEntry] {
     &[
         SearchEntry {
             section: Appearance,
+            title: SettingsUiFontSize,
+            keywords: SettingsSearchFontSizeKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsPerPaneHistory,
+            keywords: SettingsSearchHistorySearchKeywords,
+        },
+        SearchEntry {
+            section: KeyboardMouse,
+            title: SettingsMouseZoom,
+            keywords: SettingsSearchScrollSpeedKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsCustomPath,
+            keywords: SettingsSearchStartInKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsOpenFilesCommand,
+            keywords: SettingsSearchOpenFilesWithKeywords,
+        },
+        #[cfg(target_os = "macos")]
+        SearchEntry {
+            section: General,
+            title: SettingsDefaultTerminal,
+            keywords: SettingsSearchAboutKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsServer,
+            keywords: SettingsSearchAboutKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsLanguage,
             keywords: SettingsSearchLanguageKeywords,
         },
@@ -517,17 +605,17 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchSmoothScrollKeywords,
         },
         SearchEntry {
-            section: Terminal,
+            section: KeyboardMouse,
             title: SettingsFocusFollowsMouse,
             keywords: SettingsSearchFocusFollowsMouseKeywords,
         },
         SearchEntry {
-            section: Terminal,
+            section: KeyboardMouse,
             title: SettingsHideMouseWhileTyping,
             keywords: SettingsSearchHideMouseWhileTypingKeywords,
         },
         SearchEntry {
-            section: Terminal,
+            section: KeyboardMouse,
             title: SettingsReportMouseToApps,
             keywords: SettingsSearchReportMouseToAppsKeywords,
         },
@@ -552,37 +640,38 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchOpenFilesWithKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: Terminal,
             title: SettingsPromptEditor,
             keywords: SettingsSearchPromptEditorKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: Terminal,
             title: SettingsTabCompletion,
             keywords: SettingsSearchTabCompletionKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: Terminal,
             title: SettingsHistorySearch,
             keywords: SettingsSearchHistorySearchKeywords,
         },
+        #[cfg(target_os = "macos")]
         SearchEntry {
-            section: Input,
+            section: KeyboardMouse,
             title: SettingsOptionAsMeta,
             keywords: SettingsSearchOptionAsMetaKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: KeyboardMouse,
             title: SettingsSmartSelection,
             keywords: SettingsSearchSmartSelectionKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: KeyboardMouse,
             title: SettingsCopyOnSelect,
             keywords: SettingsSearchCopyOnSelectKeywords,
         },
         SearchEntry {
-            section: Input,
+            section: KeyboardMouse,
             title: SettingsTrimTrailingSpaces,
             keywords: SettingsSearchTrimTrailingSpacesKeywords,
         },
@@ -692,22 +781,22 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchMiniMaxCodeKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsRememberWindowSize,
             keywords: SettingsSearchRememberWindowSizeKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsRestoreLastLayout,
             keywords: SettingsSearchRestoreLastLayoutKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsShowTrayIcon,
             keywords: SettingsSearchShowTrayIconKeywords,
         },
@@ -732,17 +821,17 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchDiffPreviewFromCountsKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
         SearchEntry {
-            section: WindowTabs,
+            section: General,
             title: SettingsNotifyThreshold,
             keywords: SettingsSearchNotifyThresholdKeywords,
         },
         SearchEntry {
-            section: Keybindings,
+            section: KeyboardMouse,
             title: SettingsSearchKeybindingsTitle,
             keywords: SettingsSearchKeybindingsKeywords,
         },
@@ -752,22 +841,22 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchAboutKeywords,
         },
         SearchEntry {
-            section: About,
+            section: General,
             title: SettingsAppHttpProxy,
             keywords: SettingsSearchAppHttpProxyKeywords,
         },
         SearchEntry {
-            section: About,
+            section: General,
             title: SettingsUpdateChannel,
             keywords: SettingsSearchUpdateChannelKeywords,
         },
         SearchEntry {
-            section: About,
+            section: General,
             title: SettingsCheckUpdatesOnLaunch,
             keywords: SettingsSearchCheckUpdatesOnLaunchKeywords,
         },
         SearchEntry {
-            section: About,
+            section: General,
             title: SettingsAutoDownload,
             keywords: SettingsSearchAutoDownloadKeywords,
         },
@@ -779,9 +868,292 @@ fn settings_search_entries() -> &'static [SearchEntry] {
     ]
 }
 
+impl SearchEntry {
+    fn config_key(&self) -> &'static str {
+        match self.title {
+            L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
+            L10nKey::SettingsCursorBlink => "cursor_blink",
+            L10nKey::SettingsCursorShape => "cursor_style",
+            L10nKey::SettingsScrollback => "scrollback_limit",
+            L10nKey::SettingsNewTabPosition => "new_tab_position",
+            L10nKey::SettingsTabBarPosition => "tab_bar_position",
+            L10nKey::SettingsSidebarGrouping => "sidebar_grouping",
+            L10nKey::SettingsDiffPreviewFromCounts => "sidebar_diff_preview",
+            L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
+            L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
+            L10nKey::SettingsTerminalBell => "bell",
+            L10nKey::SettingsRestoreLastLayout => "restore_session",
+            L10nKey::SettingsPerPaneHistory => "per_pane_history",
+            L10nKey::SettingsShowTrayIcon => "show_tray_icon",
+            L10nKey::SettingsOptionAsMeta => "macos_option_as_alt",
+            L10nKey::SettingsHideMouseWhileTyping => "mouse_hide_while_typing",
+            L10nKey::SettingsFocusFollowsMouse => "focus_follows_mouse",
+            L10nKey::SettingsReportMouseToApps => "mouse_reporting",
+            L10nKey::SettingsScrollSpeed => "mouse_scroll_multiplier",
+            L10nKey::SettingsSmoothScroll => "smooth_scroll",
+            L10nKey::SettingsMouseZoom => "mouse_zoom_modifier",
+            L10nKey::SettingsTrimTrailingSpaces => "clipboard_trim_trailing_spaces",
+            L10nKey::SettingsCopyOnSelect => "copy_on_select",
+            L10nKey::SettingsSmartSelection => "smart_select",
+            L10nKey::SettingsPromptEditor => "prompt_editor",
+            L10nKey::SettingsTabCompletion => "tab_completion",
+            L10nKey::SettingsHistorySearch => "history_search",
+            L10nKey::SettingsStartupWindow => "startup_mode",
+            L10nKey::SettingsRememberWindowSize => "remember_window_size",
+            L10nKey::SettingsCheckUpdatesOnLaunch => "check_for_updates",
+            L10nKey::SettingsAutoDownload => "auto_download_updates",
+            L10nKey::SettingsUpdateChannel => "update_channel",
+            L10nKey::DetectUrls => "link_url",
+            L10nKey::ForwardSshLoopbackLinks => "ssh_loopback_forward",
+            L10nKey::SettingsVerifyHostKeys => "verify_host_keys",
+            L10nKey::WarnBeforeClosing => "ssh_warn_on_close",
+            L10nKey::SettingsLanguage => "gui_language",
+            L10nKey::SettingsProgram => "shell.program",
+            L10nKey::SettingsArguments => "shell.args",
+            L10nKey::SettingsStartIn => "working_directory.strategy",
+            L10nKey::SettingsCustomPath => "working_directory.path",
+            L10nKey::SettingsFontSize => "font_size",
+            L10nKey::SettingsUiFontSize => "ui_font_size",
+            L10nKey::SettingsLineHeight => "line_height",
+            L10nKey::SettingsFontFamily => "font_family",
+            L10nKey::SettingsBoldFont => "font_family_bold",
+            L10nKey::SettingsItalicFont => "font_family_italic",
+            L10nKey::SettingsUiFontFamily => "ui_font_family",
+            L10nKey::SettingsFontLigatures => "font_features",
+            L10nKey::SettingsOpacity => "window_opacity",
+            L10nKey::SettingsBlur => "window_blur",
+            L10nKey::SettingsBackdrop => "window_backdrop",
+            L10nKey::SettingsSyncWithSystem => "theme_follow_system",
+            L10nKey::SettingsLegiblePalette => "theme_legible_palette",
+            L10nKey::SettingsThemeIntroTitle => "theme_preset",
+            L10nKey::SettingsAppHttpProxy => "http_proxy",
+            L10nKey::SettingsOpenFilesCommand => "link_file_command",
+            L10nKey::OpenFilesWith => "link_file_open",
+            L10nKey::SettingsInstallCliOnPath => "install_cli_on_path",
+            L10nKey::SettingsSearchKeybindingsTitle => "keybindings",
+            L10nKey::SettingsHosts => "ssh_profiles",
+            _ => "",
+        }
+    }
+    fn description(&self) -> &'static str {
+        match self.title {
+            L10nKey::SettingsUiFontSize => t(L10nKey::SettingsUiFontSizeDesc),
+            L10nKey::SettingsMouseZoom => t(L10nKey::SettingsMouseZoomDesc),
+            L10nKey::SettingsCustomPath => t(L10nKey::SettingsCustomPathDesc),
+            L10nKey::SettingsDefaultTerminal => t(L10nKey::SettingsDefaultTerminalDesc),
+            L10nKey::SettingsServer => t(L10nKey::SettingsServerDesc),
+            L10nKey::SettingsLanguage => t(L10nKey::SettingsLanguageDesc),
+            L10nKey::SettingsSyncWithSystem => t(L10nKey::SettingsSyncWithSystemDesc),
+            L10nKey::SettingsLegiblePalette => t(L10nKey::SettingsLegiblePaletteDesc),
+            L10nKey::SettingsOpacity => t(L10nKey::SettingsOpacityDesc),
+            L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
+            L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
+            L10nKey::SettingsDimInactivePanes => t(L10nKey::SettingsDimInactivePanesDesc),
+            L10nKey::SettingsFontSize => t(L10nKey::SettingsFontSizeDesc),
+            L10nKey::SettingsUiFontFamily => t(L10nKey::SettingsUiFontFamilyDesc),
+            L10nKey::SettingsLineHeight => t(L10nKey::SettingsLineHeightDesc),
+            L10nKey::SettingsFontFamily => t(L10nKey::SettingsFontFamilyDesc),
+            L10nKey::SettingsBoldFont => t(L10nKey::SettingsBoldFontDesc),
+            L10nKey::SettingsItalicFont => t(L10nKey::SettingsItalicFontDesc),
+            L10nKey::SettingsFontLigatures => t(L10nKey::SettingsFontLigaturesDesc),
+            L10nKey::SettingsCursorShape => t(L10nKey::SettingsCursorShapeDesc),
+            L10nKey::SettingsCursorBlink => t(L10nKey::SettingsCursorBlinkDesc),
+            L10nKey::SettingsBackgroundImage => t(L10nKey::SettingsBackgroundImageDesc),
+            L10nKey::SettingsImageOpacity => t(L10nKey::SettingsImageOpacityDesc),
+            L10nKey::SettingsProgram => t(L10nKey::SettingsProgramDesc),
+            L10nKey::SettingsArguments => t(L10nKey::SettingsArgumentsDesc),
+            L10nKey::SettingsStartIn => t(L10nKey::SettingsStartInDesc),
+            L10nKey::SettingsScrollback => t(L10nKey::SettingsScrollbackDesc),
+            L10nKey::SettingsScrollSpeed => t(L10nKey::SettingsScrollSpeedDesc),
+            L10nKey::SettingsSmoothScroll => t(L10nKey::SettingsSmoothScrollDesc),
+            L10nKey::SettingsFocusFollowsMouse => t(L10nKey::SettingsFocusFollowsMouseDesc),
+            L10nKey::SettingsHideMouseWhileTyping => t(L10nKey::SettingsHideMouseWhileTypingDesc),
+            L10nKey::SettingsReportMouseToApps => t(L10nKey::SettingsReportMouseToAppsDesc),
+            L10nKey::SettingsTerminalBell => t(L10nKey::SettingsTerminalBellDesc),
+            L10nKey::SettingsPromptEditor => t(L10nKey::SettingsPromptEditorDesc),
+            L10nKey::SettingsTabCompletion => t(L10nKey::SettingsTabCompletionDesc),
+            L10nKey::SettingsHistorySearch => t(L10nKey::SettingsHistorySearchDesc),
+            L10nKey::SettingsOptionAsMeta => t(L10nKey::SettingsOptionAsMetaDesc),
+            L10nKey::SettingsSmartSelection => t(L10nKey::SettingsSmartSelectionDesc),
+            L10nKey::SettingsCopyOnSelect => t(L10nKey::SettingsCopyOnSelectDesc),
+            L10nKey::SettingsTrimTrailingSpaces => t(L10nKey::SettingsTrimTrailingSpacesDesc),
+            L10nKey::SettingsVerifyHostKeys => t(L10nKey::SettingsVerifyHostKeysDesc),
+            L10nKey::SettingsStartupWindow => t(L10nKey::SettingsStartupWindowDesc),
+            L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
+            L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
+            L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
+            L10nKey::SettingsNewTabPosition => t(L10nKey::SettingsNewTabPositionDesc),
+            L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
+            L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsDiffPreviewFromCounts => t(L10nKey::SettingsDiffPreviewFromCountsDesc),
+            L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
+            L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
+            L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
+            L10nKey::SettingsUpdateChannel => t(L10nKey::SettingsUpdateChannelDesc),
+            L10nKey::SettingsAutoDownload => t(L10nKey::SettingsAutoDownloadDesc),
+            L10nKey::SettingsPerPaneHistory => t(L10nKey::SettingsPerPaneHistoryDescription),
+            L10nKey::DetectUrls => t(L10nKey::SettingsDetectUrlsDesc),
+            L10nKey::ForwardSshLoopbackLinks => t(L10nKey::SettingsForwardSshLoopbackLinksDesc),
+            L10nKey::OpenFilesWith => t(L10nKey::SettingsOpenFilesModeDesc),
+            _ => "",
+        }
+    }
+    fn rank(&self, query: &str) -> u8 {
+        let label = t(self.title).to_lowercase();
+        let key = self.config_key();
+        if label == query || key == query {
+            0
+        } else if label.starts_with(query) || (!key.is_empty() && key.starts_with(query)) {
+            1
+        } else if t(self.keywords)
+            .split_whitespace()
+            .any(|word| word.eq_ignore_ascii_case(query))
+        {
+            2
+        } else {
+            3
+        }
+    }
+    fn modified(&self, cfg: &Config) -> bool {
+        let defaults = Config::default();
+        match self.title {
+            L10nKey::SettingsDimInactivePanes => {
+                cfg.dim_inactive_panes != defaults.dim_inactive_panes
+            }
+            L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
+            L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
+            L10nKey::SettingsScrollback => cfg.scrollback_limit != defaults.scrollback_limit,
+            L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
+            L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
+            L10nKey::SettingsSidebarGrouping => cfg.sidebar_grouping != defaults.sidebar_grouping,
+            L10nKey::SettingsDiffPreviewFromCounts => {
+                cfg.sidebar_diff_preview != defaults.sidebar_diff_preview
+            }
+            L10nKey::SettingsNotifyOnCommandFinish => {
+                cfg.notify_on_command_finish != defaults.notify_on_command_finish
+            }
+            L10nKey::SettingsNotifyThreshold => {
+                cfg.notify_threshold_secs != defaults.notify_threshold_secs
+            }
+            L10nKey::SettingsTerminalBell => cfg.bell != defaults.bell,
+            L10nKey::SettingsRestoreLastLayout => cfg.restore_session != defaults.restore_session,
+            L10nKey::SettingsPerPaneHistory => cfg.per_pane_history != defaults.per_pane_history,
+            L10nKey::SettingsShowTrayIcon => cfg.show_tray_icon != defaults.show_tray_icon,
+            L10nKey::SettingsOptionAsMeta => {
+                cfg.macos_option_as_alt != defaults.macos_option_as_alt
+            }
+            L10nKey::SettingsHideMouseWhileTyping => {
+                cfg.mouse_hide_while_typing != defaults.mouse_hide_while_typing
+            }
+            L10nKey::SettingsFocusFollowsMouse => {
+                cfg.focus_follows_mouse != defaults.focus_follows_mouse
+            }
+            L10nKey::SettingsReportMouseToApps => cfg.mouse_reporting != defaults.mouse_reporting,
+            L10nKey::SettingsScrollSpeed => {
+                cfg.mouse_scroll_multiplier != defaults.mouse_scroll_multiplier
+            }
+            L10nKey::SettingsSmoothScroll => cfg.smooth_scroll != defaults.smooth_scroll,
+            L10nKey::SettingsMouseZoom => cfg.mouse_zoom_modifier != defaults.mouse_zoom_modifier,
+            L10nKey::SettingsTrimTrailingSpaces => {
+                cfg.clipboard_trim_trailing_spaces != defaults.clipboard_trim_trailing_spaces
+            }
+            L10nKey::SettingsCopyOnSelect => cfg.copy_on_select != defaults.copy_on_select,
+            L10nKey::SettingsSmartSelection => cfg.smart_select != defaults.smart_select,
+            L10nKey::SettingsPromptEditor => cfg.prompt_editor != defaults.prompt_editor,
+            L10nKey::SettingsTabCompletion => cfg.tab_completion != defaults.tab_completion,
+            L10nKey::SettingsHistorySearch => cfg.history_search != defaults.history_search,
+            L10nKey::SettingsStartupWindow => cfg.startup_mode != defaults.startup_mode,
+            L10nKey::SettingsRememberWindowSize => {
+                cfg.remember_window_size != defaults.remember_window_size
+            }
+            L10nKey::SettingsCheckUpdatesOnLaunch => {
+                cfg.check_for_updates != defaults.check_for_updates
+            }
+            L10nKey::SettingsAutoDownload => {
+                cfg.auto_download_updates != defaults.auto_download_updates
+            }
+            L10nKey::SettingsUpdateChannel => cfg.update_channel != defaults.update_channel,
+            L10nKey::DetectUrls => cfg.link_url != defaults.link_url,
+            L10nKey::ForwardSshLoopbackLinks => {
+                cfg.ssh_loopback_forward != defaults.ssh_loopback_forward
+            }
+            L10nKey::SettingsVerifyHostKeys => cfg.verify_host_keys != defaults.verify_host_keys,
+            L10nKey::WarnBeforeClosing => cfg.ssh_warn_on_close != defaults.ssh_warn_on_close,
+            L10nKey::SettingsLanguage => cfg.gui_language != defaults.gui_language,
+            L10nKey::SettingsFontSize => cfg.font_size != defaults.font_size,
+            L10nKey::SettingsUiFontSize => cfg.ui_font_size != defaults.ui_font_size,
+            L10nKey::SettingsLineHeight => cfg.line_height != defaults.line_height,
+            L10nKey::SettingsFontFamily => cfg.font_family != defaults.font_family,
+            L10nKey::SettingsBoldFont => cfg.font_family_bold != defaults.font_family_bold,
+            L10nKey::SettingsItalicFont => cfg.font_family_italic != defaults.font_family_italic,
+            L10nKey::SettingsUiFontFamily => cfg.ui_font_family != defaults.ui_font_family,
+            L10nKey::SettingsOpacity => cfg.window_opacity != defaults.window_opacity,
+            L10nKey::SettingsBlur => cfg.window_blur != defaults.window_blur,
+            L10nKey::SettingsBackdrop => cfg.window_backdrop != defaults.window_backdrop,
+            L10nKey::SettingsSyncWithSystem => {
+                cfg.theme_follow_system != defaults.theme_follow_system
+            }
+            L10nKey::SettingsLegiblePalette => {
+                cfg.theme_legible_palette != defaults.theme_legible_palette
+            }
+            L10nKey::SettingsThemeIntroTitle => {
+                cfg.theme_preset != defaults.theme_preset
+                    || cfg.theme_preset_light != defaults.theme_preset_light
+                    || cfg.theme_preset_dark != defaults.theme_preset_dark
+            }
+            L10nKey::SettingsAppHttpProxy => cfg.http_proxy != defaults.http_proxy,
+            L10nKey::SettingsOpenFilesCommand => {
+                cfg.link_file_command != defaults.link_file_command
+            }
+            L10nKey::OpenFilesWith => cfg.link_file_open != defaults.link_file_open,
+            L10nKey::SettingsSearchKeybindingsTitle => {
+                cfg.keybindings != defaults.keybindings
+                    || cfg.keybinding_preset != defaults.keybinding_preset
+                    || cfg.prefix != defaults.prefix
+            }
+            L10nKey::SettingsProgram => {
+                cfg.shell.as_ref().map(|s| &s.program)
+                    != defaults.shell.as_ref().map(|s| &s.program)
+            }
+            L10nKey::SettingsArguments => cfg.shell.as_ref().is_some_and(|s| !s.args.is_empty()),
+            L10nKey::SettingsStartIn => {
+                cfg.working_directory.strategy != defaults.working_directory.strategy
+            }
+            L10nKey::SettingsCustomPath => {
+                cfg.working_directory.path != defaults.working_directory.path
+            }
+            L10nKey::SettingsFontLigatures => cfg.font_features != defaults.font_features,
+            _ => false,
+        }
+    }
+}
+
 fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
-    t(entry.title).to_lowercase().contains(query)
-        || t(entry.keywords).to_lowercase().contains(query)
+    let query = query.trim().to_lowercase();
+    query.split_whitespace().all(|word| {
+        t(entry.title).to_lowercase().contains(word)
+            || match entry.title {
+                L10nKey::SettingsMouseZoom => {
+                    "zoom modifier scroll wheel 缩放 滚轮 修饰键 ズーム".contains(word)
+                }
+                L10nKey::SettingsPerPaneHistory => {
+                    "per pane shell history independent 独立 命令历史".contains(word)
+                }
+                L10nKey::SettingsServer => {
+                    "daemon server background service 后台 服务".contains(word)
+                }
+                _ => false,
+            }
+            || t(entry.keywords).to_lowercase().contains(word)
+            || entry.description().to_lowercase().contains(word)
+            || entry.config_key().contains(word)
+            || crate::ui::i18n::alias_translations(entry.title)
+                .iter()
+                .any(|s| s.to_lowercase().contains(word))
+            || crate::ui::i18n::alias_translations(entry.keywords)
+                .iter()
+                .any(|s| s.to_lowercase().contains(word))
+    })
 }
 
 /// Whether one keybinding row answers the query.
@@ -819,7 +1191,9 @@ pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usiz
         .filter(|e| e.section == section && entry_matches(e, query))
         .count();
     match section {
-        SettingsSection::Keybindings => indexed + keybinding_match_count(query),
+        SettingsSection::KeyboardMouse | SettingsSection::Keybindings => {
+            indexed + keybinding_match_count(query)
+        }
         _ => indexed,
     }
 }
@@ -847,13 +1221,14 @@ pub(crate) fn total_match_count(query: &str) -> usize {
         .sum()
 }
 
+#[cfg(test)]
 pub(crate) fn best_matching_section(query: &str) -> Option<SettingsSection> {
-    SettingsSection::ALL
-        .into_iter()
-        .map(|s| (s, section_match_count(s, query)))
-        .filter(|(_, n)| *n > 0)
-        .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
-        .map(|(s, _)| s)
+    settings_search_entries()
+        .iter()
+        .filter(|entry| entry_matches(entry, query))
+        .min_by_key(|entry| entry.rank(query))
+        .map(|entry| entry.section)
+        .or_else(|| (keybinding_match_count(query) > 0).then_some(SettingsSection::KeyboardMouse))
 }
 
 pub(crate) struct ThemeEditor {
@@ -869,6 +1244,15 @@ pub(crate) struct SettingsState {
     pub(crate) focus_handle: gpui::FocusHandle,
     pub(crate) section: SettingsSection,
     pub(crate) search: Entity<InputState>,
+    pub(crate) shortcut_search: Entity<InputState>,
+    pub(crate) modified_only: bool,
+    pub(crate) save_error: Option<String>,
+    pub(crate) saved_config: Config,
+    pub(crate) search_active: bool,
+    pub(crate) search_return_offset: gpui::Point<gpui::Pixels>,
+    pub(crate) search_selection: usize,
+    pub(crate) search_rows: RefCell<Option<Vec<(L10nKey, AnyElement)>>>,
+    pub(crate) focused_setting: Option<L10nKey>,
     /// The page's own scroll, and an anchor on it that the first matching row
     /// claims. Searching tells you "Appearance (2)"; these are what carry you
     /// to the two, which on a long page start well below the fold.
@@ -895,6 +1279,8 @@ pub(crate) struct SettingsState {
     pub(crate) scroll_slider: Entity<SliderState>,
     pub(crate) window_opacity_slider: Entity<SliderState>,
     pub(crate) theme_editor: Option<ThemeEditor>,
+    pub(crate) theme_draft: Option<(presets::Theme, presets::Theme)>,
+    pub(crate) theme_draft_error: Option<String>,
     pub(crate) theme_panel_open: bool,
     pub(crate) theme_panel_slot: ThemeSlot,
     pub(crate) theme_search: Entity<InputState>,
@@ -1761,6 +2147,314 @@ fn stored_passphrase(key_path: &str) -> String {
 }
 
 impl Tty7App {
+    pub(crate) fn with_settings_edits_resolved(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        action: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let save_failed = self
+            .active_settings()
+            .is_some_and(|s| s.save_error.is_some());
+        if !save_failed && !self.ssh_form_dirty(cx) && !self.theme_draft_dirty() {
+            action(self, window, cx);
+            return;
+        }
+        let answer = window.prompt::<gpui::PromptButton>(
+            gpui::PromptLevel::Warning,
+            t(L10nKey::SettingsUnsavedTitle),
+            Some(t(L10nKey::SettingsUnsavedBody)),
+            &[
+                gpui::PromptButton::ok(t(L10nKey::SettingsSaveChanges)),
+                gpui::PromptButton::new(t(L10nKey::EditorDiscard)),
+                gpui::PromptButton::cancel(t(L10nKey::SettingsKeepEditing)),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                match choice {
+                    0 => {
+                        if this
+                            .active_settings()
+                            .is_some_and(|s| s.save_error.is_some())
+                        {
+                            this.persist_settings_config(cx);
+                            if this
+                                .active_settings()
+                                .is_some_and(|s| s.save_error.is_some())
+                            {
+                                return;
+                            }
+                        }
+                        if this.ssh_form_dirty(cx)
+                            && this.save_editing_profile(window, cx).is_none()
+                        {
+                            return;
+                        }
+                        if !this.save_theme_draft(window, cx) {
+                            return;
+                        }
+                    }
+                    1 => {
+                        this.discard_unsaved_settings(window, cx);
+                        this.cancel_theme_draft(window, cx);
+                        if let Some(s) = this.active_settings_mut() {
+                            s.ssh_form = None;
+                        }
+                    }
+                    _ => return,
+                }
+                action(this, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn navigate_settings(
+        &mut self,
+        target: SettingsSection,
+        setting: Option<L10nKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ssh_form_dirty(cx)
+            || self.theme_draft_dirty()
+            || self
+                .active_settings()
+                .is_some_and(|s| s.save_error.is_some())
+        {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.navigate_settings(target, setting, window, cx)
+            });
+            return;
+        }
+        if let Some(state) = self.active_settings() {
+            state
+                .search
+                .clone()
+                .update(cx, |search, cx| search.set_value("", window, cx));
+        }
+        let setting = match setting {
+            Some(L10nKey::SettingsCustomPath)
+                if cx.global::<Config>().working_directory.strategy
+                    != crate::core::config::WdStrategy::Custom =>
+            {
+                Some(L10nKey::SettingsStartIn)
+            }
+            Some(L10nKey::SettingsOpenFilesCommand)
+                if cx.global::<Config>().file_open_mode() != LinkFileOpen::Command =>
+            {
+                Some(L10nKey::OpenFilesWith)
+            }
+            other => other,
+        };
+        if let Some(state) = self.active_settings_mut() {
+            state.modified_only = false;
+            state.search_active = false;
+            state.focused_setting = setting;
+            state.reveal_first_hit.set(setting.is_some());
+            state.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            state.theme_panel_open = false;
+            if target == SettingsSection::Ssh
+                && matches!(
+                    setting,
+                    Some(L10nKey::SettingsVerifyHostKeys | L10nKey::WarnBeforeClosing)
+                )
+            {
+                state.ssh_detail = SshDetail::Defaults;
+            }
+        }
+        self.select_settings_section(target, cx);
+    }
+
+    fn render_settings_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = self.active_settings() else {
+            return div().into_any_element();
+        };
+        let query = state.search.read(cx).value().trim().to_lowercase();
+        let modified_only = state.modified_only;
+        *state.search_rows.borrow_mut() = Some(Vec::new());
+        // Build once, then retain the matching controls. Discarded page chrome
+        // never enters the element tree, so controls keep their usual IDs.
+        for section in SettingsSection::ALL {
+            if !settings_search_entries()
+                .iter()
+                .any(|entry| entry.section == section && entry_matches(entry, &query))
+            {
+                continue;
+            }
+            match section {
+                SettingsSection::General => {
+                    self.render_settings_general(cx);
+                }
+                SettingsSection::Appearance => {
+                    self.render_settings_appearance(cx);
+                }
+                SettingsSection::Terminal => {
+                    self.render_settings_terminal(cx);
+                }
+                SettingsSection::KeyboardMouse => {
+                    self.render_settings_input(cx);
+                }
+                SettingsSection::WindowTabs => {
+                    self.render_window_preferences(false, cx);
+                }
+                SettingsSection::About => {
+                    self.render_settings_about(cx);
+                }
+                // These pages have their own host/action editors.
+                _ => {}
+            }
+        }
+        let mut controls = self
+            .active_settings()
+            .unwrap()
+            .search_rows
+            .borrow_mut()
+            .take()
+            .unwrap_or_default();
+        let cfg = cx.global::<Config>();
+        let mut matches = settings_search_entries()
+            .iter()
+            .filter(|entry| entry_matches(entry, &query) && (!modified_only || entry.modified(cfg)))
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|entry| {
+            (
+                entry.rank(&query),
+                SettingsSection::ALL
+                    .iter()
+                    .position(|&s| s == entry.section)
+                    .unwrap_or(0),
+            )
+        });
+        let mut list = v_flex().gap_3();
+        for (index, entry) in matches.iter().enumerate() {
+            let title = entry.title;
+            let section = if title == L10nKey::SettingsSearchKeybindingsTitle {
+                SettingsSection::Keybindings
+            } else {
+                entry.section
+            };
+            let control = controls
+                .iter()
+                .position(|(key, _)| *key == title)
+                .map(|i| controls.remove(i).1);
+            let path = format!("{} › {}", t(entry.section.title()), t(title));
+            let row = v_flex()
+                .id(SharedString::from(format!("search-result-{title:?}")))
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .anchor_scroll(
+                    self.active_settings()
+                        .filter(|s| s.search_selection == index)
+                        .map(|s| s.search_anchor.clone()),
+                )
+                .when(
+                    self.active_settings()
+                        .is_some_and(|s| s.search_selection == index),
+                    |v| v.border_color(cx.theme().primary),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("search-path-{title:?}")))
+                        .label(path)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.navigate_settings(section, Some(title), window, cx)
+                        })),
+                )
+                .child(control.unwrap_or_else(|| {
+                    self.settings_row(
+                        t(title),
+                        entry.description(),
+                        Button::new(SharedString::from(format!("search-open-{title:?}")))
+                            .label(t(L10nKey::SettingsOpenSetting))
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.navigate_settings(section, Some(title), window, cx)
+                            }))
+                            .into_any_element(),
+                        cx,
+                    )
+                    .into_any_element()
+                }));
+            list = list.child(row);
+        }
+        if matches.is_empty() && (modified_only || keybinding_match_count(&query) == 0) {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if modified_only {
+                        t(L10nKey::SettingsNoModified).to_string()
+                    } else {
+                        t_fmt(L10nKey::SettingsNothingMatches, &[("query", &query)])
+                    }),
+            );
+        }
+        // Action names remain searchable without exposing an entire shortcut
+        // editor in the results list.
+        if !query.is_empty() && !modified_only {
+            let mut index = matches.len();
+            for (action, _) in crate::ui::keymap::default_bindings() {
+                if keybinding_matches_query(&action, &query) {
+                    let (_, label) = crate::ui::keymap::action_entry(&action);
+                    let anchor = self
+                        .active_settings()
+                        .filter(|s| s.search_selection == index)
+                        .map(|s| s.search_anchor.clone());
+                    let button = Button::new(SharedString::from(format!("search-action-{action}")))
+                        .label(format!(
+                            "{} › {}",
+                            t(L10nKey::SettingsNavKeybindings),
+                            label
+                        ))
+                        .ghost()
+                        .small()
+                        .selected(
+                            self.active_settings()
+                                .is_some_and(|s| s.search_selection == index),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let action = action.clone();
+                            this.with_settings_edits_resolved(
+                                window,
+                                cx,
+                                move |this, window, cx| {
+                                    this.navigate_settings(
+                                        SettingsSection::Keybindings,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                    if let Some(s) = this.active_settings() {
+                                        s.shortcut_search
+                                            .clone()
+                                            .update(cx, |s, cx| s.set_value(action, window, cx));
+                                    }
+                                },
+                            );
+                        }));
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!("search-shortcut-{index}")))
+                            .anchor_scroll(anchor)
+                            .child(button),
+                    );
+                    index += 1;
+                }
+            }
+        }
+        list.into_any_element()
+    }
+
     pub(crate) fn render_settings(
         &self,
         window: &mut Window,
@@ -1791,14 +2485,21 @@ impl Tty7App {
             None => return div(),
         };
         let query = search.read(cx).value().trim().to_lowercase();
-        let show_theme_panel = theme_panel_open && section == SettingsSection::Appearance;
+        let searching = self.active_settings().is_some_and(|s| s.search_active);
+        let layout_section = if searching {
+            SettingsSection::General
+        } else {
+            section
+        };
+        let show_theme_panel =
+            !searching && theme_panel_open && section == SettingsSection::Appearance;
 
         let viewport_w = window.viewport_size().width.as_f32();
         let ui_scale = ui_scale(cx);
         self.settings_viewport_w.set(viewport_w);
-        let cols = settings_columns(section, show_theme_panel, viewport_w);
+        let cols = settings_columns(layout_section, show_theme_panel, viewport_w);
         self.settings_row_width.set(settings_row_width(
-            section,
+            layout_section,
             show_theme_panel,
             viewport_w,
             ui_scale,
@@ -1814,13 +2515,23 @@ impl Tty7App {
         // saying so sits at the top of the page, and a reader who searched
         // from halfway down would otherwise be left with the untouched page
         // the note exists to explain.
+        if searching
+            && let Some(s) = self.active_settings()
+            && s.reveal_first_hit.replace(false)
+        {
+            s.search_anchor.scroll_to(window, cx);
+        }
         if let Some(s) = self.active_settings()
+            && !searching
             && s.reveal_first_hit.get()
         {
             s.reveal_first_hit.set(false);
-            let matched_here = section_match_count(section, &query) > 0;
+            let matched_here =
+                section_match_count(section, &query) > 0 || s.focused_setting.is_some();
             let matched_nowhere = total_match_count(&query) == 0;
-            if !query.is_empty() && (matched_here || matched_nowhere) {
+            if s.focused_setting.is_some()
+                || (!query.is_empty() && (matched_here || matched_nowhere))
+            {
                 s.search_anchor.scroll_to(window, cx);
             }
         }
@@ -1837,9 +2548,11 @@ impl Tty7App {
             };
             let item = SidebarMenuItem::new(label)
                 .icon(icon)
-                .active(section == target)
-                .on_click(move |_, _window, cx| {
-                    view.update(cx, |this, cx| this.select_settings_section(target, cx));
+                .active(section.navigation_section() == target)
+                .on_click(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.navigate_settings(target, None, window, cx)
+                    });
                 });
             if count > 0 {
                 item.suffix(move |_w, _cx| {
@@ -1853,47 +2566,11 @@ impl Tty7App {
             }
         };
 
-        let nav_body = SidebarMenu::new()
-            .child(nav_item(
-                t(L10nKey::SettingsNavAppearance),
-                SettingsSection::Appearance,
-                Icon::new(IconName::Palette),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavTerminal),
-                SettingsSection::Terminal,
-                Icon::new(IconName::SquareTerminal),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavInput),
-                SettingsSection::Input,
-                Icon::new(IconName::Settings2),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavSsh),
-                SettingsSection::Ssh,
-                Icon::new(IconName::Globe),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavAgents),
-                SettingsSection::Agents,
-                Icon::new(IconName::Bot),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavWindowTabs),
-                SettingsSection::WindowTabs,
-                Icon::new(IconName::WindowRestore),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavKeybindings),
-                SettingsSection::Keybindings,
-                Icon::new(IconName::CaseSensitive),
-            ))
-            .child(nav_item(
-                t(L10nKey::SettingsNavAbout),
-                SettingsSection::About,
-                Icon::empty().path("icons/circle-info.svg"),
-            ));
+        let nav_body = SettingsSection::ALL
+            .into_iter()
+            .fold(SidebarMenu::new(), |menu, target| {
+                menu.child(nav_item(t(target.title()), target, target.icon()))
+            });
 
         let sidebar = Sidebar::new("settings-sidebar")
             .collapsible(SidebarCollapsible::None)
@@ -1930,38 +2607,57 @@ impl Tty7App {
                             ),
                     ),
             )
-            .child(nav_body);
+            .child(nav_body)
+            .footer(
+                Button::new("settings-modified-filter")
+                    .label(t(L10nKey::SettingsModifiedOnly))
+                    .ghost()
+                    .small()
+                    .selected(self.active_settings().is_some_and(|s| s.modified_only))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        if let Some(s) = this.active_settings_mut() {
+                            s.modified_only = !s.modified_only;
+                        }
+                        this.autoselect_settings_search(cx);
+                    })),
+            );
 
-        let content = match section {
-            SettingsSection::Appearance => self.render_settings_appearance(cx),
-            SettingsSection::Terminal => self.render_settings_terminal(cx),
-            SettingsSection::Input => self.render_settings_input(cx),
-            SettingsSection::Ssh => self.render_settings_ssh(cx),
-            SettingsSection::Agents => self.render_settings_agents(cx),
-            SettingsSection::WindowTabs => self.render_settings_window_tabs(cx),
-            SettingsSection::Keybindings => self.render_settings_keybindings(cx),
-            SettingsSection::About => self.render_settings_about(cx),
+        let content = if searching {
+            self.render_settings_search(cx)
+        } else {
+            match section {
+                SettingsSection::General => self.render_settings_general(cx),
+                SettingsSection::Appearance => self.render_settings_appearance(cx),
+                SettingsSection::Terminal => self.render_settings_terminal(cx),
+                SettingsSection::KeyboardMouse => self.render_settings_input(cx),
+                SettingsSection::Ssh => self.render_settings_ssh(cx),
+                SettingsSection::Agents => self.render_settings_agents(cx),
+                SettingsSection::WindowTabs => self.render_window_preferences(false, cx),
+                SettingsSection::Keybindings => self.render_settings_keybindings(cx),
+                SettingsSection::About => self.render_settings_about(cx),
+            }
         };
 
         // A query that matches nothing anywhere leaves the nav badge-less and
         // `autoselect_settings_search` with nowhere to go, so without this the
         // page just sits there looking like the search did nothing.
-        let no_match_note = (!query.is_empty() && total_match_count(&query) == 0).then(|| {
-            div()
-                .id("settings-no-match")
-                .anchor_scroll(self.active_settings().map(|s| s.search_anchor.clone()))
-                .mb_6()
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .bg(note_bg)
-                .text_sm()
-                .text_color(header_muted)
-                .child(t_fmt(
-                    L10nKey::SettingsNothingMatches,
-                    &[("query", query.as_str())],
-                ))
-        });
+        let no_match_note = (!searching && !query.is_empty() && total_match_count(&query) == 0)
+            .then(|| {
+                div()
+                    .id("settings-no-match")
+                    .anchor_scroll(self.active_settings().map(|s| s.search_anchor.clone()))
+                    .mb_6()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(note_bg)
+                    .text_sm()
+                    .text_color(header_muted)
+                    .child(t_fmt(
+                        L10nKey::SettingsNothingMatches,
+                        &[("query", query.as_str())],
+                    ))
+            });
 
         // No fill of its own: the root already paints the opaque surface and
         // the background image behind it, and repainting here would hide the
@@ -1972,12 +2668,36 @@ impl Tty7App {
         // honour does not push the nav back — it overflows, and overflow here
         // means content painted off the edge of the window, which is the other
         // half of the bug this file is fixing.
-        let content_pane = if section == SettingsSection::Ssh {
+        let content_pane = if !searching && section == SettingsSection::Ssh {
             v_flex()
                 .id("settings-content")
                 .flex_1()
                 .min_w_0()
                 .h_full()
+                .when_some(
+                    self.active_settings().and_then(|s| s.save_error.clone()),
+                    |v, error| {
+                        v.child(
+                            v_flex()
+                                .p_3()
+                                .gap_2()
+                                .child(
+                                    div().text_sm().child(t_fmt(
+                                        L10nKey::SettingsSaveError,
+                                        &[("error", &error)],
+                                    )),
+                                )
+                                .child(
+                                    Button::new("retry-ssh-settings-save")
+                                        .label(t(L10nKey::SettingsRetrySave))
+                                        .small()
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.persist_settings_config(cx)
+                                        })),
+                                ),
+                        )
+                    },
+                )
                 .child(content)
                 .into_any_element()
         } else {
@@ -2021,6 +2741,86 @@ impl Tty7App {
                             .max_w(px(READING_COLUMN * ui_scale))
                             .mx_auto()
                             .children(no_match_note)
+                            .child(
+                                div()
+                                    .mb_5()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(t(if searching {
+                                        L10nKey::SettingsSearchResults
+                                    } else {
+                                        section.title()
+                                    })),
+                            )
+                            .when(self.theme_draft_dirty(), |v| {
+                                v.child(
+                                    v_flex()
+                                        .mb_4()
+                                        .gap_2()
+                                        .child(
+                                            div().text_sm().child(t(L10nKey::SettingsThemeDraft)),
+                                        )
+                                        .when_some(
+                                            self.active_settings()
+                                                .and_then(|s| s.theme_draft_error.clone()),
+                                            |v, error| {
+                                                v.child(div().text_sm().child(t_fmt(
+                                                    L10nKey::SettingsSaveError,
+                                                    &[("error", &error)],
+                                                )))
+                                            },
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("save-theme-draft")
+                                                        .label(t(L10nKey::SettingsSaveChanges))
+                                                        .small()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.save_theme_draft(window, cx);
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("cancel-theme-draft")
+                                                        .label(t(L10nKey::Cancel))
+                                                        .ghost()
+                                                        .small()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.cancel_theme_draft(window, cx)
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                )
+                            })
+                            .when_some(
+                                self.active_settings().and_then(|s| s.save_error.clone()),
+                                |v, error| {
+                                    v.child(
+                                        v_flex()
+                                            .mb_4()
+                                            .gap_2()
+                                            .child(div().text_sm().child(t_fmt(
+                                                L10nKey::SettingsSaveError,
+                                                &[("error", &error)],
+                                            )))
+                                            .child(
+                                                Button::new("retry-settings-save")
+                                                    .label(t(L10nKey::SettingsRetrySave))
+                                                    .small()
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.persist_settings_config(cx)
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                },
+                            )
                             .child(content),
                     ),
                 );
@@ -2056,12 +2856,106 @@ impl Tty7App {
             // layer is the picker: closing the whole page instead threw away a
             // panel the user had opened a moment ago, and left them to walk
             // back to Appearance to try again.
+            .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                if searching
+                    && this
+                        .active_settings()
+                        .is_some_and(|s| s.search.read(cx).focus_handle(cx).is_focused(window))
+                {
+                    let key = ev.keystroke.key.as_str();
+                    if matches!(key, "up" | "down" | "enter") {
+                        let s = this.active_settings().unwrap();
+                        let query = s.search.read(cx).value().trim().to_lowercase();
+                        let mut entries = settings_search_entries()
+                            .iter()
+                            .filter(|e| {
+                                entry_matches(e, &query)
+                                    && (!s.modified_only || e.modified(cx.global::<Config>()))
+                            })
+                            .collect::<Vec<_>>();
+                        entries.sort_by_key(|e| {
+                            (
+                                e.rank(&query),
+                                SettingsSection::ALL
+                                    .iter()
+                                    .position(|&s| s == e.section)
+                                    .unwrap_or(0),
+                            )
+                        });
+                        let actions = if s.modified_only {
+                            Vec::new()
+                        } else {
+                            crate::ui::keymap::default_bindings()
+                                .into_iter()
+                                .filter(|(action, _)| keybinding_matches_query(action, &query))
+                                .map(|(action, _)| action)
+                                .collect::<Vec<_>>()
+                        };
+                        let count = entries.len() + actions.len();
+                        if count > 0 {
+                            let index = s.search_selection.min(count - 1);
+                            if key == "enter" && index >= entries.len() {
+                                let action = actions[index - entries.len()].clone();
+                                this.with_settings_edits_resolved(
+                                    window,
+                                    cx,
+                                    move |this, window, cx| {
+                                        this.navigate_settings(
+                                            SettingsSection::Keybindings,
+                                            None,
+                                            window,
+                                            cx,
+                                        );
+                                        if let Some(s) = this.active_settings() {
+                                            s.shortcut_search.clone().update(cx, |s, cx| {
+                                                s.set_value(action, window, cx)
+                                            });
+                                        }
+                                    },
+                                );
+                            } else if key == "enter" {
+                                let entry = entries[index];
+                                let target =
+                                    if entry.title == L10nKey::SettingsSearchKeybindingsTitle {
+                                        SettingsSection::Keybindings
+                                    } else {
+                                        entry.section
+                                    };
+                                this.navigate_settings(target, Some(entry.title), window, cx);
+                            } else if let Some(s) = this.active_settings_mut() {
+                                s.search_selection = if key == "down" {
+                                    (index + 1).min(count - 1)
+                                } else {
+                                    index.saturating_sub(1)
+                                };
+                                s.reveal_first_hit.set(true);
+                                cx.notify();
+                            }
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+            }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key.as_str() != "escape" {
                     return;
                 }
                 if show_theme_panel {
                     this.close_theme_panel(window, cx);
+                    return;
+                }
+                if searching {
+                    if let Some(s) = this.active_settings_mut() {
+                        s.modified_only = false;
+                    }
+                    if let Some(s) = this.active_settings() {
+                        s.search
+                            .clone()
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                    this.autoselect_settings_search(cx);
+                    cx.stop_propagation();
                     return;
                 }
                 this.close_settings_checked(window, cx);
@@ -2183,6 +3077,15 @@ impl Tty7App {
     /// with the one answer left above the fold.
     fn first_hit_anchor(&self, label: &str, cx: &Context<Self>) -> Option<gpui::ScrollAnchor> {
         let s = self.active_settings()?;
+        if s.search_active || s.search_rows.borrow().is_some() {
+            return None;
+        }
+        if let Some(target) = s.focused_setting {
+            if t(target) == label && !self.settings_hit_anchored.replace(true) {
+                return Some(s.search_anchor.clone());
+            }
+            return None;
+        }
         let query = s.search.read(cx).value().trim().to_lowercase();
         if query.is_empty() || section_match_count(s.section, &query) == 0 {
             return None;
@@ -2254,6 +3157,13 @@ impl Tty7App {
         let theme = cx.theme();
         let label = label.into();
         let desc = desc.into();
+        let entry = settings_search_entries()
+            .iter()
+            .find(|entry| t(entry.title) == label);
+        let modified = entry.is_some_and(|entry| entry.modified(cx.global::<Config>()));
+        let capture = self
+            .active_settings()
+            .is_some_and(|s| s.search_rows.borrow().is_some());
         // Descriptions can contain live status (for example an agent hook target), so they
         // must not participate in the identity that preserves GPUI's hover state.
         let element_id = settings_row_id(&label, &desc);
@@ -2261,7 +3171,10 @@ impl Tty7App {
         // findable once you are on the page. Only mark rows when the section
         // actually holds a match — otherwise a query that landed elsewhere
         // would grey out a page the user is simply reading.
-        let (hit, miss) = match self.active_settings() {
+        let (hit, miss) = match self
+            .active_settings()
+            .filter(|s| !s.search_active && !capture)
+        {
             Some(s) => {
                 let query = s.search.read(cx).value().trim().to_lowercase();
                 match query.is_empty() || section_match_count(s.section, &query) == 0 {
@@ -2301,7 +3214,38 @@ impl Tty7App {
                         .child(desc),
                 )
             });
-        div()
+        let labels = labels.when(modified, |v| {
+            v.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(t(L10nKey::SettingsModified)),
+                    )
+                    .when_some(
+                        entry.filter(|e| {
+                            e.title != L10nKey::SettingsSearchKeybindingsTitle
+                                && e.title != L10nKey::SettingsThemeIntroTitle
+                        }),
+                        |v, entry| {
+                            let key = entry.title;
+                            v.child(
+                                Button::new(SharedString::from(format!("reset-setting-{key:?}")))
+                                    .label(t(L10nKey::SettingsResetValue))
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.reset_settings_value(key, window, cx)
+                                    })),
+                            )
+                        },
+                    ),
+            )
+        });
+        let row = div()
             .id(element_id)
             .flex()
             .when(stacked, |row| row.flex_col().items_start().gap_2())
@@ -2328,7 +3272,20 @@ impl Tty7App {
                     .when(stacked, |c| c.w_full())
                     .when(!stacked, |c| c.flex_shrink_0())
                     .child(control),
-            )
+            );
+        if capture {
+            if let Some(entry) = entry {
+                self.active_settings()
+                    .unwrap()
+                    .search_rows
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .push((entry.title, row.into_any_element()));
+                return div().id("captured-setting");
+            }
+        }
+        row
     }
 
     pub(crate) fn segmented(
@@ -2452,6 +3409,65 @@ impl Tty7App {
             .into_any_element()
     }
 
+    fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = self.active_settings() else {
+            return div().into_any_element();
+        };
+        let language_select = state.language_select.clone();
+        let foreground = cx.theme().foreground;
+        let muted_fg = cx.theme().muted_foreground;
+        let control_h = px(24.);
+        let language_control = Select::new(&language_select)
+            .small()
+            .w(px(FIELD_W))
+            .h(control_h)
+            .menu_max_h(px(224.))
+            .into_any_element();
+
+        v_flex()
+            .child(self.settings_row(t(L10nKey::SettingsLanguage), t(L10nKey::SettingsLanguageDesc), language_control, cx))
+            .child(self.section_rule(cx))
+            .child(self.render_window_preferences(true, cx))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(self.section_rule(cx)).child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(foreground)
+                                .child(t(L10nKey::SettingsDefaultTerminal)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsDefaultTerminalDesc)),
+                        )
+                        .child(
+                            Button::new("set-default-terminal")
+                                .label(t(L10nKey::SettingsDefaultTerminalSet))
+                                .small()
+                                .on_click(cx.listener(|_, _, window, cx| {
+                                    let message = match crate::core::default_terminal::set_as_default_terminal() {
+                                        Ok(()) => t(L10nKey::SettingsDefaultTerminalSetSuccess).to_string(),
+                                        Err(error) => t_fmt(
+                                            L10nKey::SettingsDefaultTerminalSetFailed,
+                                            &[("error", &error)],
+                                        ),
+                                    };
+                                    window.push_notification(message, cx);
+                                })),
+                        ),
+                )
+            })
+
+            .child(self.section_rule(cx))
+            .child(self.render_settings_maintenance(cx))
+            .into_any_element()
+    }
+
     fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let foreground = theme.foreground;
@@ -2459,14 +3475,13 @@ impl Tty7App {
         let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (font_select, font_bold_select, font_italic_select, ui_font_select, language_select) =
+        let (font_select, font_bold_select, font_italic_select, ui_font_select) =
             match self.active_settings() {
                 Some(s) => (
                     s.font_select.clone(),
                     s.font_bold_select.clone(),
                     s.font_italic_select.clone(),
                     s.ui_font_select.clone(),
-                    s.language_select.clone(),
                 ),
                 None => return div().into_any_element(),
             };
@@ -2499,37 +3514,35 @@ impl Tty7App {
                 .child(glyph)
         };
         let control_h = px(24.);
-        let stepper_row =
-            move |dec: Stateful<Div>, value: String, inc: Stateful<Div>, reset: Button| {
-                h_flex()
-                    .items_center()
-                    .gap_3()
-                    .child(reset)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .h(control_h)
-                            .rounded(rounding::TRACK_RADIUS)
-                            .bg(stepper_bg)
-                            .border_1()
-                            .border_color(border)
-                            .overflow_hidden()
-                            .child(dec)
-                            .child(
-                                div()
-                                    .min_w(px(40.))
-                                    .border_l_1()
-                                    .border_color(border)
-                                    .py_1()
-                                    .text_center()
-                                    .text_sm()
-                                    .text_color(foreground)
-                                    .child(value),
-                            )
-                            .child(inc),
-                    )
-                    .into_any_element()
-            };
+        let stepper_row = move |dec: Stateful<Div>, value: String, inc: Stateful<Div>| {
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .h(control_h)
+                        .rounded(rounding::TRACK_RADIUS)
+                        .bg(stepper_bg)
+                        .border_1()
+                        .border_color(border)
+                        .overflow_hidden()
+                        .child(dec)
+                        .child(
+                            div()
+                                .min_w(px(40.))
+                                .border_l_1()
+                                .border_color(border)
+                                .py_1()
+                                .text_center()
+                                .text_sm()
+                                .text_color(foreground)
+                                .child(value),
+                        )
+                        .child(inc),
+                )
+                .into_any_element()
+        };
         let font_size_control = stepper_row(
             step("font-dec", "−", 0).on_click(
                 cx.listener(|this, _, _w, cx| this.change_font_size(-FONT_SIZE_STEP, cx)),
@@ -2537,11 +3550,6 @@ impl Tty7App {
             format!("{:.0}", font_size),
             step("font-inc", "+", 2)
                 .on_click(cx.listener(|this, _, _w, cx| this.change_font_size(FONT_SIZE_STEP, cx))),
-            Button::new("font-reset")
-                .label(t(L10nKey::Reset))
-                .ghost()
-                .small()
-                .on_click(cx.listener(|this, _, _w, cx| this.reset_font_size(cx))),
         );
 
         let ui_font_size = self.ui_font_size(cx);
@@ -2553,11 +3561,6 @@ impl Tty7App {
             step("ui-font-inc", "+", 2).on_click(
                 cx.listener(|this, _, _w, cx| this.change_ui_font_size(UI_FONT_SIZE_STEP, cx)),
             ),
-            Button::new("ui-font-reset")
-                .label(t(L10nKey::Reset))
-                .ghost()
-                .small()
-                .on_click(cx.listener(|this, _, _w, cx| this.reset_ui_font_size(cx))),
         );
 
         let line_height = self.line_height;
@@ -2569,11 +3572,6 @@ impl Tty7App {
             step("lh-inc", "+", 2).on_click(
                 cx.listener(|this, _, _w, cx| this.change_line_height(LINE_HEIGHT_STEP, cx)),
             ),
-            Button::new("lh-reset")
-                .label(t(L10nKey::Reset))
-                .ghost()
-                .small()
-                .on_click(cx.listener(|this, _, _w, cx| this.reset_line_height(cx))),
         );
 
         let font_dropdown = |state: &Entity<SelectState<SearchableVec<String>>>| {
@@ -2592,12 +3590,6 @@ impl Tty7App {
         let ligature_switch = crate::ui::theme::switch("font-ligatures", cx)
             .checked(font_ligatures)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
-            .into_any_element();
-        let language_control = Select::new(&language_select)
-            .small()
-            .w(px(FIELD_W))
-            .h(control_h)
-            .menu_max_h(px(224.))
             .into_any_element();
 
         let cursor_idx = match cursor_style {
@@ -2639,19 +3631,11 @@ impl Tty7App {
             .child(self.section_rule(cx))
             .child(self.render_window_section(cx))
             .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsLanguage), cx))
+            .child(self.section_header(t(L10nKey::SettingsInterfaceFontGroup), cx))
             .child(self.settings_row(
-                t(L10nKey::SettingsLanguage),
-                t(L10nKey::SettingsLanguageDesc),
-                language_control,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsTypography), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsFontSize),
-                t(L10nKey::SettingsFontSizeDesc),
-                font_size_control,
+                t(L10nKey::SettingsUiFontFamily),
+                t(L10nKey::SettingsUiFontFamilyDesc),
+                ui_font_family_control,
                 cx,
             ))
             .child(self.settings_row(
@@ -2660,22 +3644,24 @@ impl Tty7App {
                 ui_font_size_control,
                 cx,
             ))
+            .child(self.section_rule(cx))
+            .child(self.section_header(t(L10nKey::SettingsTerminalFontGroup), cx))
             .child(self.settings_row(
-                t(L10nKey::SettingsUiFontFamily),
-                t(L10nKey::SettingsUiFontFamilyDesc),
-                ui_font_family_control,
+                t(L10nKey::SettingsFontFamily),
+                t(L10nKey::SettingsFontFamilyDesc),
+                font_family_control,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsFontSize),
+                t(L10nKey::SettingsFontSizeDesc),
+                font_size_control,
                 cx,
             ))
             .child(self.settings_row(
                 t(L10nKey::SettingsLineHeight),
                 t(L10nKey::SettingsLineHeightDesc),
                 line_height_control,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsFontFamily),
-                t(L10nKey::SettingsFontFamilyDesc),
-                font_family_control,
                 cx,
             ))
             .child(self.settings_row(
@@ -3145,7 +4131,7 @@ impl Tty7App {
             detail == SshDetail::Defaults,
             None,
             sf,
-            cx.listener(|this, _, _w, cx| this.select_ssh_defaults(cx)),
+            cx.listener(|this, _, window, cx| this.select_ssh_defaults(window, cx)),
             None,
             cx,
         ));
@@ -3311,6 +4297,9 @@ impl Tty7App {
             Some(live),
             sf,
             cx.listener(move |this, _, window, cx| {
+                if selected {
+                    return;
+                }
                 if let Some(profile) = cx
                     .global::<Config>()
                     .ssh_profiles
@@ -3454,7 +4443,13 @@ impl Tty7App {
         live
     }
 
-    pub(crate) fn select_ssh_defaults(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn select_ssh_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ssh_form_dirty(cx) {
+            self.with_settings_edits_resolved(window, cx, |this, window, cx| {
+                this.select_ssh_defaults(window, cx)
+            });
+            return;
+        }
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = None;
             s.ssh_detail = SshDetail::Defaults;
@@ -3463,26 +4458,12 @@ impl Tty7App {
     }
 
     fn toggle_ssh_group(&mut self, key: String, cx: &mut Context<Self>) {
-        let selected_here = match self.active_settings().map(|s| s.ssh_detail) {
-            Some(SshDetail::Profile(id)) => cx
-                .global::<Config>()
-                .ssh_profiles
-                .iter()
-                .find(|p| p.id == id)
-                .is_some_and(|p| ssh_group_key(p) == key),
-            _ => false,
-        };
-        let Some(s) = self.active_settings_mut() else {
-            return;
-        };
-        let collapsing = !s.ssh_collapsed_groups.remove(&key);
-        if collapsing {
-            s.ssh_collapsed_groups.insert(key);
-            if selected_here {
-                s.ssh_form = None;
-                s.ssh_detail = SshDetail::Defaults;
+        if let Some(s) = self.active_settings_mut() {
+            if !s.ssh_collapsed_groups.remove(&key) {
+                s.ssh_collapsed_groups.insert(key);
             }
         }
+        // Collapsing the list never discards the profile being edited.
         cx.notify();
     }
 
@@ -3765,6 +4746,13 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.ssh_form_dirty(cx) {
+            let profile = profile.clone();
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.ssh_form_load(&profile, window, cx)
+            });
+            return;
+        }
         let jump_name = profile
             .jump_host
             .and_then(|id| {
@@ -4133,8 +5121,35 @@ impl Tty7App {
                 cfg.ssh_profiles.push(profile.clone());
             }
         });
+        if self
+            .active_settings()
+            .is_some_and(|s| s.save_error.is_some())
+        {
+            return None;
+        }
         self.save_ssh_form_secrets(&profile, window, cx);
         Some(id)
+    }
+
+    fn cancel_ssh_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self
+            .active_settings()
+            .and_then(|s| s.ssh_form.as_ref().map(|form| form.editing));
+        let saved = id.and_then(|id| {
+            cx.global::<Config>()
+                .ssh_profiles
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+        });
+        if let Some(s) = self.active_settings_mut() {
+            s.ssh_form = None;
+            s.ssh_detail = SshDetail::Defaults;
+        }
+        if let Some(profile) = saved {
+            self.ssh_form_load(&profile, window, cx);
+        }
+        cx.notify();
     }
 
     /// Move the two secrets in the form into the keychain — or out of it.
@@ -4303,22 +5318,9 @@ impl Tty7App {
     /// closes as the tail of something they explicitly chose, and has already
     /// saved or does not care.
     pub(crate) fn close_settings_checked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ssh_form_dirty(cx) {
-            self.close_settings(window, cx);
-            return;
-        }
-        let answer = window.prompt(
-            gpui::PromptLevel::Warning,
-            t(L10nKey::SettingsDiscardChangesTitle),
-            Some(t(L10nKey::SettingsDiscardChangesBody)),
-            &crate::ui::confirm_answers(t(L10nKey::EditorDiscard), t(L10nKey::SettingsKeepEditing)),
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(0) = answer.await else { return };
-            let _ = this.update_in(cx, |this, window, cx| this.close_settings(window, cx));
-        })
-        .detach();
+        self.with_settings_edits_resolved(window, cx, |this, window, cx| {
+            this.close_settings(window, cx)
+        });
     }
 
     /// Dial the host the form is holding — without saving it, and without
@@ -4768,6 +5770,10 @@ impl Tty7App {
         });
 
         let header = h_flex()
+            .w_full()
+            .when(self.settings_row_under(STACK_ROW_BELOW, cx), |v| {
+                v.flex_col()
+            })
             .items_start()
             .justify_between()
             .gap_4()
@@ -4807,7 +5813,19 @@ impl Tty7App {
             .child(
                 h_flex()
                     .flex_shrink_0()
+                    .max_w_full()
+                    .flex_wrap()
                     .gap_2()
+                    .child(
+                        Button::new("ssh-form-cancel")
+                            .label(t(L10nKey::Cancel))
+                            .ghost()
+                            .small()
+                            .disabled(!dirty)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_ssh_form(window, cx)),
+                            ),
+                    )
                     .child(
                         // Dials the host exactly as Connect would — proxy, jump
                         // and all — but keeps the answer here instead of
@@ -5937,12 +6955,8 @@ impl Tty7App {
         let cfg = cx.global::<Config>();
         let link_url = cfg.link_url;
         let ssh_loopback_forward = cfg.ssh_loopback_forward;
-        let mouse_hide = cfg.mouse_hide_while_typing;
-        let focus_follows = cfg.focus_follows_mouse;
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let smooth_scroll = cfg.smooth_scroll;
-        let mouse_reporting = cfg.mouse_reporting;
-        let mouse_zoom = cfg.mouse_zoom_modifier;
         let bell = cfg.bell;
         // A bucket highlights only on an exact match; any other value gets a
         // "Custom (N)" cell so the highlight never claims a number the config
@@ -6016,56 +7030,6 @@ impl Tty7App {
             },
         );
 
-        let focus_switch = crate::ui::theme::switch("term-focus-follows", cx)
-            .checked(focus_follows)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_focus_follows_mouse(*on, cx)))
-            .into_any_element();
-        let mouse_hide_switch = crate::ui::theme::switch("term-mouse-hide", cx)
-            .checked(mouse_hide)
-            .on_click(
-                cx.listener(|this, on: &bool, _w, cx| this.set_mouse_hide_while_typing(*on, cx)),
-            )
-            .into_any_element();
-        let mouse_report_switch = crate::ui::theme::switch("term-mouse-report", cx)
-            .checked(mouse_reporting)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
-            .into_any_element();
-        // Ctrl only earns a cell where it is a different key from the
-        // platform modifier: off macOS the two are the same key, and a
-        // segmented control with the same key twice is a bug the user has to
-        // decode. A config that names `ctrl` there still highlights it, in the
-        // one cell that means it.
-        let mac = cfg!(target_os = "macos");
-        let zoom_labels: Vec<&str> = if mac {
-            vec!["⌘", "⌃", "⌥", t(L10nKey::SettingsMouseZoomOff)]
-        } else {
-            vec!["Ctrl", "Alt", t(L10nKey::SettingsMouseZoomOff)]
-        };
-        let zoom_idx = match (mouse_zoom, mac) {
-            (MouseZoomModifier::Platform, _) => 0,
-            (MouseZoomModifier::Ctrl, true) => 1,
-            (MouseZoomModifier::Ctrl, false) => 0,
-            (MouseZoomModifier::Alt, true) => 2,
-            (MouseZoomModifier::Alt, false) => 1,
-            (MouseZoomModifier::None, true) => 3,
-            (MouseZoomModifier::None, false) => 2,
-        };
-        let zoom_control = self.segmented(
-            "term-mouse-zoom",
-            &zoom_labels,
-            zoom_idx,
-            cx,
-            move |this, ix, _w, cx| {
-                let modifier = match (ix, mac) {
-                    (0, _) => MouseZoomModifier::Platform,
-                    (1, true) => MouseZoomModifier::Ctrl,
-                    (1, false) => MouseZoomModifier::Alt,
-                    (2, true) => MouseZoomModifier::Alt,
-                    _ => MouseZoomModifier::None,
-                };
-                this.set_mouse_zoom_modifier(modifier, cx);
-            },
-        );
         let bell_idx = match bell {
             BellMode::None => 0,
             BellMode::Visual => 1,
@@ -6118,6 +7082,8 @@ impl Tty7App {
         v_flex()
             .child(self.render_shell_group(cx))
             .child(self.section_rule(cx))
+            .child(self.render_input_groups(true, cx))
+            .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsScrolling), cx))
             .child(self.settings_row(
                 t(L10nKey::SettingsScrollback),
@@ -6135,32 +7101,6 @@ impl Tty7App {
                 t(L10nKey::SettingsSmoothScroll),
                 t(L10nKey::SettingsSmoothScrollDesc),
                 smooth_scroll_switch,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsMouse), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsFocusFollowsMouse),
-                t(L10nKey::SettingsFocusFollowsMouseDesc),
-                focus_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsHideMouseWhileTyping),
-                t(L10nKey::SettingsHideMouseWhileTypingDesc),
-                mouse_hide_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsReportMouseToApps),
-                t(L10nKey::SettingsReportMouseToAppsDesc),
-                mouse_report_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsMouseZoom),
-                t(L10nKey::SettingsMouseZoomDesc),
-                zoom_control,
                 cx,
             ))
             .child(self.section_rule(cx))
@@ -6217,6 +7157,107 @@ impl Tty7App {
     }
 
     fn render_settings_input(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cfg = cx.global::<Config>();
+        let mouse_hide = cfg.mouse_hide_while_typing;
+        let focus_follows = cfg.focus_follows_mouse;
+        let mouse_reporting = cfg.mouse_reporting;
+        let mouse_zoom = cfg.mouse_zoom_modifier;
+        let focus_switch = crate::ui::theme::switch("term-focus-follows", cx)
+            .checked(focus_follows)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_focus_follows_mouse(*on, cx)))
+            .into_any_element();
+        let mouse_hide_switch = crate::ui::theme::switch("term-mouse-hide", cx)
+            .checked(mouse_hide)
+            .on_click(
+                cx.listener(|this, on: &bool, _w, cx| this.set_mouse_hide_while_typing(*on, cx)),
+            )
+            .into_any_element();
+        let mouse_report_switch = crate::ui::theme::switch("term-mouse-report", cx)
+            .checked(mouse_reporting)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
+            .into_any_element();
+        // Ctrl only earns a cell where it is a different key from the
+        // platform modifier: off macOS the two are the same key, and a
+        // segmented control with the same key twice is a bug the user has to
+        // decode. A config that names `ctrl` there still highlights it, in the
+        // one cell that means it.
+        let mac = cfg!(target_os = "macos");
+        let zoom_labels: Vec<&str> = if mac {
+            vec!["⌘", "⌃", "⌥", t(L10nKey::SettingsMouseZoomOff)]
+        } else {
+            vec!["Ctrl", "Alt", t(L10nKey::SettingsMouseZoomOff)]
+        };
+        let zoom_idx = match (mouse_zoom, mac) {
+            (MouseZoomModifier::Platform, _) => 0,
+            (MouseZoomModifier::Ctrl, true) => 1,
+            (MouseZoomModifier::Ctrl, false) => 0,
+            (MouseZoomModifier::Alt, true) => 2,
+            (MouseZoomModifier::Alt, false) => 1,
+            (MouseZoomModifier::None, true) => 3,
+            (MouseZoomModifier::None, false) => 2,
+        };
+        let zoom_control = self.segmented(
+            "term-mouse-zoom",
+            &zoom_labels,
+            zoom_idx,
+            cx,
+            move |this, ix, _w, cx| {
+                let modifier = match (ix, mac) {
+                    (0, _) => MouseZoomModifier::Platform,
+                    (1, true) => MouseZoomModifier::Ctrl,
+                    (1, false) => MouseZoomModifier::Alt,
+                    (2, true) => MouseZoomModifier::Alt,
+                    _ => MouseZoomModifier::None,
+                };
+                this.set_mouse_zoom_modifier(modifier, cx);
+            },
+        );
+        v_flex()
+            .child(
+                self.settings_row(
+                    t(L10nKey::SettingsSearchKeybindingsTitle),
+                    t(L10nKey::SettingsKeybindingsIntroDesc),
+                    Button::new("open-keybindings")
+                        .label(t(L10nKey::SettingsEditShortcuts))
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.navigate_settings(SettingsSection::Keybindings, None, window, cx)
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(self.render_input_groups(false, cx))
+            .child(self.section_rule(cx))
+            .child(self.section_header(t(L10nKey::SettingsMouse), cx))
+            .child(self.settings_row(
+                t(L10nKey::SettingsFocusFollowsMouse),
+                t(L10nKey::SettingsFocusFollowsMouseDesc),
+                focus_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsHideMouseWhileTyping),
+                t(L10nKey::SettingsHideMouseWhileTypingDesc),
+                mouse_hide_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsReportMouseToApps),
+                t(L10nKey::SettingsReportMouseToAppsDesc),
+                mouse_report_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsMouseZoom),
+                t(L10nKey::SettingsMouseZoomDesc),
+                zoom_control,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_input_groups(&self, prompt: bool, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let option_as_alt = cfg.macos_option_as_alt;
         let prompt_editor = cfg.prompt_editor;
@@ -6283,61 +7324,65 @@ impl Tty7App {
         });
 
         v_flex()
-            .child(self.section_intro(
-                t(L10nKey::SettingsPrompt),
-                t(L10nKey::SettingsPromptIntro),
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsPromptEditor),
-                t(L10nKey::SettingsPromptEditorDesc),
-                prompt_editor_switch,
-                cx,
-            ))
-            .child(self.settings_row_gated_when(
-                t(L10nKey::SettingsTabCompletion),
-                gated(L10nKey::SettingsTabCompletionDesc),
-                tab_completion_switch,
-                !prompt_editor,
-                cx,
-            ))
-            .child(self.settings_row_gated_when(
-                t(L10nKey::SettingsHistorySearch),
-                gated(L10nKey::SettingsHistorySearchDesc),
-                history_search_switch,
-                !prompt_editor,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsPerPaneHistory),
-                t(L10nKey::SettingsPerPaneHistoryDescription),
-                per_pane_history_switch,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsSelectionClipboard), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsSmartSelection),
-                t(L10nKey::SettingsSmartSelectionDesc),
-                smart_select_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsCopyOnSelect),
-                t(L10nKey::SettingsCopyOnSelectDesc),
-                copy_on_select_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsTrimTrailingSpaces),
-                t(L10nKey::SettingsTrimTrailingSpacesDesc),
-                trim_switch,
-                cx,
-            ))
-            .when_some(option_alt_row, |v, row| {
+            .when(prompt, |v| {
+                v.child(self.section_intro(
+                    t(L10nKey::SettingsPrompt),
+                    t(L10nKey::SettingsPromptIntro),
+                    cx,
+                ))
+                .child(self.settings_row(
+                    t(L10nKey::SettingsPromptEditor),
+                    t(L10nKey::SettingsPromptEditorDesc),
+                    prompt_editor_switch,
+                    cx,
+                ))
+                .child(self.settings_row_gated_when(
+                    t(L10nKey::SettingsTabCompletion),
+                    gated(L10nKey::SettingsTabCompletionDesc),
+                    tab_completion_switch,
+                    !prompt_editor,
+                    cx,
+                ))
+                .child(self.settings_row_gated_when(
+                    t(L10nKey::SettingsHistorySearch),
+                    gated(L10nKey::SettingsHistorySearchDesc),
+                    history_search_switch,
+                    !prompt_editor,
+                    cx,
+                ))
+                .child(self.settings_row(
+                    t(L10nKey::SettingsPerPaneHistory),
+                    t(L10nKey::SettingsPerPaneHistoryDescription),
+                    per_pane_history_switch,
+                    cx,
+                ))
+            })
+            .when(!prompt, |v| {
                 v.child(self.section_rule(cx))
-                    .child(self.section_header(t(L10nKey::SettingsKeyboard), cx))
-                    .child(row)
+                    .child(self.section_header(t(L10nKey::SettingsSelectionClipboard), cx))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsSmartSelection),
+                        t(L10nKey::SettingsSmartSelectionDesc),
+                        smart_select_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsCopyOnSelect),
+                        t(L10nKey::SettingsCopyOnSelectDesc),
+                        copy_on_select_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsTrimTrailingSpaces),
+                        t(L10nKey::SettingsTrimTrailingSpacesDesc),
+                        trim_switch,
+                        cx,
+                    ))
+                    .when_some(option_alt_row, |v, row| {
+                        v.child(self.section_rule(cx))
+                            .child(self.section_header(t(L10nKey::SettingsKeyboard), cx))
+                            .child(row)
+                    })
             })
             .into_any_element()
     }
@@ -6550,7 +7595,7 @@ impl Tty7App {
         )
     }
 
-    fn render_settings_window_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_window_preferences(&self, general: bool, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let startup_idx = match cfg.startup_mode {
             crate::core::config::StartupMode::Normal => 0,
@@ -6701,71 +7746,77 @@ impl Tty7App {
         );
 
         v_flex()
-            .child(self.section_header(t(L10nKey::SettingsWindow), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsStartupWindow),
-                t(L10nKey::SettingsStartupWindowDesc),
-                startup_radio,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsRememberWindowSize),
-                t(L10nKey::SettingsRememberWindowSizeDesc),
-                remember_window_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsRestoreLastLayout),
-                t(L10nKey::SettingsRestoreLastLayoutDesc),
-                restore_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsShowTrayIcon),
-                t(L10nKey::SettingsShowTrayIconDesc),
-                tray_switch,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsTabs), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsNewTabPosition),
-                t(L10nKey::SettingsNewTabPositionDesc),
-                new_tab_radio,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsTabBarPosition),
-                t(L10nKey::SettingsTabBarPositionDesc),
-                tab_bar_radio,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsSidebarGrouping),
-                t(L10nKey::SettingsSidebarGroupingDesc),
-                sidebar_grouping_radio,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsDiffPreviewFromCounts),
-                t(L10nKey::SettingsDiffPreviewFromCountsDesc),
-                sidebar_diff_switch,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsNotifications), cx))
-            .child(self.settings_row(
-                t(L10nKey::SettingsNotifyOnCommandFinish),
-                t(L10nKey::SettingsNotifyOnCommandFinishDesc),
-                notify_radio,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsNotifyThreshold),
-                t(L10nKey::SettingsNotifyThresholdDesc),
-                threshold_radio,
-                cx,
-            ))
+            .when(general, |v| {
+                v.child(self.section_header(t(L10nKey::SettingsWindow), cx))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsStartupWindow),
+                        t(L10nKey::SettingsStartupWindowDesc),
+                        startup_radio,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsRememberWindowSize),
+                        t(L10nKey::SettingsRememberWindowSizeDesc),
+                        remember_window_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsRestoreLastLayout),
+                        t(L10nKey::SettingsRestoreLastLayoutDesc),
+                        restore_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsShowTrayIcon),
+                        t(L10nKey::SettingsShowTrayIconDesc),
+                        tray_switch,
+                        cx,
+                    ))
+            })
+            .when(!general, |v| {
+                v.child(self.section_rule(cx))
+                    .child(self.section_header(t(L10nKey::SettingsTabs), cx))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsNewTabPosition),
+                        t(L10nKey::SettingsNewTabPositionDesc),
+                        new_tab_radio,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsTabBarPosition),
+                        t(L10nKey::SettingsTabBarPositionDesc),
+                        tab_bar_radio,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsSidebarGrouping),
+                        t(L10nKey::SettingsSidebarGroupingDesc),
+                        sidebar_grouping_radio,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsDiffPreviewFromCounts),
+                        t(L10nKey::SettingsDiffPreviewFromCountsDesc),
+                        sidebar_diff_switch,
+                        cx,
+                    ))
+            })
+            .when(general, |v| {
+                v.child(self.section_rule(cx))
+                    .child(self.section_header(t(L10nKey::SettingsNotifications), cx))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsNotifyOnCommandFinish),
+                        t(L10nKey::SettingsNotifyOnCommandFinishDesc),
+                        notify_radio,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsNotifyThreshold),
+                        t(L10nKey::SettingsNotifyThresholdDesc),
+                        threshold_radio,
+                        cx,
+                    ))
+            })
             .into_any_element()
     }
 
@@ -7197,7 +8248,7 @@ impl Tty7App {
         let section = SettingsSection::Keybindings;
         let query = self
             .active_settings()
-            .map(|s| s.search.read(cx).value().trim().to_lowercase())
+            .map(|s| s.shortcut_search.read(cx).value().trim().to_lowercase())
             .unwrap_or_default();
         let (foreground, muted, border, kbd_bg, accent) = {
             let t = cx.theme();
@@ -7514,6 +8565,10 @@ impl Tty7App {
         }
 
         v_flex()
+            .when_some(self.active_settings(), |v, s| {
+                v.child(Input::new(&s.shortcut_search).small())
+                    .child(self.section_rule(cx))
+            })
             .child(self.section_intro(
                 t(L10nKey::SettingsNavKeybindings),
                 t(L10nKey::SettingsKeybindingsIntroDesc),
@@ -7554,49 +8609,9 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Copied out rather than held: `self.segmented` below needs `cx`
-        // mutably, and a live `cx.theme()` borrow would keep it locked.
-        let (foreground, muted_fg, danger) = {
-            let theme = cx.theme();
-            (theme.foreground, theme.muted_foreground, theme.danger)
-        };
-
-        let update_status = cx
-            .try_global::<crate::core::update::UpdateStatus>()
-            .cloned()
-            .unwrap_or_default();
-        let update = update_status.available.clone();
-        let update_busy = matches!(
-            update_status.phase,
-            crate::core::update::UpdatePhase::Checking
-                | crate::core::update::UpdatePhase::Downloading { .. }
-                | crate::core::update::UpdatePhase::Verifying
-                | crate::core::update::UpdatePhase::Installing
-        );
-        let transferring = matches!(
-            update_status.phase,
-            crate::core::update::UpdatePhase::Downloading { .. }
-                | crate::core::update::UpdatePhase::Verifying
-        );
-        // A staged package whose directory has since been swept away is not an
-        // offer worth making.
-        let ready = update_status
-            .ready
-            .clone()
-            .filter(crate::core::update::PendingUpdate::is_usable);
-        // "You're running the latest version" directly above "27.0.0 is ready
-        // to install" is a contradiction, and a reachable one: a release that
-        // gets pulled after someone downloaded it leaves exactly this pair.
-        // The staged package is the more useful of the two claims.
-        let phase_text = localized_update_phase(&update_status.phase).filter(|_| {
-            ready.is_none()
-                || !matches!(
-                    update_status.phase,
-                    crate::core::update::UpdatePhase::UpToDate
-                )
-        });
-        let failure = update_status.failure.clone();
+    fn render_settings_maintenance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let foreground = cx.theme().foreground;
+        let muted_fg = cx.theme().muted_foreground;
         let stale_daemon = crate::daemon::spawn::local_daemon_stale_build();
         // Whether picking up the new build costs the user their running panes
         // decides what this offer is, so it decides what it says.
@@ -7648,13 +8663,138 @@ impl Tty7App {
             .when_some(http_proxy_error, |this, line| this.child(line))
             .into_any_element();
 
+        v_flex()
+            .child(self.section_header(t(L10nKey::SettingsUpdates), cx))
+            .child(self.settings_row(
+                t(L10nKey::SettingsUpdateChannel),
+                t(L10nKey::SettingsUpdateChannelDesc),
+                channel_picker,
+                cx,
+            ))
+            .child(
+                self.settings_row(
+                    t(L10nKey::SettingsCheckUpdatesOnLaunch),
+                    t(L10nKey::SettingsCheckUpdatesDesc),
+                    crate::ui::theme::switch("check-updates", cx)
+                        .checked(check_for_updates)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            this.set_check_for_updates(*on, cx)
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(
+                self.settings_row(
+                    t(L10nKey::SettingsAutoDownload),
+                    t(L10nKey::SettingsAutoDownloadDesc),
+                    crate::ui::theme::switch("auto-download-updates", cx)
+                        .checked(auto_download)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            this.set_auto_download_updates(*on, cx)
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(self.settings_row(
+                t(L10nKey::SettingsAppHttpProxy),
+                t(L10nKey::SettingsAppHttpProxyDesc),
+                http_proxy_control,
+                cx,
+            ))
+            .child(self.section_rule(cx))
+            .child(self.section_header(t(L10nKey::SettingsServer), cx))
+            .child(
+                v_flex()
+                    .gap_2()
+                    // The other half of an in-place update: the app is new, the
+                    // process serving every pane is not. Said here rather than
+                    // beside the update controls, so the one button that offers
+                    // to pick the new build up stays the only one on the page.
+                    .when_some(stale_daemon.as_deref(), |this, build| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(foreground)
+                                .child(t_fmt(L10nKey::SettingsDaemonStale, &[("build", build)])),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            // A stale server has a more specific thing to say
+                            // than the section's standing description, and it
+                            // ends with the same button.
+                            .child(t(if stale_daemon.is_some() {
+                                stale_daemon_note
+                            } else {
+                                L10nKey::SettingsServerDesc
+                            })),
+                    )
+                    .child(
+                        h_flex().child(
+                            Button::new("restart-daemon")
+                                .label(t(L10nKey::SettingsRestartServer))
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restart_daemon(window, cx)
+                                })),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Copy colors before constructing controls that borrow `cx` mutably.
+        let (foreground, muted_fg, danger) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground, theme.danger)
+        };
+
+        let update_status = cx
+            .try_global::<crate::core::update::UpdateStatus>()
+            .cloned()
+            .unwrap_or_default();
+        let update = update_status.available.clone();
+        let update_busy = matches!(
+            update_status.phase,
+            crate::core::update::UpdatePhase::Checking
+                | crate::core::update::UpdatePhase::Downloading { .. }
+                | crate::core::update::UpdatePhase::Verifying
+                | crate::core::update::UpdatePhase::Installing
+        );
+        let transferring = matches!(
+            update_status.phase,
+            crate::core::update::UpdatePhase::Downloading { .. }
+                | crate::core::update::UpdatePhase::Verifying
+        );
+        // A staged package whose directory has since been swept away is not an
+        // offer worth making.
+        let ready = update_status
+            .ready
+            .clone()
+            .filter(crate::core::update::PendingUpdate::is_usable);
+        // "You're running the latest version" directly above "27.0.0 is ready
+        // to install" is a contradiction, and a reachable one: a release that
+        // gets pulled after someone downloaded it leaves exactly this pair.
+        // The staged package is the more useful of the two claims.
+        let phase_text = localized_update_phase(&update_status.phase).filter(|_| {
+            ready.is_none()
+                || !matches!(
+                    update_status.phase,
+                    crate::core::update::UpdatePhase::UpToDate
+                )
+        });
+        let failure = update_status.failure.clone();
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
             include_bytes!("../../assets/logo@256.png").to_vec(),
         ));
 
         v_flex()
-            .child(self.section_header(t(L10nKey::SettingsNavAbout), cx))
             .child(
                 h_flex()
                     .gap_4()
@@ -7690,40 +8830,6 @@ impl Tty7App {
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsAboutDesc1)),
             )
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(self.section_rule(cx)).child(
-                    v_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(foreground)
-                                .child(t(L10nKey::SettingsDefaultTerminal)),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_fg)
-                                .child(t(L10nKey::SettingsDefaultTerminalDesc)),
-                        )
-                        .child(
-                            Button::new("set-default-terminal")
-                                .label(t(L10nKey::SettingsDefaultTerminalSet))
-                                .small()
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    let message = match crate::core::default_terminal::set_as_default_terminal() {
-                                        Ok(()) => t(L10nKey::SettingsDefaultTerminalSetSuccess).to_string(),
-                                        Err(error) => t_fmt(
-                                            L10nKey::SettingsDefaultTerminalSetFailed,
-                                            &[("error", &error)],
-                                        ),
-                                    };
-                                    window.push_notification(message, cx);
-                                })),
-                        ),
-                )
-            })
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsUpdates), cx))
             .child(
@@ -7913,85 +9019,6 @@ impl Tty7App {
                                         })),
                                 )
                             }),
-                    )
-                    .child(self.settings_row(
-                        t(L10nKey::SettingsUpdateChannel),
-                        t(L10nKey::SettingsUpdateChannelDesc),
-                        channel_picker,
-                        cx,
-                    ))
-                    .child(
-                        self.settings_row(
-                            t(L10nKey::SettingsCheckUpdatesOnLaunch),
-                            t(L10nKey::SettingsCheckUpdatesDesc),
-                            crate::ui::theme::switch("check-updates", cx)
-                                .checked(check_for_updates)
-                                .on_click(cx.listener(|this, on: &bool, _w, cx| {
-                                    this.set_check_for_updates(*on, cx)
-                                }))
-                                .into_any_element(),
-                            cx,
-                        ),
-                    )
-                    .child(
-                        self.settings_row(
-                            t(L10nKey::SettingsAutoDownload),
-                            t(L10nKey::SettingsAutoDownloadDesc),
-                            crate::ui::theme::switch("auto-download-updates", cx)
-                                .checked(auto_download)
-                                .on_click(cx.listener(|this, on: &bool, _w, cx| {
-                                    this.set_auto_download_updates(*on, cx)
-                                }))
-                                .into_any_element(),
-                            cx,
-                        ),
-                    ),
-            )
-            .child(self.settings_row(
-                t(L10nKey::SettingsAppHttpProxy),
-                t(L10nKey::SettingsAppHttpProxyDesc),
-                http_proxy_control,
-                cx,
-            ))
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsServer), cx))
-            .child(
-                v_flex()
-                    .gap_2()
-                    // The other half of an in-place update: the app is new, the
-                    // process serving every pane is not. Said here rather than
-                    // beside the update controls, so the one button that offers
-                    // to pick the new build up stays the only one on the page.
-                    .when_some(stale_daemon.as_deref(), |this, build| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(foreground)
-                                .child(t_fmt(L10nKey::SettingsDaemonStale, &[("build", build)])),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            // A stale server has a more specific thing to say
-                            // than the section's standing description, and it
-                            // ends with the same button.
-                            .child(t(if stale_daemon.is_some() {
-                                stale_daemon_note
-                            } else {
-                                L10nKey::SettingsServerDesc
-                            })),
-                    )
-                    .child(
-                        h_flex().child(
-                            Button::new("restart-daemon")
-                                .label(t(L10nKey::SettingsRestartServer))
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.restart_daemon(window, cx)
-                                })),
-                        ),
                     ),
             )
             .into_any_element()
@@ -8001,6 +9028,102 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_catalog_has_unique_titles_and_default_values_are_unmodified() {
+        let defaults = Config::default();
+        for (i, entry) in settings_search_entries().iter().enumerate() {
+            assert!(
+                !settings_search_entries()[..i]
+                    .iter()
+                    .any(|e| e.title == entry.title),
+                "duplicate {:?}",
+                entry.title
+            );
+            assert!(
+                !entry.modified(&defaults),
+                "default {:?} is modified",
+                entry.title
+            );
+            assert!(SettingsSection::ALL.contains(&entry.section));
+        }
+        assert_eq!(SettingsSection::ALL.len(), 8);
+        assert!(!SettingsSection::ALL.contains(&SettingsSection::Keybindings));
+    }
+
+    #[test]
+    fn config_keys_and_cross_language_names_reach_the_same_setting() {
+        for locale in ["en", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            for (query, title, section) in [
+                (
+                    "gui_language",
+                    L10nKey::SettingsLanguage,
+                    SettingsSection::General,
+                ),
+                (
+                    "mouse_zoom_modifier",
+                    L10nKey::SettingsMouseZoom,
+                    SettingsSection::KeyboardMouse,
+                ),
+                (
+                    "per_pane_history",
+                    L10nKey::SettingsPerPaneHistory,
+                    SettingsSection::Terminal,
+                ),
+                (
+                    "ui_font_size",
+                    L10nKey::SettingsUiFontSize,
+                    SettingsSection::Appearance,
+                ),
+                (
+                    "Shell program",
+                    L10nKey::SettingsProgram,
+                    SettingsSection::Terminal,
+                ),
+            ] {
+                let entry = settings_search_entries()
+                    .iter()
+                    .find(|e| e.title == title)
+                    .unwrap();
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    section.profile_label()
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    #[test]
+    fn settings_row_ids_survive_language_changes() {
+        for key in [
+            L10nKey::SettingsFontSize,
+            L10nKey::SettingsLanguage,
+            L10nKey::SettingsMouseZoom,
+        ] {
+            crate::ui::i18n::set_locale("en");
+            let expected = settings_row_id(t(key), "");
+            for locale in ["zh-CN", "ja-JP"] {
+                crate::ui::i18n::set_locale(locale);
+                assert_eq!(settings_row_id(t(key), ""), expected);
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    #[test]
+    fn modified_settings_compare_their_own_values_only() {
+        let mut cfg = Config::default();
+        cfg.notify_threshold_secs += 1;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
+    }
 
     /// A shortcut is the first thing someone searching a settings window for a
     /// feature by name is after, and the Keybindings page was the one page the
@@ -8619,11 +9742,11 @@ mod tests {
         let mut cases: Vec<(&str, SettingsSection)> = vec![
             ("opacity", Appearance),
             ("blur", Appearance),
-            ("completion", Input),
-            ("ctrl-r", Input),
+            ("completion", Terminal),
+            ("ctrl-r", Terminal),
             ("grouping", WindowTabs),
-            ("threshold", WindowTabs),
-            ("report mouse", Terminal),
+            ("threshold", General),
+            ("report mouse", KeyboardMouse),
             ("nushell", Terminal),
             ("open files with", Terminal),
             ("bell", Terminal),
@@ -8632,13 +9755,13 @@ mod tests {
             ("symlink", Agents),
             // Rows the index had no entry for at all, so the query counted
             // nothing, no badge appeared and no row lit up: the whole Updates
-            // group on About, and Smooth scrolling between two rows that were
+            // group on General, and Smooth scrolling between two rows that were
             // both findable.
             ("smooth", Terminal),
-            ("nightly", About),
-            ("channel", About),
-            ("metered", About),
-            ("automatic", About),
+            ("nightly", General),
+            ("channel", General),
+            ("metered", General),
+            ("automatic", General),
             // A headline feature the index had never heard of: "background
             // image" matched nothing, and typing it walked the page to About
             // because "background" alone hits Download updates in the
@@ -8678,18 +9801,21 @@ mod tests {
     #[test]
     fn index_titles_match_rendered_row_labels() {
         for title in [
-            "Start in",
+            "Starting directory",
             "Restore last layout",
             "Terminal bell",
             "Report mouse to apps",
             "Open files with",
             "Sidebar grouping",
             "Tab completion",
-            "History search",
+            "Command history search",
             "Dim inactive panes",
             "Option (⌥) acts as Meta",
             "Install the tty7 command on PATH",
         ] {
+            if title == "Option (⌥) acts as Meta" && !cfg!(target_os = "macos") {
+                continue;
+            }
             assert!(
                 settings_search_entries()
                     .iter()
@@ -8999,6 +10125,7 @@ mod gpui_tests {
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -9067,6 +10194,280 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn enter_on_a_shortcut_search_result_opens_its_local_filter(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            let input = app.active_settings().unwrap().search.clone();
+            input.update(cx, |input, cx| input.set_value("SplitRight", window, cx));
+            app.autoselect_settings_search(cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, _, cx| {
+            let state = app.active_settings().unwrap();
+            assert!(state.section == SettingsSection::Keybindings);
+            assert!(!state.search_active);
+            assert_eq!(
+                state.shortcut_search.read(cx).value().as_str(),
+                "SplitRight"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn external_ssh_navigation_resolves_the_current_form_once(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        let mut original = crate::core::ssh_profile::SshProfile::new("original");
+        original.host = "original.example.com".into();
+        let id = original.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            cx.global_mut::<Config>()
+                .ssh_profiles
+                .push(original.clone());
+            app.open_ssh_profile_in_settings(id, window, cx);
+            let input = app
+                .active_settings()
+                .unwrap()
+                .ssh_form
+                .as_ref()
+                .unwrap()
+                .host
+                .clone();
+            input.update(cx, |input, cx| {
+                input.set_value("edited.example.com", window, cx)
+            });
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(vcx.has_pending_prompt());
+        vcx.simulate_prompt_answer(crate::ui::i18n::t(
+            crate::ui::i18n::L10nKey::SettingsKeepEditing,
+        ));
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(
+                app.active_settings()
+                    .unwrap()
+                    .ssh_form
+                    .as_ref()
+                    .unwrap()
+                    .editing,
+                id
+            );
+            assert!(app.ssh_form_dirty(cx));
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(vcx.has_pending_prompt());
+        vcx.simulate_prompt_answer(crate::ui::i18n::t(crate::ui::i18n::L10nKey::EditorDiscard));
+        vcx.run_until_parked();
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let form = app.active_settings().unwrap().ssh_form.as_ref().unwrap();
+            assert_ne!(form.editing, id);
+            assert_eq!(form.host.read(cx).value().as_str(), "new.example.com");
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.cancel_ssh_form(window, cx);
+            app.open_ssh_profile_in_settings(id, window, cx);
+            let input = app
+                .active_settings()
+                .unwrap()
+                .ssh_form
+                .as_ref()
+                .unwrap()
+                .host
+                .clone();
+            input.update(cx, |s, cx| s.set_value("saved.example.com", window, cx));
+            app.open_ssh_profile_in_settings(id, window, cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_prompt_answer(crate::ui::i18n::t(
+            crate::ui::i18n::L10nKey::SettingsSaveChanges,
+        ));
+        vcx.run_until_parked();
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert!(!app.ssh_form_dirty(cx));
+            assert_eq!(
+                app.active_settings()
+                    .unwrap()
+                    .ssh_form
+                    .as_ref()
+                    .unwrap()
+                    .host
+                    .read(cx)
+                    .value()
+                    .as_str(),
+                "saved.example.com"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_settings_writes_remain_visible_until_retry_succeeds(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(73, cx);
+            assert!(app.active_settings().unwrap().save_error.is_some());
+            cx.global_mut::<Config>().quarantined = false;
+            app.persist_settings_config(cx);
+            assert!(app.active_settings().unwrap().save_error.is_none());
+            assert_eq!(cx.global::<Config>().notify_threshold_secs, 73);
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn theme_edits_preview_without_writing_and_cancel_restores_original(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.yaml");
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let mut theme = crate::ui::presets::all(cx).remove(0);
+            theme.id = "settings-test-theme".into();
+            theme.path = Some(path.clone());
+            crate::ui::presets::write_theme_file(&theme).unwrap();
+            let original_file = std::fs::read(&path).unwrap();
+            let original_color = theme.accent;
+            let mut themes = crate::ui::presets::all(cx);
+            themes.push(theme);
+            cx.set_global(crate::ui::presets::Themes(themes));
+            cx.global_mut::<Config>().theme_follow_system = false;
+            cx.global_mut::<Config>().theme_preset = "settings-test-theme".into();
+            app.open_settings_section(SettingsSection::Appearance, window, cx);
+            app.edit_active_theme(
+                crate::ui::app::ThemeEdit::Accent,
+                gpui::rgb(0x123456).into(),
+                window,
+                cx,
+            );
+            assert!(app.theme_draft_dirty());
+            assert_eq!(std::fs::read(&path).unwrap(), original_file);
+            app.cancel_theme_draft(window, cx);
+            assert!(!app.theme_draft_dirty());
+            assert_eq!(
+                crate::ui::presets::by_id(cx, "settings-test-theme").accent,
+                original_color
+            );
+            app.edit_active_theme(
+                crate::ui::app::ThemeEdit::Accent,
+                gpui::rgb(0x654321).into(),
+                window,
+                cx,
+            );
+            assert!(app.save_theme_draft(window, cx));
+            assert_ne!(std::fs::read(&path).unwrap(), original_file);
+            assert!(!app.theme_draft_dirty());
+            app.edit_active_theme(
+                crate::ui::app::ThemeEdit::Accent,
+                gpui::rgb(0x102030).into(),
+                window,
+                cx,
+            );
+            app.active_settings_mut()
+                .unwrap()
+                .theme_draft
+                .as_mut()
+                .unwrap()
+                .1
+                .path = Some(dir.path().to_path_buf());
+            assert!(!app.save_theme_draft(window, cx));
+            assert!(app.theme_draft_dirty());
+            assert!(app.active_settings().unwrap().theme_draft_error.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn search_reuses_rows_and_reset_changes_only_the_selected_setting(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            app.set_notify_threshold(71, cx);
+            app.set_copy_on_select(!Config::default().copy_on_select, cx);
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |s, cx| s.set_value("notify_threshold_secs", window, cx));
+            app.autoselect_settings_search(cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(560.)));
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.active_settings().unwrap().search_active);
+            assert!(
+                app.active_settings()
+                    .unwrap()
+                    .search_rows
+                    .borrow()
+                    .is_none()
+            );
+            app.reset_settings_value(
+                crate::ui::i18n::L10nKey::SettingsNotifyThreshold,
+                window,
+                cx,
+            );
+            assert_eq!(
+                cx.global::<Config>().notify_threshold_secs,
+                Config::default().notify_threshold_secs
+            );
+            assert_eq!(
+                cx.global::<Config>().copy_on_select,
+                !Config::default().copy_on_select
+            );
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn every_category_and_full_search_can_layout_at_minimum_width(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        for section in SettingsSection::ALL {
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.open_settings_section(section, window, cx)
+            });
+            vcx.simulate_resize(size(px(720.), px(560.)));
+            vcx.run_until_parked();
+        }
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.active_settings_mut().unwrap().modified_only = true;
+            app.autoselect_settings_search(cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn clearing_search_preserves_the_category_and_target_navigation_clears_search(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::WindowTabs, window, cx);
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |s, cx| s.set_value("mouse", window, cx));
+            app.autoselect_settings_search(cx);
+            assert!(app.active_settings().unwrap().section == SettingsSection::WindowTabs);
+            search.update(cx, |s, cx| s.set_value("", window, cx));
+            app.autoselect_settings_search(cx);
+            assert!(!app.active_settings().unwrap().search_active);
+            app.navigate_settings(
+                SettingsSection::KeyboardMouse,
+                Some(crate::ui::i18n::L10nKey::SettingsMouseZoom),
+                window,
+                cx,
+            );
+            assert!(app.active_settings().unwrap().section == SettingsSection::KeyboardMouse);
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn appearance_section_lays_out_with_its_rounded_controls(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         app.update_in(&mut vcx, |app, window, cx| {
@@ -9130,7 +10531,7 @@ mod gpui_tests {
         crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
         app.update_in(&mut vcx, |app, window, cx| {
-            app.open_settings_section(SettingsSection::Input, window, cx);
+            app.open_settings_section(SettingsSection::Terminal, window, cx);
             app.set_history_search(false, cx);
             app.set_prompt_editor(false, cx);
         });
