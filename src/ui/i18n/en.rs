@@ -628,10 +628,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "tmux remaps pane/tab actions onto prefix sequences (e.g. Ctrl-B then C)."
         }
         L10nKey::SettingsPrefix => "Prefix",
-        L10nKey::SettingsPressKeys => "Press keys…",
+        L10nKey::SettingsPressKeys => "Press keys… · ⌫ for no shortcut",
         L10nKey::SettingsPauseToSaveEsc => "pause to save · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "Click a shortcut, then press the new keys — it saves after a brief pause. Chain keys for a sequence like Ctrl-B then X. Esc cancels; Backspace removes the last key, or resets to default if pressed first."
+            "Click a shortcut, then press the new keys — it saves after a brief pause. Chain keys for a sequence like Ctrl-B then X. Esc cancels; Backspace removes the last key, or, pressed first, leaves the action with no shortcut — Reset brings the default back."
         }
         L10nKey::SettingsPrefixNote => {
             "With a prefix active, a bare prefix key reaches the shell after a ~1s pause, and prefix + an unbound key is sent through to the terminal."
@@ -1777,7 +1777,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
-        L10nKey::AppMenuClosePaneTab => "Close Pane / Tab",
+        L10nKey::AppMenuClosePaneTab => "Close",
         L10nKey::AppMenuCloseOtherTabs => "Close Other Tabs",
         L10nKey::AppMenuCloseTabsRight => "Close Tabs to the Right",
         L10nKey::AppMenuReopenClosedTab => "Reopen Closed Tab",

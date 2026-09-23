@@ -218,7 +218,7 @@ pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
 pub(crate) const TILE_SIZE: f32 = 32.;
-pub(crate) const TILE_GLYPH: f32 = 13.;
+pub(crate) const TILE_GLYPH: f32 = 16.;
 /// A tile that sits in a body row rather than in chrome: the box shrinks to
 /// the minimum hit target, but the glyph keeps the chrome size. An 11px glyph
 /// here read as a disabled ornament next to 14px text, and put a second,
@@ -235,29 +235,7 @@ pub(crate) const TILE_GLYPH_SM: f32 = TILE_GLYPH;
 pub(crate) const TILE_SIZE_XS: f32 = 18.;
 pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 
-/// The compensation a glyph gets when its art does not fill the box the rest
-/// of the set fills.
-///
-/// Every icon tty7 draws itself sits on the same optical bound — 3.4..20.6 of
-/// a 24 viewBox, 19.3 units of ink once the round caps are counted. Stock
-/// lucide `close` is a bare 6..18 cross, 14 units, so at [`TILE_GLYPH`] it
-/// carries a quarter less ink than the tiles beside it and reads as the one
-/// disabled control in the row. 16 buys that back.
-///
-/// Reach for this only for art we do not own. `plus` used to be here for the
-/// same reason and is not any more: it is ours, so it was redrawn onto the
-/// bound instead of being scaled up at the call site — the fix that also
-/// reaches the 24px tiles, which have no `_LINE` step to grow into.
-///
-/// Note what scaling a glyph up quietly buys along with the extent: 16/13 more
-/// stroke. `plus` had been leaning on that, so moving it to [`TILE_GLYPH`]
-/// thinned it by a fifth even though it got *longer*, and it had to take that
-/// weight back in its own `stroke-width` — a cross is two hairlines with no
-/// fill to hide behind, so it is the one glyph in the set drawn off the
-/// family's weight, by exactly the 16/13 it lost and no more. `ui::assets`'
-/// test carries that arithmetic. Anything else that leaves here owes the same
-/// accounting, in both directions: an asset redrawn for the tiles that scaled
-/// it up is still drawn beside the ones that never did.
+/// Line-only controls share the toolbar icon size.
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
@@ -336,34 +314,6 @@ fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
 }
 
 pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
-
-/// A transparent sheet that answers one question: is the pointer inside the
-/// box it covers. Lay it over a region as that region's *last* child and read
-/// the flag to reveal chrome only while the pointer is there.
-///
-/// The obvious way to write this is `group_hover` on the region itself, and it
-/// does not work. Group hover asks whether the group's *hitbox* is the one
-/// under the pointer, and gpui's hit test stops at the first `occlude()`d
-/// element it meets on the way down. Tab chips and the chrome tiles are all
-/// occluding, so the region stopped counting as hovered the instant the
-/// pointer reached the very button it was revealing, and the button vanished
-/// from under the cursor. Painted last, this sheet's own hitbox sits in front
-/// of all of them, and it blocks nothing — it is not opaque, so the rows,
-/// chips and tiles underneath keep their clicks, cursors and tooltips.
-pub(crate) fn hover_sheet(id: &'static str, flag: &Rc<Cell<bool>>) -> gpui::Stateful<gpui::Div> {
-    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
-    let flag = flag.clone();
-    gpui::div()
-        .id(id)
-        .absolute()
-        .inset_0()
-        .on_hover(move |over, window, _cx| {
-            if flag.get() != *over {
-                flag.set(*over);
-                window.refresh();
-            }
-        })
-}
 
 pub(crate) fn title_bar_drag(
     row: gpui::Stateful<gpui::Div>,
@@ -903,8 +853,6 @@ pub struct Tty7App {
     /// drawn only while its own flag is set, so a window nobody is pointing at
     /// carries no buttons at all. The right panel's own title bar is the
     /// exception: its tiles are always painted while the panel is open.
-    pub(crate) sidebar_chrome_hover: Rc<Cell<bool>>,
-    pub(crate) strip_chrome_hover: Rc<Cell<bool>>,
     /// How much width a settings row will actually get, measured once per
     /// render. `settings_row` is called from page builders that never see the
     /// window, and the answer differs per page — the SSH page spends a host
@@ -1550,8 +1498,6 @@ impl Tty7App {
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
             sidebar_dragging: Rc::new(Cell::new(false)),
-            sidebar_chrome_hover: Rc::new(Cell::new(false)),
-            strip_chrome_hover: Rc::new(Cell::new(false)),
             settings_row_width: Cell::new(f32::MAX),
             settings_viewport_w: Cell::new(f32::MAX),
             settings_hit_anchored: Cell::new(false),
@@ -7134,7 +7080,7 @@ impl Tty7App {
                     cx.notify();
                 } else {
                     self.stop_recording(cx);
-                    self.reset_keybinding(action, cx);
+                    self.unbind_keybinding(action, cx);
                 }
                 return;
             }
@@ -7249,6 +7195,34 @@ impl Tty7App {
         crate::ui::keymap::rebind(cx);
         if let Some(s) = self.active_settings_mut() {
             s.rebinding_note = note;
+        }
+        cx.notify();
+    }
+
+    /// Takes every chord off an action, and keeps it off.
+    ///
+    /// ⌫ on a row that has recorded nothing used to *reset* it — drop the
+    /// override so the action gets its shipped chord back. On a row nobody has
+    /// overridden, which is every row the first time it is looked at, that is a
+    /// no-op: someone pressing Backspace over Alt+1 to be rid of it watched
+    /// Alt+1 sit exactly where it was and read it as the default restoring
+    /// itself (#901). Nothing anywhere in the app said "this action should have
+    /// no key", though `config.json` has spelled it `[]` since #868.
+    ///
+    /// So ⌫ writes that empty list, and the **Reset** button beside the row —
+    /// which appears the moment an action is overridden, this way included — is
+    /// the way back to the default.
+    pub(crate) fn unbind_keybinding(&mut self, action: String, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| {
+            cfg.keybindings.insert(
+                action,
+                crate::core::config::KeybindingOverride::Exact(Vec::new()),
+            );
+        });
+        crate::ui::keymap::rebind(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.recording = None;
+            s.rebinding_note = None;
         }
         cx.notify();
     }
@@ -10523,6 +10497,56 @@ mod keybinding_gpui_tests {
                 .is_some_and(|n| n.contains("Insert Newline")),
             "the takeover note must name the action that lost the chord (got {note:?})"
         );
+    }
+
+    /// #901, the half that happens in the UI: Alt+1…9 belongs to vim, and the
+    /// only gesture in the app that looks like "take this shortcut away" used
+    /// to *reset* the row instead — a no-op on a row nobody had overridden,
+    /// so the default appeared to restore itself however many times it was
+    /// pressed.
+    #[gpui::test]
+    fn backspace_on_a_row_unbinds_the_action_rather_than_restoring_its_default(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        let shipped = vcx
+            .update(|_, cx| crate::ui::keymap::effective_key("ActivateTab1", cx))
+            .expect("Go to Tab 1 ships with a chord");
+
+        begin_capture(&app, &mut vcx, "ActivateTab1");
+        vcx.simulate_keystrokes("backspace");
+        wait_for_binding(&mut vcx, "ActivateTab1", serde_json::json!([]));
+
+        vcx.update(|_, cx| {
+            assert_eq!(
+                crate::ui::keymap::effective_key("ActivateTab1", cx),
+                None,
+                "the row has no chord left to show"
+            );
+            let typed = [gpui::Keystroke::parse(&shipped).expect("the chord parses")];
+            let context = [gpui::KeyContext::parse("Terminal").expect("the context parses")];
+            assert!(
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&typed, &context)
+                    .0
+                    .is_empty(),
+                "{shipped} must reach the terminal now, not the tab switcher"
+            );
+        });
+
+        // Reversible, and by the button that is already on the row: an
+        // overridden action — unbound counts — shows **Reset**.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.reset_keybinding("ActivateTab1".to_string(), cx)
+        });
+        vcx.update(|_, cx| {
+            assert_eq!(
+                crate::ui::keymap::effective_key("ActivateTab1", cx).as_deref(),
+                Some(shipped.as_str()),
+                "Reset is the way back to the shipped chord"
+            );
+        });
     }
 
     #[gpui::test]

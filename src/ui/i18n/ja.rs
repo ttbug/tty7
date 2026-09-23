@@ -635,10 +635,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "tmux では、ペイン/タブの操作をプレフィックスキーの後に行います（例: Ctrl-B の後に C）"
         }
         L10nKey::SettingsPrefix => "プレフィックスキー",
-        L10nKey::SettingsPressKeys => "キーを入力…",
+        L10nKey::SettingsPressKeys => "キーを入力… · ⌫ でショートカットなし",
         L10nKey::SettingsPauseToSaveEsc => "一時停止して保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "ショートカットをクリックして新しいキーを押すと、少し間を置いて保存されます。Ctrl-B の後に X のようなシーケンスはキーを続けて入力。Esc でキャンセル、Backspace は最後のキーを削除し、最初に押すとデフォルトに戻します"
+            "ショートカットをクリックして新しいキーを押すと、少し間を置いて保存されます。Ctrl-B の後に X のようなシーケンスはキーを続けて入力。Esc でキャンセル、Backspace は最後のキーを削除し、最初に押すとショートカットなしになり、「リセット」でデフォルトに戻せます"
         }
         L10nKey::SettingsPrefixNote => {
             "プレフィックスが有効な場合、プレフィックスキーを単独で押すと約 1 秒後にシェルに渡され、プレフィックス + 未割り当てのキーはターミナルへそのまま送信されます"
@@ -1854,7 +1854,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopyWorkingDirectory => "作業ディレクトリをコピー",
         L10nKey::AppMenuCopySessionId => "セッション ID をコピー",
         L10nKey::AppMenuForkSession => "セッションをフォーク",
-        L10nKey::AppMenuClosePaneTab => "ペイン / タブを閉じる",
+        L10nKey::AppMenuClosePaneTab => "閉じる",
         L10nKey::AppMenuCloseOtherTabs => "他のタブを閉じる",
         L10nKey::AppMenuCloseTabsRight => "右側のタブを閉じる",
         L10nKey::AppMenuReopenClosedTab => "閉じたタブをもう一度開く",

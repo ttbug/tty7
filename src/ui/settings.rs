@@ -2224,7 +2224,7 @@ impl Tty7App {
     }
 
     pub(crate) fn section_rule(&self, cx: &Context<Self>) -> Div {
-        div().h(px(1.)).my_7().bg(cx.theme().border)
+        div().h(px(1.)).my_7().bg(cx.theme().sidebar_border)
     }
 
     pub(crate) fn settings_row(
@@ -2312,14 +2312,12 @@ impl Tty7App {
             .px_2p5()
             .mx_neg_2p5()
             .rounded_lg()
-            .when(hit, |row| row.bg(theme.accent.opacity(0.16)))
+            .when(hit, |row| row.bg(theme.accent))
             // Only the first hit on the page carries the anchor: it is the one
             // the page scrolls to, and a later row claiming it would drag the
             // view past the matches above.
             .anchor_scroll(first_hit_anchor)
             .when(miss, |row| row.opacity(0.45))
-            .hover(|h| h.bg(gpui::rgb(cx.global::<presets::Surfaces>().window.hover)))
-            .on_hover(cx.listener(|_this, _hovered, _window, cx| cx.notify()))
             .child(labels)
             // Stacked, the control column takes the row: that is what gives a
             // `max_w_full` control a definite width to shrink against, and on
@@ -3545,12 +3543,14 @@ impl Tty7App {
             .child(
                 h_flex()
                     .mt_3()
+                    .w_full()
+                    .max_w(px(380.))
                     .gap_2()
                     .child(
                         div()
                             .flex_1()
-                            .max_w(px(320.))
-                            .child(Input::new(&input).small()),
+                            .min_w_0()
+                            .child(Input::new(&input).small().w_full()),
                     )
                     .child(
                         Button::new("ssh-quick-connect")
@@ -6440,8 +6440,19 @@ impl Tty7App {
                         .when_some(row_note, |col, text| {
                             col.child(
                                 div()
-                                    .max_w_80()
-                                    .max_w_full()
+                                    // One cap, not two: `max_w` holds a single
+                                    // length, so stating both left the note
+                                    // sized against a shrink-proof column that
+                                    // is itself sized to the note — no cap at
+                                    // all, and a long error (Codex's missing
+                                    // `codex` binary) inflated the row until
+                                    // the label column, `min_w_0`, came out one
+                                    // character per line. Stacked, the control
+                                    // column *is* the row, so a relative cap
+                                    // resolves; beside the label it cannot, and
+                                    // 320 is what the row has room for.
+                                    .when(stacked, |note| note.max_w_full())
+                                    .when(!stacked, |note| note.max_w_80())
                                     .text_xs()
                                     .when(!stacked, |note| note.text_right())
                                     .text_color(muted_fg)

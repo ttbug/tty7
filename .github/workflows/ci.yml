@@ -118,6 +118,28 @@ jobs:
         timeout-minutes: 30
         run: cargo build --locked --target ${{ matrix.target }}
 
+      # A binary that imports VCRUNTIME140.dll cannot start on a Windows
+      # machine that has never installed the Visual C++ Redistributable — the
+      # loader fails before `main`, which is what winget's install validation
+      # hit on 26.8.2 (#902). `.cargo/config.toml` links the CRT statically;
+      # this is the check that it still does.
+      #
+      # It runs here, on the debug build, rather than only at release time:
+      # every machine that builds tty7 already has the redistributable, so
+      # nothing else in the pipeline can notice the regression, and the
+      # dependency can come back from a single prebuilt native library or a stray
+      # RUSTFLAGS (`cc`-built code follows `+crt-static` on its own).
+      # Named files rather than the target directory — build scripts and
+      # proc-macro artifacts under it are host units, which are built without
+      # the target's rustflags and legitimately import the CRT dynamically.
+      - name: Assert the Windows binaries need no VC++ redistributable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./.github/scripts/assert-no-vcruntime.ps1 `
+            "target/${{ matrix.target }}/debug/tty7-app.exe" `
+            "target/${{ matrix.target }}/debug/tty7.exe"
+
       # `cargo test` has no timeout of its own, so one hung test is
       # indistinguishable from a slow suite until the job hits GitHub's six-hour
       # limit. The suite intermittently hangs here — roughly one run in ten, on

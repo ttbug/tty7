@@ -79,6 +79,21 @@ pub struct Semantics {
     pub link: Semantic,
 }
 
+/// UI interaction roles. Terminal ANSI colours are deliberately independent.
+#[derive(Debug, Clone, Copy)]
+pub struct Interactions {
+    pub primary: Semantic,
+    pub primary_hover: u32,
+    pub primary_pressed: u32,
+    pub navigation: u32,
+    pub navigation_ink: u32,
+    pub choice: u32,
+    pub choice_ink: u32,
+    pub input_border: u32,
+}
+
+impl Global for Interactions {}
+
 pub mod state {
     pub const HOVER: f32 = 1.18;
     pub const SELECTED: f32 = 1.30;
@@ -163,7 +178,9 @@ impl Theme {
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
         let sidebar = mix(bg, fg, 0.03);
-        let popover = mix(bg, fg, 0.05);
+        // Light overlays sit above the grey rail; dark overlays lift toward
+        // the foreground. A light menu must not be darker than its backdrop.
+        let popover = if self.dark { mix(bg, fg, 0.06) } else { bg };
         // Two weights, one derivation. Which one a line gets is decided by
         // whether it is the *only* thing separating what it sits between:
         //
@@ -242,6 +259,41 @@ impl Theme {
         }
     }
 
+    /// One selection treatment for workspace, settings and panel navigation.
+    pub(crate) fn navigation_colors(&self) -> (u32, u32) {
+        let colors = self.interactions();
+        (colors.navigation, colors.navigation_ink)
+    }
+
+    pub(crate) fn interactions(&self) -> Interactions {
+        let m = self.neutrals();
+        let navigation = mix(m.sidebar, m.accent, if self.dark { 0.18 } else { 0.10 });
+        let choice = mix(m.popover, m.accent, if self.dark { 0.22 } else { 0.12 });
+        let preferred_label = if self.dark { 0x121418 } else { 0xffffff };
+        let fill = self.clear_ink(
+            legible_ink(preferred_label, m.accent, TEXT_FLOOR),
+            ACCENT_FLOOR,
+        );
+        // A filled primary action keeps the same readable label while its
+        // hover/pressed background moves away from that label.
+        let on_fill = ink_on(fill, preferred_label, TEXT_FLOOR);
+        let away = if is_dark(on_fill) { 0xffffff } else { 0x000000 };
+        Interactions {
+            primary: Semantic {
+                ink: self.clear_ink(m.accent, TEXT_FLOOR),
+                fill,
+                on_fill,
+            },
+            primary_hover: mix(fill, away, 0.08),
+            primary_pressed: mix(fill, away, 0.16),
+            navigation,
+            navigation_ink: legible_foreground(navigation, m.foreground),
+            choice,
+            choice_ink: legible_foreground(choice, m.foreground),
+            input_border: m.border,
+        }
+    }
+
     fn ansi_seed(&self, index: usize) -> u32 {
         let (r, g, b) = self.ansi16[index];
         (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -254,9 +306,8 @@ impl Theme {
     /// the floor on every surface the ink can be painted on, not just on the
     /// darkest one.
     fn clear_ink(&self, seed: u32, floor: f32) -> u32 {
-        let bg = self.background_color();
-        let fg = legible_foreground(bg, self.foreground);
-        [bg, mix(bg, fg, 0.03), mix(bg, fg, 0.05)]
+        let m = self.neutrals();
+        [m.background, m.sidebar, m.popover]
             .into_iter()
             .fold(seed, |ink, surface| legible_ink(surface, ink, floor))
     }
@@ -282,12 +333,17 @@ impl Theme {
                 on_fill: ink_on(fill, fg, TEXT_FLOOR),
             }
         };
+        let (red, green, amber) = if self.dark {
+            (0xf07878, 0x78bd95, 0xd6b55a)
+        } else {
+            (0xc43c43, 0x28794b, 0x92651c)
+        };
         Semantics {
-            danger: build(self.ansi_seed(1)),
-            success: build(self.ansi_seed(2)),
-            warning: build(self.ansi_seed(3)),
-            info: build(self.ansi_seed(6)),
-            link: build(self.ansi_seed(6)),
+            danger: build(red),
+            success: build(green),
+            warning: build(amber),
+            info: build(self.accent),
+            link: build(self.accent),
         }
     }
 
@@ -1149,7 +1205,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         name: "Light",
         background: 0xffffff,
         foreground: 0x111111,
-        accent: 0x00c2ff,
+        accent: 0x007aff,
         caret: Some(0xf5a15c),
         ansi16: [
             (0x24, 0x29, 0x2e),
@@ -1251,9 +1307,9 @@ static BUILTINS: [BuiltinSpec; 13] = [
     BuiltinSpec {
         id: "dark",
         name: "Dark",
-        background: 0x000000,
-        foreground: 0xffffff,
-        accent: 0x19aad8,
+        background: 0x191b20,
+        foreground: 0xe2e5eb,
+        accent: 0x78a8f5,
         caret: None,
         ansi16: [
             (0x61, 0x61, 0x61),
@@ -1489,6 +1545,19 @@ static BUILTINS: [BuiltinSpec; 13] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_labels_remain_legible_in_every_builtin_theme() {
+        for theme in builtins() {
+            let (fill, ink) = theme.navigation_colors();
+            assert!(
+                contrast(fill, ink) >= 4.5,
+                "{} navigation contrast",
+                theme.id
+            );
+            assert_ne!(fill, theme.neutrals().sidebar, "{} selection", theme.id);
+        }
+    }
 
     #[test]
     fn foreground_is_legible_on_background() {
@@ -1779,13 +1848,12 @@ mod tests {
     #[test]
     fn lane_colours_clear_the_floor_on_every_surface() {
         for t in builtins() {
-            let bg = t.background_color();
-            let fg = legible_foreground(bg, t.foreground);
+            let m = t.neutrals();
             let lanes = t.lanes();
             for (name, surface) in [
-                ("background", bg),
-                ("sidebar", mix(bg, fg, 0.03)),
-                ("popover", mix(bg, fg, 0.05)),
+                ("background", m.background),
+                ("sidebar", m.sidebar),
+                ("popover", m.popover),
             ] {
                 for (slot, ink) in lanes.ink.iter().enumerate() {
                     let ratio = contrast(*ink, surface);
@@ -2003,26 +2071,49 @@ mod tests {
     }
 
     #[test]
-    fn semantic_colors_keep_the_theme_hue() {
-        let dracula = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
-        let ansi_red = {
-            let (r, g, b) = dracula.ansi16[1];
-            (r as u32) << 16 | (g as u32) << 8 | b as u32
-        };
-        assert_eq!(ansi_red, 0xff5555, "Dracula's ANSI red moved");
-        // Conditioning may lift the seed to clear its floor on a popover, but
-        // the result has to stay recognisably the palette's own red rather than
-        // some house error colour.
-        let ink = dracula.semantics().danger.ink;
-        assert!(
-            channel_distance(ink, ansi_red) <= 32,
-            "danger ink {ink:#08x} drifted off Dracula's ANSI red {ansi_red:#08x}"
+    fn semantic_roles_are_independent_of_terminal_ansi() {
+        let mut theme = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
+        let before = theme.semantics();
+        theme.ansi16.swap(1, 2);
+        theme.ansi16.swap(3, 6);
+        let after = theme.semantics();
+        assert_eq!(before.danger.ink, after.danger.ink);
+        assert_eq!(before.success.ink, after.success.ink);
+        assert_eq!(before.warning.ink, after.warning.ink);
+        assert_eq!(before.link.ink, after.link.ink);
+        assert_ne!(
+            theme.active_palette(false).ansi16[1],
+            theme.active_palette(false).ansi16[2]
         );
-        let (r, g, b) = (ink >> 16 & 0xff, ink >> 8 & 0xff, ink & 0xff);
-        assert!(
-            r > g && r > b,
-            "danger ink {ink:#08x} is no longer red-dominant"
-        );
+    }
+
+    #[test]
+    fn interaction_roles_have_readable_labels_in_all_states() {
+        for theme in builtins() {
+            let c = theme.interactions();
+            for fill in [c.primary.fill, c.primary_hover, c.primary_pressed] {
+                assert!(
+                    contrast(fill, c.primary.on_fill) >= 4.5 - 0.01,
+                    "{} primary",
+                    theme.id
+                );
+            }
+            assert!(
+                contrast(c.choice, c.choice_ink) >= 4.5,
+                "{} choice",
+                theme.id
+            );
+            assert!(
+                contrast(c.navigation, c.navigation_ink) >= 4.5,
+                "{} navigation",
+                theme.id
+            );
+            assert_ne!(
+                c.input_border, c.choice,
+                "{} field boundaries must not use selected-row fills",
+                theme.id
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 
 use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
-use crate::core::osc::OscTokenizer;
+use crate::core::osc::{OscTokenizer, TitleEffect, TitleLifetime};
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
     LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs,
@@ -110,7 +110,7 @@ struct ReaderSignals {
     /// the reader puts back the cursor a repaint parked. Decided per pane from
     /// its [`PtySource`], and shared rather than copied because the reader can
     /// learn better mid-stream — see the `RemoteContext` arm.
-    repair_cursor: Arc<AtomicBool>,
+    local_conpty: Arc<AtomicBool>,
 }
 
 /// What kind of pty is at the far end of a pane's link, which is what decides
@@ -145,20 +145,6 @@ impl PtySource {
             PaneRoute::Local | PaneRoute::Unroutable(_) if cfg!(windows) => PtySource::LocalConpty,
             _ => PtySource::Raw,
         }
-    }
-
-    /// Whether the cursor a repaint parked has to be put back — see
-    /// [`crate::terminal::parked_cursor`].
-    ///
-    /// Only conhost parks one. On a raw pty the application owns the cursor and
-    /// is free to end a repaint on the text it just wrote and then echo the
-    /// next keystroke straight after it, with no positioning of its own: vim
-    /// opens its command line that way, and putting the cursor back on the cell
-    /// the repaint hid it on drops the `wq!` typed next onto the row being
-    /// edited (#430, and #774 for the Windows client that reached a Linux host
-    /// and was repaired anyway).
-    fn repairs_parked_cursor(self) -> bool {
-        self == PtySource::LocalConpty
     }
 }
 
@@ -613,12 +599,12 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
-    /// Whether this pane's pty is a ConPTY, and so whether the reader repairs
+    /// Whether this pane's pty is a ConPTY, for input encoding and repairing
     /// the cursor a repaint parks. Held here so a relink hands the same answer
     /// to the reader it starts: a pane's pty does not change kind when the link
     /// to it is rebuilt, and the route a relink carries cannot tell a
     /// native-SSH pane from a local shell.
-    repair_cursor: Arc<AtomicBool>,
+    local_conpty: Arc<AtomicBool>,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -944,7 +930,7 @@ impl RemoteTerminal {
                 // rebuilt from `route`: the pty on the far side is the same pty
                 // it was before the link dropped, and only this value still
                 // remembers what a `RemoteContext` taught the old reader.
-                repair_cursor: self.repair_cursor.clone(),
+                local_conpty: self.local_conpty.clone(),
             },
         );
         self.reader_thread = Some(reader);
@@ -1038,7 +1024,7 @@ impl RemoteTerminal {
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
 
         let reader_quit = Arc::new(AtomicBool::new(false));
-        let repair_cursor = Arc::new(AtomicBool::new(pty.repairs_parked_cursor()));
+        let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy.clone(),
@@ -1062,7 +1048,7 @@ impl RemoteTerminal {
                 images: images.clone(),
                 clipboard_writes: clipboard_writes.clone(),
                 clipboard_write_busy: clipboard_write_busy.clone(),
-                repair_cursor: repair_cursor.clone(),
+                local_conpty: local_conpty.clone(),
             },
         );
 
@@ -1102,7 +1088,7 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
-            repair_cursor,
+            local_conpty,
         })
     }
 
@@ -1173,7 +1159,7 @@ impl RemoteTerminal {
                     images,
                     clipboard_writes,
                     clipboard_write_busy,
-                    repair_cursor,
+                    local_conpty,
                 } = signals;
                 let mut awaiting_replay = awaiting_replay;
                 crate::core::threads::promote_to_user_interactive();
@@ -1182,6 +1168,17 @@ impl RemoteTerminal {
                 let mut osc = OscNotifyScanner::default();
                 let mut mode_tok = OscTokenizer::new(&[b"133"]);
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
+                // #889: an OSC 0/2 the emulator above has already adopted, read
+                // a second time only to learn whether the program that wrote it
+                // has since exited. `TitleLifetime` is the daemon's rule too,
+                // so a window's tab strip and the switcher reading the tree can
+                // never disagree about whether a title is still current.
+                let mut title_tok = OscTokenizer::new(&[b"0", b"2", b"133"]);
+                let mut title_life = TitleLifetime::default();
+                // No live `Output` frame yet: whatever arrives now is the
+                // daemon's replay (an attach or a relink), which it sends
+                // entirely as `Snapshot`s followed by the stored state.
+                let mut replaying_state = true;
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
@@ -1230,6 +1227,25 @@ impl RemoteTerminal {
 
                 let mut out_batch: Vec<u8> = Vec::new();
 
+                // Whether this chunk ends with the title the pane is showing
+                // belonging to a command that has finished. The emulator has
+                // already parsed the same bytes, so a `true` here is sent on
+                // as a `ResetTitle` *after* every `Title` the chunk produced —
+                // which is the whole ordering question: a shell that re-titles
+                // itself in `precmd` writes its OSC 0/2 after the `D`, and
+                // that title is the last word rather than a thing to undo.
+                macro_rules! chunk_retires_the_title {
+                    ($bytes:expr) => {{
+                        let mut retire = false;
+                        title_tok.feed($bytes, |payload| match title_life.saw(payload) {
+                            TitleEffect::Retire => retire = true,
+                            TitleEffect::Set => retire = false,
+                            TitleEffect::None => {}
+                        });
+                        retire
+                    }};
+                }
+
                 'main: loop {
                     macro_rules! flush_batch {
                         () => {
@@ -1240,7 +1256,7 @@ impl RemoteTerminal {
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
                                 let mut cuts: Vec<(usize, CursorCut)> = Vec::new();
-                                if repair_cursor.load(Ordering::Relaxed) {
+                                if local_conpty.load(Ordering::Relaxed) {
                                     cursor_scan.feed(&out_batch, |off, c| cuts.push((off, c)));
                                 }
                                 {
@@ -1319,6 +1335,9 @@ impl RemoteTerminal {
                                         }
                                     }
                                 });
+                                if chunk_retires_the_title!(&out_batch) {
+                                    proxy.send_event(AlacEvent::ResetTitle);
+                                }
                                 proxy.send_event(AlacEvent::Wakeup);
                                 out_batch.clear();
                             }
@@ -1396,6 +1415,13 @@ impl RemoteTerminal {
                                     }
                                 });
                                 proxy.replaying.store(false, Ordering::Relaxed);
+                                // The replay carries the pane's recent marks,
+                                // so reading it is what lets a reattached
+                                // window know whether the title it just
+                                // adopted belongs to anything still running.
+                                if chunk_retires_the_title!(&bytes) {
+                                    proxy.send_event(AlacEvent::ResetTitle);
+                                }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Output(bytes) => {
@@ -1409,6 +1435,7 @@ impl RemoteTerminal {
                                 // agent it ran *later* reported for the first
                                 // time, and that report would be discounted.
                                 awaiting_replay = false;
+                                replaying_state = false;
                                 out_batch.extend_from_slice(&bytes);
                                 tr_frames += 1;
                             }
@@ -1517,6 +1544,14 @@ impl RemoteTerminal {
                                 last_exit,
                             } => {
                                 flush_batch!();
+                                // The replay says a command owns the pane
+                                // right now. If the ring it replayed had
+                                // already rolled past that command's `C`, the
+                                // title just adopted from it is the command's
+                                // and its `D` has to retire it (#889).
+                                if replaying_state && active && !at_prompt {
+                                    title_life.joined_mid_command();
+                                }
                                 if let Ok(mut guard) = shell.lock() {
                                     *guard = ShellState {
                                         active,
@@ -1561,7 +1596,7 @@ impl RemoteTerminal {
                                     .as_ref()
                                     .is_some_and(|c| c.kind == RemoteKind::NativeSsh)
                                 {
-                                    repair_cursor.store(false, Ordering::Relaxed);
+                                    local_conpty.store(false, Ordering::Relaxed);
                                 }
                                 if let Ok(mut guard) = remote.lock() {
                                     *guard = ctx;
@@ -1690,6 +1725,10 @@ impl RemoteTerminal {
 
     pub fn child_exited(&self) -> bool {
         self.child_exited.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn is_local_conpty(&self) -> bool {
+        self.local_conpty.load(Ordering::Relaxed)
     }
 
     /// Queues a keystroke — or a paste, or a mouse report — for the link.
@@ -4084,6 +4123,7 @@ mod parked_cursor_tests {
         let (client_side, daemon_side) = socket_pair();
         let term = RemoteTerminal::from_stream_with(client_side, size, Vec::new(), pty)
             .expect("a terminal over a socket pair");
+        assert_eq!(term.is_local_conpty(), pty == PtySource::LocalConpty);
         (term, daemon_side)
     }
 
@@ -4127,8 +4167,6 @@ mod parked_cursor_tests {
                 PtySource::Raw
             },
         );
-        assert!(PtySource::LocalConpty.repairs_parked_cursor());
-        assert!(!PtySource::Raw.repairs_parked_cursor());
     }
 
     #[test]
@@ -4280,6 +4318,7 @@ mod parked_cursor_tests {
             term.remote_context().is_some(),
             "the reader never applied the context"
         );
+        assert!(!term.is_local_conpty());
 
         DaemonMsg::Output(b"\x1b[6;4H".to_vec())
             .encode(&mut daemon_side)

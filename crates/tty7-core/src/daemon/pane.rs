@@ -3301,6 +3301,9 @@ struct SniffSignals {
 struct OscSniffer {
     tok: OscTokenizer,
     shell: ShellState,
+    /// Whether the title the pane is showing still belongs to something that
+    /// is running — see [`crate::core::osc::TitleLifetime`] (#889).
+    title_life: crate::core::osc::TitleLifetime,
 }
 
 impl OscSniffer {
@@ -3308,13 +3311,20 @@ impl OscSniffer {
         Self {
             tok: OscTokenizer::new(&[b"0", b"2", b"7", b"133", b"9", b"777"]),
             shell: ShellState::default(),
+            title_life: crate::core::osc::TitleLifetime::default(),
         }
     }
 
     fn feed(&mut self, bytes: &[u8]) -> SniffSignals {
         let mut signals = SniffSignals::default();
         let shell = &mut self.shell;
+        let title_life = &mut self.title_life;
         self.tok.feed(bytes, |payload| {
+            // In stream order, so that a shell which re-titles itself right
+            // after the `D` mark gets the last word over the retirement.
+            if title_life.saw(payload) == crate::core::osc::TitleEffect::Retire {
+                signals.title = Some(String::new());
+            }
             if let Some(path) = parse_osc7(payload) {
                 signals.cwd = Some(path);
             } else if let Some(title) = parse_osc_title(payload) {
@@ -4375,6 +4385,87 @@ mod tests {
             },
         );
         assert_eq!(st.osc_title, None, "an empty title clears, not blanks");
+    }
+
+    /// #889: the tab went on reading "✳ fixing the switcher" long after Claude
+    /// Code had exited and the pane was back at its own prompt, because
+    /// nothing in the pane path ever retired an OSC 0/2 — only another one
+    /// replaced it. The `D` mark says the command that wrote it is over.
+    #[test]
+    fn a_title_a_command_set_is_retired_when_that_command_finishes() {
+        let mut st = test_state(true);
+        let mut s = OscSniffer::new();
+
+        let mut read = |st: &mut PaneState, bytes: &[u8]| apply_signals(st, s.feed(bytes));
+
+        read(
+            &mut st,
+            b"\x1b]7;file://h/work/tty7\x07\x1b]133;A\x07\x1b]133;B\x07",
+        );
+        read(&mut st, b"\x1b]133;C;claude\x07");
+        read(&mut st, b"\x1b]2;\xe2\x9c\xb3 fixing the switcher\x1b\\");
+        assert_eq!(
+            st.osc_title.as_deref(),
+            Some("✳ fixing the switcher"),
+            "a running command names the tab"
+        );
+
+        // The user's precmd chain can take hundreds of ms, which is why the
+        // `D` emitter is prepended to it — so the mark routinely lands in a
+        // read of its own, ahead of anything the next prompt writes.
+        read(&mut st, b"\x1b]133;D;0\x07");
+        assert_eq!(
+            st.osc_title, None,
+            "the program that wrote the title has exited"
+        );
+        assert_eq!(
+            st.cwd.as_deref(),
+            Some(std::path::Path::new("/work/tty7")),
+            "and the rung below it in the label ladder still knows the place"
+        );
+    }
+
+    /// The two cases the retirement must not touch: a program that is still
+    /// running, and a shell that titles its own prompt.
+    #[test]
+    fn a_running_program_and_a_shells_own_prompt_title_both_keep_theirs() {
+        let mut st = test_state(true);
+        let mut s = OscSniffer::new();
+
+        apply_signals(&mut st, s.feed(b"\x1b]133;C;vim\x07\x1b]2;vim\x1b\\"));
+        assert_eq!(
+            st.osc_title.as_deref(),
+            Some("vim"),
+            "nothing said the command ended"
+        );
+
+        // A shell that re-titles itself does it between the `D` and the `A`
+        // (tty7's zsh helper prepends the `D`; the PowerShell one titles in
+        // its prompt function), so the title is the last word in the read.
+        apply_signals(
+            &mut st,
+            s.feed(b"\x1b]133;D;0\x07\x1b]0;me@box:~/dev\x07\x1b]133;A\x07"),
+        );
+        assert_eq!(
+            st.osc_title.as_deref(),
+            Some("me@box:~/dev"),
+            "the prompt's own title outranks the retirement it follows"
+        );
+
+        // And that prompt title is nobody's command to retire.
+        apply_signals(&mut st, s.feed(b"\x1b]133;C;ls\x07\x1b]133;D;0\x07"));
+        assert_eq!(st.osc_title.as_deref(), Some("me@box:~/dev"));
+    }
+
+    /// A pane with no shell integration never sees a mark, so nothing changes
+    /// for it: whatever it last called itself is all tty7 has.
+    #[test]
+    fn a_pane_without_shell_integration_keeps_its_title() {
+        let mut st = test_state(true);
+        let mut s = OscSniffer::new();
+        apply_signals(&mut st, s.feed(b"\x1b]0;user@host:~/dev\x07"));
+        apply_signals(&mut st, s.feed(b"lots of output\r\n"));
+        assert_eq!(st.osc_title.as_deref(), Some("user@host:~/dev"));
     }
 
     #[test]

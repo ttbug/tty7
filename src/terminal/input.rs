@@ -6,7 +6,7 @@ use super::view::TerminalView;
 use crate::core::config::Config;
 
 /// Everything about the terminal's current state that changes how a keystroke
-/// is encoded: the kitty protocol flags, plus DECCKM (application cursor keys).
+/// is encoded: keyboard modes and the PTY that receives the bytes.
 #[derive(Clone, Copy, Default)]
 pub(super) struct KeyFlags {
     disambiguate: bool,
@@ -15,6 +15,7 @@ pub(super) struct KeyFlags {
     /// DECCKM. ncurses apps turn this on via `smkx` and then only recognise the
     /// SS3 form of the arrow keys, because that is what `kcuu1` & co. spell.
     app_cursor: bool,
+    local_conpty: bool,
 }
 
 impl KeyFlags {
@@ -24,11 +25,30 @@ impl KeyFlags {
             report_all_keys: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
             report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
             app_cursor: mode.contains(TermMode::APP_CURSOR),
+            local_conpty: false,
+        }
+    }
+
+    pub(super) fn from_mode_with_local_conpty(mode: &TermMode, local_conpty: bool) -> Self {
+        Self {
+            local_conpty,
+            ..Self::from_mode(mode)
         }
     }
 
     pub(super) fn kitty_active(self) -> bool {
         self.disambiguate || self.report_all_keys
+    }
+
+    pub(super) fn legacy_newline_bytes(self) -> &'static [u8] {
+        if self.local_conpty {
+            // ConPTY decodes bare LF as Ctrl+Enter. Explicit Ctrl+J events
+            // preserve the key for native readers and still produce LF for
+            // VT readers such as ssh and WSL.
+            b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_"
+        } else {
+            b"\n"
+        }
     }
 
     pub(super) fn app_cursor(self) -> bool {
@@ -374,6 +394,9 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Ve
 
     if m.control && !m.platform {
         if let Some(b) = ctrl_c0(key) {
+            if b == b'\n' && !m.alt && !m.shift {
+                return Some(flags.legacy_newline_bytes().to_vec());
+            }
             if m.alt {
                 return Some(vec![0x1b, b]);
             }
@@ -550,6 +573,7 @@ mod tests {
         KeyFlags, defer_to_ime, keystroke_to_bytes, meta_chord_bypasses_ime,
         reshape_option_keystroke, tab_bytes,
     };
+    use alacritty_terminal::term::TermMode;
     use gpui::{Keystroke, Modifiers};
 
     fn full_mode() -> KeyFlags {
@@ -558,6 +582,7 @@ mod tests {
             report_all_keys: true,
             report_text: true,
             app_cursor: false,
+            local_conpty: false,
         }
     }
 
@@ -567,6 +592,7 @@ mod tests {
             report_all_keys: false,
             report_text: false,
             app_cursor: false,
+            local_conpty: false,
         }
     }
 
@@ -579,6 +605,54 @@ mod tests {
             modifiers: mods,
             key: key.to_string(),
             key_char: key_char.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn legacy_newline_preserves_ctrl_j_for_native_console_readers() {
+        let ctrl_j = Keystroke::parse("ctrl-j").unwrap();
+        for (local_conpty, expected) in [
+            (false, b"\n".as_slice()),
+            (true, b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".as_slice()),
+        ] {
+            let flags = KeyFlags::from_mode_with_local_conpty(&TermMode::empty(), local_conpty);
+            assert_eq!(flags.legacy_newline_bytes(), expected);
+            assert_eq!(
+                keystroke_to_bytes(&ctrl_j, flags).as_deref(),
+                Some(expected)
+            );
+            for (chord, expected) in [
+                ("enter", b"\r".as_slice()),
+                ("ctrl-c", b"\x03".as_slice()),
+                ("alt-enter", b"\x1b\r".as_slice()),
+                ("ctrl-alt-j", b"\x1b\n".as_slice()),
+            ] {
+                assert_eq!(
+                    keystroke_to_bytes(&Keystroke::parse(chord).unwrap(), flags).as_deref(),
+                    Some(expected),
+                    "{chord}, local_conpty={local_conpty}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_newline_chords_take_precedence_over_conpty_encoding() {
+        for mode in [
+            TermMode::DISAMBIGUATE_ESC_CODES,
+            TermMode::REPORT_ALL_KEYS_AS_ESC,
+        ] {
+            let flags = KeyFlags::from_mode_with_local_conpty(&mode, true);
+            for (chord, expected) in [
+                ("ctrl-j", b"\x1b[106;5u".as_slice()),
+                ("shift-enter", b"\x1b[13;2u".as_slice()),
+            ] {
+                assert_eq!(
+                    keystroke_to_bytes(&Keystroke::parse(chord).unwrap(), flags).as_deref(),
+                    Some(expected),
+                    "{chord}"
+                );
+            }
         }
     }
 
@@ -934,6 +1008,7 @@ mod tests {
             report_all_keys: true,
             report_text: true,
             app_cursor: false,
+            local_conpty: false,
         };
         for flags in [kitty(), full] {
             assert_eq!(
@@ -1128,6 +1203,7 @@ mod tests {
             report_all_keys: false,
             report_text: false,
             app_cursor: false,
+            local_conpty: false,
         }
     }
 
@@ -1209,6 +1285,7 @@ mod tests {
             report_all_keys: true,
             report_text: false,
             app_cursor: false,
+            local_conpty: false,
         };
         let none = Modifiers::default();
         assert_eq!(
@@ -1237,6 +1314,7 @@ mod tests {
             report_all_keys: true,
             report_text: false,
             app_cursor: false,
+            local_conpty: false,
         };
         assert_eq!(tab_bytes(false, full), b"\x1b[9u".to_vec());
     }
@@ -1316,6 +1394,7 @@ mod tests {
             report_all_keys: true,
             report_text: true,
             app_cursor: false,
+            local_conpty: false,
         };
         for key in ["f1", "f2", "f4", "f5", "f7", "f10", "f11", "f12"] {
             for mods in [none, shift, ctrl] {
@@ -1352,6 +1431,7 @@ mod tests {
             report_all_keys: true,
             report_text: true,
             app_cursor: false,
+            local_conpty: false,
         };
         let none = Modifiers::default();
         assert_eq!(
@@ -1367,6 +1447,7 @@ mod tests {
             report_all_keys: true,
             report_text: true,
             app_cursor: false,
+            local_conpty: false,
         };
         let none = Modifiers::default();
         assert_eq!(

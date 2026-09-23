@@ -336,6 +336,10 @@ pub struct TerminalView {
     scroll_anim: Option<ScrollAnim>,
     scroll_anim_epoch: u64,
     gesture_until: Option<std::time::Instant>,
+    /// Whether the trackpad gesture in flight is zooming, latched at its first
+    /// event. `None` between gestures, and never set for a wheel, which has no
+    /// gesture to belong to and decides notch by notch.
+    gesture_zoom: Option<bool>,
     pub title: String,
     /// A title the pane has been told about but has not adopted yet — see
     /// `set_title_when_settled`. `None` means the tab is showing the newest
@@ -1580,6 +1584,7 @@ impl TerminalView {
             scroll_anim: None,
             scroll_anim_epoch: 0,
             gesture_until: None,
+            gesture_zoom: None,
             title: DEFAULT_TITLE.to_string(),
             pending_title: None,
             default_title: DEFAULT_TITLE.to_string(),
@@ -2967,7 +2972,10 @@ impl TerminalView {
     }
 
     pub(super) fn key_flags(&self) -> super::input::KeyFlags {
-        super::input::KeyFlags::from_mode(self.terminal.term.lock().mode())
+        super::input::KeyFlags::from_mode_with_local_conpty(
+            self.terminal.term.lock().mode(),
+            self.terminal.is_local_conpty(),
+        )
     }
 
     fn tab_bytes(&self, shift: bool) -> Vec<u8> {
@@ -4496,7 +4504,7 @@ impl TerminalView {
         {
             cx.propagate();
         } else {
-            self.send_shortcut_bytes(b"\n", "enter", cx);
+            self.send_shortcut_bytes(self.key_flags().legacy_newline_bytes(), "enter", cx);
         }
     }
 
@@ -5468,12 +5476,38 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let gesturing = self.track_scroll_gesture(ev.touch_phase);
         // One modifier turns the wheel into a zoom, the way it does in a
         // browser. Which one is the user's to say, because the default is the
         // platform modifier and on macOS that is a key half the world is
         // already holding for something else (#668).
-        if zoom_wheel(cx.global::<Config>().mouse_zoom_modifier, &ev.modifiers) {
-            self.zoom_scroll(ev, window, cx);
+        let wants_zoom = zoom_wheel(cx.global::<Config>().mouse_zoom_modifier, &ev.modifiers);
+        // A trackpad gesture answers "scroll or zoom?" once, on its first
+        // event, and keeps that answer until the stream dies — momentum tail
+        // included. The tail is why: those events are the system's, not the
+        // hand's, yet each one is stamped with whatever modifiers happen to be
+        // down as it is delivered. Reaching for ⌘ during a flick's coast —
+        // ⌘-Tab, ⌘-C, anything — would otherwise turn hundreds of coasting
+        // lines into zoom steps and leave the font at its minimum, from a
+        // gesture that was never a zoom (#912).
+        // The answer is latched per gesture, not per stream: fingers going
+        // back down ask it again. Carrying it over would be the same bug
+        // wearing the other coat — one ⌘-zoom, and every later flick zooms
+        // with nothing held at all, because `Started` keeps the gesture live
+        // and would find the old answer still sitting there.
+        if !gesturing || matches!(ev.touch_phase, gpui::TouchPhase::Started) {
+            self.gesture_zoom = None;
+            // Leftover travel belongs to the gesture that earned it; a new one
+            // must not start already part-way to a step.
+            self.zoom_debt = 0.;
+        }
+        let zoom = if gesturing {
+            *self.gesture_zoom.get_or_insert(wants_zoom)
+        } else {
+            wants_zoom
+        };
+        if zoom {
+            self.zoom_scroll(ev, gesturing, window, cx);
             return;
         }
         let mult = cx.global::<Config>().mouse_scroll_multiplier;
@@ -5482,7 +5516,6 @@ impl TerminalView {
             ScrollDelta::Pixels(p) => p.y.as_f32() / self.line_height.as_f32(),
         };
         let delta = raw * mult;
-        let gesturing = self.track_scroll_gesture(ev.touch_phase);
 
         let quantized = !ev.modifiers.shift && {
             let mode = *self.terminal.term.lock().mode();
@@ -5518,7 +5551,13 @@ impl TerminalView {
     /// asked for the wheel. Steps go out as the same actions the keyboard and
     /// the View menu send, so the min/max clamp and the saved setting live in
     /// one place — [`Tty7App::change_font_size`](crate::ui::app::Tty7App).
-    fn zoom_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn zoom_scroll(
+        &mut self,
+        ev: &ScrollWheelEvent,
+        gesturing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Whatever the scrollback still had in flight is dropped: it was
         // travelling in lines of a font that is about to change size.
         self.cancel_scroll_anim();
@@ -5526,7 +5565,6 @@ impl TerminalView {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => p.y.as_f32() / self.line_height.as_f32(),
         };
-        let gesturing = self.track_scroll_gesture(ev.touch_phase);
         let (steps, debt) = zoom_scroll_steps(lines, self.zoom_debt, gesturing);
         self.zoom_debt = debt;
         for _ in 0..steps.unsigned_abs() {
@@ -9893,9 +9931,22 @@ mod gpui_tests {
     use super::*;
     use crate::daemon::protocol::{ClientMsg, DaemonMsg};
     use crate::daemon::transport::Stream;
+    use crate::terminal::remote::PtySource;
     use gpui::{Entity, TestAppContext, point};
 
     fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
+        let pty = if cfg!(windows) {
+            PtySource::LocalConpty
+        } else {
+            PtySource::Raw
+        };
+        harness_on(cx, pty)
+    }
+
+    fn harness_on(
+        cx: &mut TestAppContext,
+        pty: PtySource,
+    ) -> (gpui::WindowHandle<TerminalView>, Stream) {
         // Building a view reads the config. Whether that hit the real user
         // directory used to come down to which test happened to pin the
         // scratch dir first.
@@ -9907,8 +9958,13 @@ mod gpui_tests {
             cx.set_global(Config::default());
         });
         let window = cx.add_window(|window, cx| {
-            let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
-                .expect("socketpair-backed terminal");
+            let terminal = RemoteTerminal::from_stream_with(
+                client_side,
+                TermSize::new(80, 24),
+                Vec::new(),
+                pty,
+            )
+            .expect("socketpair-backed terminal");
             TerminalView::with_terminal(terminal, 1, window, cx)
         });
         (window, daemon_side)
@@ -12542,7 +12598,7 @@ mod gpui_tests {
     #[gpui::test]
     fn shift_enter_reaches_a_foreground_tui_with_kitty_encoding(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
-        let (window, mut daemon) = harness(cx);
+        let (window, mut daemon) = harness_on(cx, PtySource::LocalConpty);
         cx.update(|cx| crate::ui::keymap::init(cx));
         DaemonMsg::Output(b"\x1b[>1u".to_vec())
             .encode(&mut daemon)
@@ -12572,12 +12628,18 @@ mod gpui_tests {
             next_input_until_timeout(&mut daemon),
             Some(b"\x1b[13;2u".to_vec())
         );
+
+        vcx.simulate_keystrokes("ctrl-j");
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[106;5u".to_vec())
+        );
     }
 
     #[gpui::test]
     fn shift_enter_reaches_a_foreground_tui_as_lf_without_kitty(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
-        let (window, mut daemon) = harness(cx);
+        let (window, mut daemon) = harness_on(cx, PtySource::Raw);
         cx.update(|cx| crate::ui::keymap::init(cx));
         window
             .update(cx, |view, window, cx| {
@@ -12591,6 +12653,32 @@ mod gpui_tests {
         vcx.simulate_keystrokes("shift-enter");
 
         assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\n".to_vec()));
+
+        vcx.simulate_keystrokes("ctrl-j");
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\n".to_vec()));
+    }
+
+    #[gpui::test]
+    fn newline_chords_reach_conpty_as_ctrl_j_without_kitty(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness_on(cx, PtySource::LocalConpty);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active());
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        for chord in ["shift-enter", "ctrl-j"] {
+            vcx.simulate_keystrokes(chord);
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".to_vec()),
+                "{chord} must preserve Ctrl+J for native console readers"
+            );
+        }
     }
 
     #[gpui::test]
@@ -13283,6 +13371,73 @@ mod gpui_tests {
                 assert!(
                     view.scroll_anim.is_some(),
                     "the wheel never reached the scrollback"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The bug this guards: a two-finger flick coasts long after the fingers
+    /// are gone, and every coasting event carries whatever modifiers are down
+    /// when it lands. Grabbing ⌘ for something else mid-coast used to read as
+    /// a zoom and run the font down to its minimum in a blink (#912).
+    #[gpui::test]
+    fn a_modifier_pressed_mid_flick_does_not_hijack_it_into_a_zoom(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                view.on_scroll(&wheel(view, -0.5, gpui::TouchPhase::Started), w, cx);
+                let before = display_offset(view);
+                // The tail, now stamped with ⌘ the hand reached for.
+                let mut tail = wheel(view, -3., gpui::TouchPhase::Moved);
+                tail.modifiers = Modifiers::secondary_key();
+                view.on_scroll(&tail, w, cx);
+                assert!(
+                    display_offset(view) != before || view.scroll_anim.is_some(),
+                    "the tail stayed a scroll, the way the gesture started"
+                );
+                assert_eq!(view.zoom_debt, 0., "and never paid into the zoom");
+            })
+            .unwrap();
+    }
+
+    /// The same latch the other way round: a zoom gesture that outlives the
+    /// modifier keeps zooming rather than dumping its tail into the buffer.
+    #[gpui::test]
+    fn a_zoom_gesture_keeps_zooming_after_the_modifier_is_released(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let mut start = wheel(view, -0.5, gpui::TouchPhase::Started);
+                start.modifiers = Modifiers::secondary_key();
+                view.on_scroll(&start, w, cx);
+                view.on_scroll(&wheel(view, -0.5, gpui::TouchPhase::Moved), w, cx);
+                assert_eq!(display_offset(view), 10, "the grid never moved");
+                assert!(view.scroll_anim.is_none(), "and nothing was queued for it");
+            })
+            .unwrap();
+    }
+
+    /// The latch is per gesture, not per stream: fingers going down again
+    /// start a fresh question. Carrying the last answer over would mean one
+    /// ⌘-zoom left every later flick zooming with no modifier held at all.
+    #[gpui::test]
+    fn a_new_gesture_is_not_bound_by_what_the_last_one_answered(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let mut zoom = wheel(view, -0.5, gpui::TouchPhase::Started);
+                zoom.modifiers = Modifiers::secondary_key();
+                view.on_scroll(&zoom, w, cx);
+                assert_eq!(display_offset(view), 10, "that one was a zoom");
+                // Fingers down again, nothing held: a plain scroll.
+                view.on_scroll(&wheel(view, -3., gpui::TouchPhase::Started), w, cx);
+                assert_ne!(
+                    display_offset(view),
+                    10,
+                    "the new gesture asked the question again"
                 );
             })
             .unwrap();
@@ -15905,6 +16060,127 @@ mod prompt_handover_tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         panic!("never settled: {what}");
+    }
+
+    /// Bytes from the pane's pty, the way the daemon forwards them.
+    fn output(daemon: &mut Stream, bytes: &[u8]) {
+        DaemonMsg::Output(bytes.to_vec()).encode(daemon).unwrap();
+    }
+
+    /// Waits for the tab's reading of what the pane calls itself to become
+    /// `expect`, running out the wait a new title is held for on each pass.
+    fn titled(
+        cx: &mut TestAppContext,
+        window: &gpui::WindowHandle<TerminalView>,
+        expect: Option<&str>,
+    ) {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            cx.executor().advance_clock(TITLE_SETTLE * 2);
+            cx.run_until_parked();
+            let showing = window
+                .update(cx, |view, _, _| view.stated_title().map(str::to_string))
+                .unwrap();
+            if showing.as_deref() == expect {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the tab never came to read {expect:?}");
+    }
+
+    /// #889: a tab went on reading the name Claude Code had left on it long
+    /// after Claude exited and the pane was back at its own prompt in a real
+    /// directory. An OSC 0/2 had no end — only another OSC 0/2 replaced it —
+    /// so the last title any program wrote in a pane outlived it forever.
+    #[gpui::test]
+    fn a_title_a_command_set_is_retired_when_that_command_finishes(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        output(&mut daemon, b"\x1b]133;A\x07\x1b]133;B\x07");
+        output(
+            &mut daemon,
+            b"\x1b]133;C;claude\x07\x1b]2;\xe2\x9c\xb3 fixing the switcher\x1b\\",
+        );
+        titled(cx, &window, Some("✳ fixing the switcher"));
+
+        // Claude exits and the shell reports the command finished. Nothing
+        // titles the pane after it, so the tab has to fall back down the
+        // label ladder — `stated_title` saying nothing is how it does that.
+        output(&mut daemon, b"\x1b]133;D;0\x07");
+        titled(cx, &window, None);
+    }
+
+    /// The two cases a title is *supposed* to outlive: a program that is still
+    /// running, and a shell that titles its own prompt (which it does between
+    /// the `D` and the `A`, so it is the last word rather than a thing undone).
+    #[gpui::test]
+    fn a_running_program_and_a_shells_own_prompt_title_both_keep_theirs(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        output(
+            &mut daemon,
+            b"\x1b]133;C;vim\x07\x1b]2;vim \xe2\x80\x94 main.rs\x1b\\",
+        );
+        titled(cx, &window, Some("vim — main.rs"));
+
+        output(
+            &mut daemon,
+            b"\x1b]133;D;0\x07\x1b]0;me@box:~/dev\x07\x1b]133;A\x07\x1b]133;B\x07",
+        );
+        titled(cx, &window, Some("me@box:~/dev"));
+        settle(cx, &window, "the prompt is reading", |view| {
+            view.terminal.zle_reading()
+        });
+
+        // And that prompt title is nobody's command to retire. Both marks are
+        // chased by an edge the pane reports, so the assertion below cannot
+        // pass on bytes that have not landed yet.
+        output(&mut daemon, b"\x1b]133;C;ls\x07");
+        settle(cx, &window, "a command takes the pane", |view| {
+            !view.terminal.zle_reading()
+        });
+        output(&mut daemon, b"\x1b]133;D;0\x07\x1b]133;B\x07");
+        settle(cx, &window, "the prompt comes back", |view| {
+            view.terminal.zle_reading()
+        });
+        titled(cx, &window, Some("me@box:~/dev"));
+    }
+
+    /// #889 on a reattached window: a long session outran the daemon's replay
+    /// ring, so the replay carries the program's title but not the `C` that
+    /// started it. The replayed prompt state says a command owns the pane,
+    /// and that is enough to know the title is the command's to lose at `D`.
+    #[gpui::test]
+    fn a_reattached_window_retires_a_title_whose_c_rolled_out_of_the_replay(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        let (client_side, mut daemon) = test_stream_pair();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            let terminal =
+                RemoteTerminal::from_stream_reattached(client_side, TermSize::new(80, 24))
+                    .expect("reattached link-backed terminal");
+            TerminalView::with_terminal(terminal, 1, window, cx)
+        });
+
+        DaemonMsg::Snapshot(b"\x1b]2;\xe2\x9c\xb3 fixing the switcher\x1b\\redraw".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        titled(cx, &window, Some("✳ fixing the switcher"));
+
+        output(&mut daemon, b"\x1b]133;D;0\x07");
+        titled(cx, &window, None);
     }
 
     /// Printable text arrives the way the platform delivers it — through the

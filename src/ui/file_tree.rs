@@ -1799,13 +1799,22 @@ impl Tty7App {
                 .min_w_0()
                 .text_ellipsis()
                 .text_sm()
+                .text_color(if selected {
+                    gpui::rgb(sf.text_selected).into()
+                } else {
+                    // Names are the tree's primary content, like sidebar titles.
+                    cx.theme().sidebar_foreground
+                })
+                .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                 .when(row.entry.ignored, |d| {
                     d.italic().text_color(muted.opacity(0.7))
                 })
-                // The name carrying the colour is the signal people actually
-                // read; the letter at the end of the row is the confirmation.
+                // Ordinary changes belong in the status badge. Only a conflict
+                // should turn an entire filename into an attention signal.
                 .when_some(deco.tint, |d, status| {
-                    d.text_color(status_color(status, cx))
+                    d.when(status == DecoStatus::Conflict, |d| {
+                        d.text_color(status_color(status, cx))
+                    })
                 })
                 .when(deco.strike, |d| d.line_through())
                 .when(deco.bold, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
@@ -1825,12 +1834,17 @@ impl Tty7App {
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(if is_dir {
-                cx.theme().foreground
-            } else {
-                muted
-            }))
+            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
             .child(label)
+            .when(is_dir && deco.tint.is_some(), |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .size(px(4.))
+                        .rounded_full()
+                        .bg(status_color(deco.tint.unwrap(), cx)),
+                )
+            })
             // Two indicators, two columns, two shapes. The dot is an unsaved
             // editor buffer and has nothing to do with git; keeping it round and
             // `warning` while the git letter sits in its own trailing cell is

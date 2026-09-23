@@ -48,15 +48,7 @@ pub(crate) const HEADING: f32 = 11. * STEP;
 
 /// The leading glyph on a panel row — the file tree's folder and file marks.
 ///
-/// Pixels, not rems, because glyphs in this window are sized off the tile
-/// ladder in `app.rs` (`TILE_GLYPH` 13, `TILE_GLYPH_XS` 11) rather than off the
-/// text ramp above. A row that reached for gpui-component's rem sizes instead
-/// could never agree with the tab tiles it sits under: at the default
-/// `ui_font_size` of 16 that ladder offers `xsmall` 12 and `small` 14 and
-/// nothing between, so the tree's glyph came out either a step under the
-/// chrome — reading as a speck beside a 14px name — or a step over it, which
-/// puts a row of content above the navigation that owns it. 13 is the tab
-/// tile's own glyph size, so the two agree by construction.
+/// Keep row glyphs on the same 16px grid as the toolbar.
 pub(crate) const ROW_GLYPH: f32 = crate::ui::app::TILE_GLYPH;
 
 // The right panel's type ramp: four steps, a point apart, that the Info and
@@ -464,15 +456,7 @@ impl Tty7App {
                     let row = h_flex()
                         .id("right-panel-titlebar-drag")
                         .flex_none()
-                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
-                        // `sidebar_border`, the lighter of the two hairline
-                        // tiers and the one the panel's own left edge is drawn
-                        // in. It rules the tiles off from the content below,
-                        // which on macOS starts directly under them: the title
-                        // row that carries this line on other platforms is not
-                        // drawn here.
-                        .border_b_1()
-                        .border_color(cx.theme().sidebar_border);
+                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT));
                     crate::ui::app::window_move_gesture(
                         row,
                         "right-panel-titlebar-drag",
@@ -486,17 +470,11 @@ impl Tty7App {
                     .relative()
                     .children(self.right_panel_tabs(cx))
                     .child(div().flex_1())
-                    // Always painted, unlike the sidebar's and the strip's:
-                    // the tab tiles beside them are already there whenever the
-                    // panel is open, so hiding just these two left a row that
-                    // grew two buttons on hover and read as a glitch.
-                    .child(self.window_chrome(true, window, cx))
+                    // Navigation controls stay visible on both sidebars.
+                    .child(self.window_chrome(window, cx))
                 }))
-                // Air under the rule, so the first row of content is not
-                // sitting on the line. On the other platforms the title row
-                // holds this line and its own text keeps that distance; here
-                // the tiles are in the window's title bar and the content
-                // would start against the hairline.
+                // Separate navigation from content with space, matching the
+                // left sidebar's continuous surface.
                 .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(8.))))
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
@@ -636,12 +614,6 @@ impl Tty7App {
                 (None, true) => tile_trailing_inset_sm(),
                 (None, false) => CONTENT_INSET,
             }))
-            // `border`, not `sidebar_border`: this rules the tab row off from
-            // the content below it, with the same fill on both sides, so the
-            // line is the only thing saying where one ends.
-            .when(tabs.is_some(), |this| {
-                this.border_b_1().border_color(cx.theme().border)
-            })
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -928,20 +900,32 @@ impl Tty7App {
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .text_size(rems(TEXT_MONO))
-                    .font_family(mono.clone())
-                    .text_color(cx.theme().foreground)
-                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
-                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
+                    .text_size(rems(TEXT))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink(999.)
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(head),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink(1.)
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(leaf),
+                    )
                     .into_any_element()
             }
             InfoValue::Text(v) => div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(rems(TEXT_MONO))
-                .font_family(mono.clone())
-                .text_color(cx.theme().foreground)
+                .text_size(rems(TEXT))
+                .text_color(cx.theme().sidebar_foreground)
                 .child(v)
                 .into_any_element(),
             InfoValue::Diff {
@@ -1069,6 +1053,7 @@ impl Tty7App {
                 div()
                     .flex_none()
                     .w(label_w)
+                    .text_size(rems(META))
                     .whitespace_nowrap()
                     .text_color(cx.theme().muted_foreground)
                     .child(row.label),

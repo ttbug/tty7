@@ -32,7 +32,7 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    HEADING, META, META_MONO, ROW_INSET, SEARCH_H, TEXT_MONO, action_strip, git_badge, info_chip,
+    HEADING, META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
 };
 use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -40,21 +40,7 @@ use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 
-/// A file row, and the group header above it. Both 26px, so the list reads as
-/// one grid rather than as headers with a list hanging off them.
-///
-/// The pitch is the row's tallest line plus air: gpui leads a plain `div` at
-/// phi, so the mono path at [`TEXT_MONO`] occupies `round(13 × 1.618) = 21px`,
-/// and 26 gives it 2.5px on each side — dense, which is what a 260px column of
-/// paths wants. It was 24 around a 19px line while the panel was still on its
-/// own 12px step.
-///
-/// It is also the height `scm/detail.rs` gives the changed-file rows it shows
-/// for a commit — the two lists are the same list pointed at different trees,
-/// and a reader who opens a commit must not feel the pitch change under them.
-/// That file reads this constant rather than restating it; it used to carry its
-/// own copy with a comment asking the next reader to keep the two in step,
-/// which is the same kind of promise that let the panel's type ramp drift.
+/// Shared compact pitch for working-tree and commit-detail file rows.
 pub(super) const ROW_H: f32 = 26.;
 
 /// The status letter's column, from `git_badge`. The group chevron sits in a
@@ -79,34 +65,7 @@ const BRANCHES_IN_MENU: usize = 12;
 /// changes the user came to look at.
 const UNTRACKED_AUTO_COLLAPSE: usize = 20;
 
-/// The message box at rest, the ceiling it grows to, and the padding inside
-/// its fill.
-///
-/// The box is a soft rounded fill with no outline, which is what
-/// `switcher.rs`'s inline rename field already does and the only shape in the
-/// app for "an input you write into rather than filter with". Every `Input` in
-/// tty7 is `.appearance(false)`; a hairline here, and an accent ring on top of
-/// it when focused, made the commit box the one outlined thing on a panel that
-/// otherwise separates by surface and space alone. The fill it wears instead is
-/// [`field_fill`], deliberately below the ramp's first rung.
-///
-/// The box still has to end up exactly [`SEARCH_H`] tall, which is what makes
-/// every input row in the panel sit on one line, and getting there is
-/// arithmetic rather than a guess:
-///
-/// * gpui-component lays an `Input`'s text out at a fixed `Rems(1.25)` line
-///   height, which at the default 16px rem is `MSG_LINE` = 20px whatever size
-///   the field is set to.
-/// * At `.xsmall()` the field adds no vertical padding of its own — `input_py`
-///   is 0 there — so one row of field measures exactly `MSG_LINE`.
-/// * gpui measures border-box. With the hairline gone its 1px each side has to
-///   come out of the padding or the box would shrink to 28: `5 + 20 + 5` = 30,
-///   and the assertion below refuses to compile if that stops matching the
-///   search strip.
-///
-/// `MSG_PAD_X` absorbs the same lost pixel — 9 against `input_px`'s 4 at
-/// `.xsmall()`, and the two paddings add to the thirteen the hairline version
-/// also reached, which is where the panel's text column is.
+/// Message fields share the search field's 30px height and grow with content.
 const MSG_LINE: f32 = 20.;
 const MSG_PAD_X: f32 = 9.;
 const MSG_PAD_Y: f32 = 5.;
@@ -135,9 +94,7 @@ const MSG_ROWS_MAX: usize = 6;
 /// stretched across it — the row it sits in reads "N staged" on the left and
 /// offers this on the right, so it only has to be as wide as its label.
 ///
-/// The frame is a hairline around a 24px interior, which puts it at 26 —
-/// gpui measures border-box, and the hairline is part of what a reader sees.
-/// Twenty-six is [`ROW_H`], the panel's row pitch, so the control sits on the
+/// The frame follows [`ROW_H`], the panel's row pitch, so the control sits on the
 /// same line grid as everything above and below it; it follows that constant
 /// rather than restating it, because the two moving apart is the only way this
 /// can go wrong.
@@ -722,7 +679,7 @@ impl Tty7App {
                 .items_center()
                 // Every input row in the panel is 30px, and the field inside
                 // it is the `.xsmall()` one that height was derived from.
-                .h(px(30.))
+                .h(px(SEARCH_H))
                 .px(px(CONTENT_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
@@ -773,7 +730,7 @@ impl Tty7App {
                 .id("scm-checkout-branch")
                 .flex_none()
                 .items_center()
-                .h(px(30.))
+                .h(px(SEARCH_H))
                 .px(px(CONTENT_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
@@ -957,13 +914,8 @@ impl Tty7App {
     /// and the pair is only as wide as the label. Right-aligned, with the
     /// count it acts on reading along the same line.
     ///
-    /// Ghost inside the frame in both states, so the panel at rest holds no
-    /// filled slab. The obvious alternative, gpui-component's `.primary()`,
-    /// paints a grey one: `theme.primary` is `mix(foreground, background,
-    /// 0.20)` in tty7, so a "primary" button is a mid-grey block sitting in a
-    /// column of hairlines. What tells the two states apart is the ink —
-    /// full-strength when there is something to commit, muted when there is
-    /// not, which is where the panel sits most of the time.
+    /// An available commit is the panel's primary action. Empty/disabled
+    /// controls stay neutral rather than advertising an action that cannot run.
     fn scm_commit_buttons(
         &self,
         repo: &RepoKey,
@@ -975,7 +927,7 @@ impl Tty7App {
         let live = plan.enabled;
         let staged = status.staged().count();
         let theme = cx.theme();
-        let (muted, fg) = (theme.muted_foreground, theme.foreground);
+        let (muted, fg) = (theme.muted_foreground, theme.primary_foreground);
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         h_flex()
             .flex_none()
@@ -1032,6 +984,7 @@ impl Tty7App {
                             // the pointer would get no answer. This walks the
                             // same two rungs the file rows walk.
                             .custom(commit_half(cx))
+                            .when(live, |button| button.primary())
                             .xsmall()
                             .label(t(plan.label))
                             .h_full()
@@ -1519,22 +1472,19 @@ impl Tty7App {
                 }
             })
             .child(git_badge(letter, status_color(deco, cx), &mono))
-            // Mono, because a path is a token you compare character by
-            // character.
-            //
-            // `scm/detail.rs` draws the changed-file rows of a commit from the
-            // same two steps, so the two lists stay pixel-identical. Moving one
-            // means moving the other.
+            // Names use the same resting/selected hierarchy as sidebar rows.
             .child(
                 div()
                     .flex_none()
-                    .text_size(rems(TEXT_MONO))
-                    .font_family(mono.clone())
-                    .text_color(if deco == DecoStatus::Deleted {
-                        cx.theme().muted_foreground
+                    .text_size(rems(crate::ui::right_panel::TEXT))
+                    .text_color(if deco == DecoStatus::Conflict {
+                        status_color(deco, cx)
+                    } else if selected {
+                        gpui::rgb(sf.text_selected).into()
                     } else {
-                        cx.theme().foreground
+                        gpui::rgb(sf.text_resting).into()
                     })
+                    .when(selected, |s| s.font_weight(gpui::FontWeight::MEDIUM))
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
                     .child(name.to_string()),
             )

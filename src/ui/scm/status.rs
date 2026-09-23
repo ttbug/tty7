@@ -22,9 +22,8 @@ pub(crate) fn status_glyph(s: DecoStatus) -> &'static str {
     }
 }
 
-/// Every colour here comes from `Semantics` (ansi 1/2/3/6 pushed over the
-/// contrast floor), so it already tracks the theme and is already covered by
-/// the contrast tests in `presets.rs`. No new token is introduced.
+/// Semantic roles keep their meaning across terminal palettes and are
+/// contrast-checked on every UI surface in `presets.rs`.
 pub(crate) fn status_color(s: DecoStatus, cx: &gpui::App) -> gpui::Hsla {
     let theme = cx.theme();
     match s {

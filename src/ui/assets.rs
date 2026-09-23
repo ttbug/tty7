@@ -207,23 +207,8 @@ mod tests {
              set puts 19.3, so it will read a size small beside them"
         );
 
-        // The weight is the one part of this that is not free to be chosen.
-        // `plus` is the only glyph in the set drawn off the family's own
-        // `stroke-width`, and the amount it is off by is not a taste call: it
-        // is what the three chrome tiles were already rendering. Scaling a
-        // glyph up buys stroke along with extent, so the old art drew
-        // `TILE_GLYPH_LINE / TILE_GLYPH` wider at those call sites; dropping
-        // the scale-up without putting that back would have thinned the `+` by
-        // a fifth even as it got *longer*. The art carries it instead, which is
-        // what lets the same asset serve the tiles that never had a `_LINE`
-        // step to grow into.
-        //
-        // Note what this does not license: any *more* weight than that. `plus`
-        // is drawn beside stock lucide hairlines as well as beside the set's
-        // own closed shapes — `minus` and `undo-2` in the Source Control row
-        // strip at `TILE_GLYPH_XS`, `search` in the switcher's gutter — and a
-        // cross heavier than the glyph next to it reads as the emphasised
-        // control in the row, which is the same failure as reading small.
+        // The toolbar now uses one size and one stroke weight, including
+        // open shapes such as the plus.
         let family: f32 = attr(&glyph("panel-left"), "stroke-width").parse().unwrap();
         let shipped = family * crate::ui::app::TILE_GLYPH_LINE / crate::ui::app::TILE_GLYPH;
         assert!(

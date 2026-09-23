@@ -1289,7 +1289,7 @@ impl PaletteView {
 
 impl EventEmitter<PaletteEvent> for PaletteView {}
 
-const PALETTE_ROW_H: f32 = 30.;
+const PALETTE_ROW_H: f32 = 36.;
 
 /// Left inset of a row's *label*, so a section header can start on the same
 /// pixel column as the rows it introduces. A row is a `ListItem` inset by
@@ -1324,18 +1324,24 @@ const PALETTE_VISIBLE_ROWS: f32 = 12.;
 const RECENT_ROWS: usize = 5;
 
 impl Render for PaletteView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (border, popover) = (theme.border, theme.popover);
         let scrim = crate::ui::presets::scrim_fill(cx);
 
-        let list_max_h = px(PALETTE_ROW_H * PALETTE_VISIBLE_ROWS + 4.);
+        let viewport = window.viewport_size();
+        let top = (viewport.height.as_f32() * 0.16).clamp(16., 120.);
+        // Reserve space for the search field and the card's padding, including
+        // when a split-screen window is shorter than the full command list.
+        let list_max_h = px((viewport.height.as_f32() - top - 88.)
+            .max(PALETTE_ROW_H)
+            .min(PALETTE_ROW_H * PALETTE_VISIBLE_ROWS + 4.));
         let card = v_flex()
-            .w(px(560.))
+            .w(px((viewport.width.as_f32() - 32.).clamp(0., 600.)))
             .bg(popover)
             .border_1()
             .border_color(border)
-            .rounded(px(10.))
+            .rounded(px(12.))
             .shadow_xl()
             .overflow_hidden()
             .pb_1()
@@ -1352,7 +1358,7 @@ impl Render for PaletteView {
             .flex()
             .items_start()
             .justify_center()
-            .pt(px(120.))
+            .pt(px(top))
             .bg(scrim)
             .key_context("Palette")
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {

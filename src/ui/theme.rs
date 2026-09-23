@@ -590,6 +590,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let m = theme.neutrals();
     let surfaces = theme.surfaces();
     let sem = theme.semantics();
+    let interaction = theme.interactions();
     let active = theme.active_palette(config.theme_legible_palette);
 
     let backdrop = config.window_backdrop;
@@ -610,6 +611,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         image: theme.image.clone(),
     });
     cx.set_global(surfaces.clone());
+    cx.set_global(interaction);
     cx.set_global(presets::ActiveAccent(m.accent));
     // Same treatment as `Surfaces`: derived once here rather than recomputed
     // in `render`, because the graph reads it once per visible row per frame
@@ -645,6 +647,21 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.secondary_foreground = rgb(m.foreground).into();
     t.muted = rgb(m.muted).into();
     t.muted_foreground = rgb(m.muted_foreground).into();
+    // Components read both ThemeColor fields and layered tokens. Keep both
+    // routes on our palette instead of leaking the component library defaults.
+    t.tokens.foreground = Hsla::from(rgb(m.foreground)).into();
+    t.tokens.border = Hsla::from(rgb(m.border)).into();
+    t.tokens.muted = Hsla::from(rgb(m.muted)).into();
+    t.tokens.muted_foreground = Hsla::from(rgb(m.muted_foreground)).into();
+    t.tokens.secondary = Hsla::from(rgb(m.secondary)).into();
+    t.tokens.secondary_foreground = Hsla::from(rgb(m.foreground)).into();
+    t.button = rgb(m.popover).into();
+    t.button_secondary = rgb(m.secondary).into();
+    t.button_secondary_foreground = rgb(m.foreground).into();
+    t.tokens.button = Hsla::from(rgb(m.popover)).into();
+    t.tokens.button_foreground = Hsla::from(rgb(m.foreground)).into();
+    t.tokens.button_secondary = Hsla::from(rgb(m.secondary)).into();
+    t.tokens.button_secondary_foreground = Hsla::from(rgb(m.foreground)).into();
     t.popover = rgb(m.popover).into();
     t.tokens.popover = Hsla::from(rgb(m.popover)).into();
     t.tokens.popover_foreground = Hsla::from(rgb(m.foreground)).into();
@@ -654,25 +671,30 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // preset and came out brighter than the window they float over.
     t.popover_foreground = rgb(m.foreground).into();
 
-    let accent_fill = rgb(surfaces.popover.cursor);
-    let accent_text: Hsla = rgb(m.foreground).into();
+    let accent_fill = rgb(interaction.choice);
+    let accent_text: Hsla = rgb(interaction.choice_ink).into();
     t.accent = accent_fill.into();
     t.accent_foreground = accent_text;
     t.tokens.accent = Hsla::from(accent_fill).into();
     t.tokens.accent_foreground = accent_text.into();
 
-    let primary_base: Hsla = rgb(presets::mix(m.foreground, m.background, 0.20)).into();
-    let primary_hover: Hsla = rgb(presets::mix(m.foreground, m.background, 0.30)).into();
-    let primary_active: Hsla = rgb(presets::mix(m.foreground, m.background, 0.10)).into();
+    let primary_base: Hsla = rgb(interaction.primary.fill).into();
+    let primary_hover: Hsla = rgb(interaction.primary_hover).into();
+    let primary_active: Hsla = rgb(interaction.primary_pressed).into();
+    let primary_text: Hsla = rgb(interaction.primary.on_fill).into();
     t.primary = primary_base;
     t.primary_hover = primary_hover;
     t.primary_active = primary_active;
+    t.primary_foreground = primary_text;
+    t.button_primary_foreground = primary_text;
     t.tokens.primary = primary_base.into();
     t.tokens.primary_hover = primary_hover.into();
     t.tokens.primary_active = primary_active.into();
+    t.tokens.primary_foreground = primary_text.into();
     t.tokens.button_primary = primary_base.into();
     t.tokens.button_primary_hover = primary_hover.into();
     t.tokens.button_primary_active = primary_active.into();
+    t.tokens.button_primary_foreground = primary_text.into();
 
     let steps = |c: u32| {
         (
@@ -774,22 +796,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.tokens.switch_thumb = Hsla::from(rgb(knob)).into();
     t.tokens.switch = Hsla::from(rgb(surfaces.window.selected)).into();
 
-    // A filled slider track means the same thing an on switch does — "this is
-    // the value you set" — so it gets the same colour, and its knob is the same
-    // knob. Left alone the bar falls back to `tokens.primary`, the near-black we
-    // give primary buttons, and the thumb to `primary_foreground`, which on a
-    // dark theme is a black disc on a dark page. Side by side on one settings
-    // page the two controls disagreed about what a set value looks like.
-    //
-    // Both were tried on `primary` — the neutral ramp the segmented controls
-    // and the sidebar's selected page are drawn from — to settle a complaint
-    // that the accent pills were the only saturated things on a screen of
-    // greys. Reverted on sight: a dark-grey "on" against a light-grey "off" is
-    // not a large enough step to read at a glance down a column of rows, and a
-    // switch whose state you have to look twice at has lost the one job it has.
-    // If the mismatch with the segmented controls is worth closing, it has to
-    // close from the other end — by giving *them* some accent — not by taking
-    // it away from here.
+    // On-switches, sliders and primary actions share the accent role.
     t.tokens.slider_bar = Hsla::from(rgb(m.accent)).into();
     t.tokens.slider_thumb = Hsla::from(rgb(knob)).into();
 
@@ -829,7 +836,8 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.shadow = false;
 
     let sidebar_bg = Hsla::from(rgb(m.sidebar));
-    let sidebar_sel = rgb(surfaces.sidebar.selected);
+    let (navigation_fill, navigation_ink) = theme.navigation_colors();
+    let sidebar_sel = rgb(navigation_fill);
     // `t.sidebar` stays the opaque theme token: the settings theme picker
     // paints with it on top of the (opaque) settings overlay, so diluting
     // it would wash out that panel. The workspace sidebar/right-panel
@@ -843,15 +851,17 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.sidebar_foreground = rgb(surfaces.sidebar.text_resting).into();
     t.sidebar_accent = sidebar_sel.into();
     t.tokens.sidebar_accent = Hsla::from(sidebar_sel).into();
-    t.sidebar_accent_foreground = rgb(surfaces.sidebar.text_selected).into();
+    t.sidebar_accent_foreground = rgb(navigation_ink).into();
 
     t.list.active_highlight = true;
-    t.list_active = rgb(surfaces.popover.cursor).into();
-    t.list_active_border = rgb(surfaces.popover.cursor).into();
+    t.list_active = rgb(interaction.choice).into();
+    t.list_active_border = rgb(interaction.choice).into();
     t.list_hover = rgb(surfaces.popover.hover).into();
 
-    t.input = rgb(surfaces.window.selected).into();
-    t.tokens.input = Hsla::from(rgb(surfaces.window.selected)).into();
+    // gpui-component's `input` is the border role, also used by default
+    // buttons. Giving it the field background would erase their outlines.
+    t.input = rgb(interaction.input_border).into();
+    t.tokens.input = Hsla::from(rgb(interaction.input_border)).into();
 
     let button_hover: Hsla = rgb(surfaces.window.hover).into();
     let button_active: Hsla = rgb(surfaces.window.selected).into();
@@ -863,6 +873,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.tokens.button_secondary_active = button_active.into();
 
     t.ring = rgb(m.accent).into();
+    t.tokens.ring = Hsla::from(rgb(m.accent)).into();
     // Every splitter and panel edge lights up with this while you drag it, and
     // the drop target for a dragged-in file tints with it. Unset it is a fixed
     // blue from gpui-component's stock theme — the same blue under all nine
@@ -903,14 +914,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
-/// Every switch in the window, built here so the on-state has one definition.
-///
-/// The accent is load-bearing, not decoration. Without `.color()` a switch's
-/// on-state falls to `tokens.primary`, a dark neutral, and against the light
-/// neutral of the off-state that is too small a step to read while scanning a
-/// column of rows — you end up checking the thumb's position on each one. It
-/// was tried that way and reverted; see the slider-bar note in `apply_theme`
-/// for the other half of the pair.
+/// On-state shares the accent role with sliders and primary actions.
 pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
     let accent = cx.global::<presets::ActiveAccent>().0;
     gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))

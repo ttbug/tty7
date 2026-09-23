@@ -38,8 +38,8 @@ const ROW_GAP: f32 = 2.;
 mod row_metrics {
     /// `border_r_1` on the sidebar itself.
     pub(super) const BORDER: f32 = 1.;
-    /// `px_1` on the scrolling list that holds the rows.
-    pub(super) const LIST_PAD: f32 = 4.;
+    /// `px_2` on the scrolling list that holds the rows.
+    pub(super) const LIST_PAD: f32 = 8.;
     /// `pl_2` + `pr_2` on the row.
     pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar`.
@@ -247,7 +247,7 @@ impl Tty7App {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .px_1()
+            .px_2()
             .py_1p5()
             .gap_0p5();
 
@@ -323,10 +323,8 @@ impl Tty7App {
             ..font.clone()
         };
         let rem = window.rem_size().as_f32();
-        // A group header draws at a fixed 11px, its name semibold and the
-        // branch beside it regular. Resolved here so the header measures
-        // itself in the face it is about to be painted in, the way a row does.
-        let header_size = 13.;
+        // Measure with the same interface scale used to paint the header.
+        let header_size = rem * 0.75;
         let header_font = gpui::Font {
             weight: FontWeight::SEMIBOLD,
             ..font.clone()
@@ -1005,7 +1003,7 @@ impl Tty7App {
                         }
                     })
                     .w_full()
-                    .py_1()
+                    .py_1p5()
                     .items_center()
                     .justify_between()
                     .gap_2()
@@ -1134,7 +1132,7 @@ impl Tty7App {
                     })
                     .when(!(show_badges && badge_pos < 9), |row| {
                         let backing: gpui::Hsla = if is_active {
-                            gpui::rgb(sf.selected).into()
+                            cx.theme().sidebar_accent
                         } else {
                             gpui::rgb(sf.hover).into()
                         };
@@ -1299,10 +1297,11 @@ impl Tty7App {
                     // More above a heading than below it: the 12px is the
                     // generous interval in a column whose rows sit 2px apart,
                     // and it is what makes a group a group without a box.
-                    .pt(px(10.))
+                    .pt(px(12.))
                     .pb_1()
-                    .text_size(px(13.))
+                    .text_size(px(header_size))
                     .text_color(added_ink)
+                    //.text_color(cx.theme().muted_foreground)
                     .hover(|s| s.text_color(cx.theme().foreground))
                     .on_click(cx.listener({
                         let key = group_key.clone();
@@ -1582,9 +1581,7 @@ impl Tty7App {
             );
         }
 
-        // Empty chrome until the pointer is over the rail: these two tiles are
-        // the only thing between a resting window and a bare column of tabs.
-        let chrome_shown = self.sidebar_chrome_hover.get();
+        // Keep navigation discoverable without requiring a hover over the rail.
         let controls = h_flex()
             .flex_shrink_0()
             .h(px(TITLE_BAR_HEIGHT))
@@ -1607,29 +1604,24 @@ impl Tty7App {
                 div()
                     .occlude()
                     .flex_shrink_0()
-                    .when(!chrome_shown, |tile| tile.invisible())
                     .child(self.new_tab_button("sidebar-add", cx)),
             )
             .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
-                    .when(!chrome_shown, |tile| tile.invisible())
-                    .child(
-                        crate::ui::tab_strip::chrome_tile(
-                            Button::new("sidebar-collapse")
-                                .icon(Icon::empty().path("icons/panel-left.svg")),
-                            false,
-                            cx,
-                        )
-                        .rounded_lg()
-                        .tooltip_element(crate::ui::tab_strip::chord_tooltip(
-                            t(L10nKey::TabTooltipHideSidebar),
-                            "ToggleLeftPanel",
-                            cx,
-                        ))
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
-                    ),
+                div().occlude().flex_shrink_0().child(
+                    crate::ui::tab_strip::chrome_tile(
+                        Button::new("sidebar-collapse")
+                            .icon(Icon::empty().path("icons/panel-left.svg")),
+                        false,
+                        cx,
+                    )
+                    .rounded_lg()
+                    .tooltip_element(crate::ui::tab_strip::chord_tooltip(
+                        t(L10nKey::TabTooltipHideSidebar),
+                        "ToggleLeftPanel",
+                        cx,
+                    ))
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
+                ),
             );
         let brand = h_flex()
             .flex_shrink_0()
@@ -1688,14 +1680,17 @@ impl Tty7App {
             .border_color(cx.theme().sidebar_border)
             .child(self.workspace_head(cx));
 
-        let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
         let top_bar = h_flex()
             .flex_shrink_0()
             .items_center()
             .gap(px(6.))
-            .h(px(44.))
-            .pl(px(chip_inset))
-            .pr(px(crate::ui::app::CONTENT_INSET))
+            .h(px(34.))
+            .mx_2()
+            .mt_1()
+            .mb_1()
+            .px_2()
+            .rounded_lg()
+            .bg(cx.theme().muted)
             .child(
                 div()
                     .flex_shrink_0()
@@ -1710,10 +1705,12 @@ impl Tty7App {
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(&self.sidebar_search).appearance(false).pl_0()),
+                div().flex_1().min_w_0().child(
+                    Input::new(&self.sidebar_search)
+                        .appearance(false)
+                        .cleanable(true)
+                        .pl_0(),
+                ),
             );
 
         let task_heading = h_flex()
@@ -1854,10 +1851,6 @@ impl Tty7App {
                     .child(workspace_footer),
             )
             .child(handle)
-            .child(crate::ui::app::hover_sheet(
-                "sidebar-chrome-hover",
-                &self.sidebar_chrome_hover,
-            ))
     }
 
     /// What the sidebar row hid: the full title, the full branch and diff

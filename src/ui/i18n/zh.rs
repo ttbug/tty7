@@ -554,10 +554,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "tmux 预设把窗格/标签页操作映射为前缀序列（例如 Ctrl-B 后按 C）。"
         }
         L10nKey::SettingsPrefix => "前缀",
-        L10nKey::SettingsPressKeys => "按下按键…",
+        L10nKey::SettingsPressKeys => "按下按键… · ⌫ 表示不设快捷键",
         L10nKey::SettingsPauseToSaveEsc => "暂停以保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "点击某个快捷键，再按下新按键，短暂停顿后保存。连续按键可组成序列，例如 Ctrl-B 后按 X。Esc 取消；Backspace 移除最后一个按键，最先按下则重置为默认。"
+            "点击某个快捷键，再按下新按键，短暂停顿后保存。连续按键可组成序列，例如 Ctrl-B 后按 X。Esc 取消；Backspace 移除最后一个按键，最先按下则不设快捷键，点「重置」可恢复默认。"
         }
         L10nKey::SettingsPrefixNote => {
             "启用前缀后，单独按前缀键约 1 秒后会传给 shell，前缀 + 未绑定的按键会直接发送到终端。"
@@ -1679,7 +1679,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopyWorkingDirectory => "复制工作目录",
         L10nKey::AppMenuCopySessionId => "复制会话 ID",
         L10nKey::AppMenuForkSession => "Fork 会话",
-        L10nKey::AppMenuClosePaneTab => "关闭窗格 / 标签页",
+        L10nKey::AppMenuClosePaneTab => "关闭",
         L10nKey::AppMenuCloseOtherTabs => "关闭其他标签页",
         L10nKey::AppMenuCloseTabsRight => "关闭右侧标签页",
         L10nKey::AppMenuReopenClosedTab => "重新打开已关闭的标签页",

@@ -46,6 +46,11 @@ AppImage bundles its own X11/Wayland/font libraries.
     tty7-app.exe --unregister-explorer-menu
     ```
 
+    Nothing has to be installed first. The executables link the Visual C++
+    runtime statically, so the "Visual C++ 2015–2022 Redistributable" is not a
+    prerequisite — releases up to and including 26.9.2 did need it, and failed
+    to start at all on a machine that had never installed it.
+
     <Note>
       The Windows package also carries a Linux `tty7-server` binary so a WSL
       distro can be served locally instead of downloading one. See

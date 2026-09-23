@@ -74,6 +74,22 @@ function Assert-ConptyPair([string]$directory, [string]$label) {
     }
 }
 
+# A shipped binary that imports VCRUNTIME140.dll does not start on a Windows
+# machine that has never installed the Visual C++ Redistributable: the loader
+# fails before `main`, with no log and no window. That is #902, and it is how
+# 26.8.2 failed winget's install validation
+# (microsoft/winget-pkgs#415841) while running perfectly on every machine that
+# had ever seen Visual Studio. `.cargo/config.toml` links the CRT statically;
+# checked here, on the payload that actually ships, because neither the build
+# nor the tests can observe the difference.
+function Assert-NoVcRuntime([string]$directory, [string]$label) {
+    try {
+        & (Join-Path $PSScriptRoot 'assert-no-vcruntime.ps1') $directory
+    } catch {
+        Fail "$label would not start without the VC++ Redistributable: $($_.Exception.Message)"
+    }
+}
+
 # ---- Portable ZIP --------------------------------------------------------
 # Update rules live in the updater's extractor; the ones that can be broken by
 # packaging alone are re-stated here.
@@ -148,6 +164,7 @@ if (-not (Test-Path -LiteralPath $Zip)) {
         Assert-BinaryVersion (Join-Path $unzipped 'tty7-app.exe') 'the portable tty7-app.exe'
         Assert-BinaryVersion (Join-Path $unzipped 'tty7-updater.exe') 'the portable tty7-updater.exe'
         Assert-ConptyPair $unzipped 'the portable archive'
+        Assert-NoVcRuntime $unzipped 'the portable archive'
     } finally {
         Remove-Item -Recurse -Force $unzipped -ErrorAction SilentlyContinue
     }
@@ -172,6 +189,7 @@ if (-not (Test-Path -LiteralPath $Stage -PathType Container)) {
     Assert-BinaryVersion (Join-Path $Stage 'tty7-app.exe') 'the installed tty7-app.exe'
     Assert-BinaryVersion (Join-Path $Stage 'tty7-updater.exe') 'the installed tty7-updater.exe'
     Assert-ConptyPair $Stage 'the Inno payload'
+    Assert-NoVcRuntime $Stage 'the Inno payload'
 }
 
 # ---- Setup executable ----------------------------------------------------

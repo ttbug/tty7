@@ -1,13 +1,14 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, App, Context, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, div, prelude::*, px,
+    Animation, AnimationExt as _, App, Context, KeyDownEvent, Keystroke, MouseButton, div,
+    prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
+use crate::core::actions::{NewTab, OpenSettings, ReopenClosedTab, TogglePalette, ToggleSwitcher};
 use crate::core::session::{SessionPane, SessionTab};
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
@@ -203,7 +204,7 @@ impl Tty7App {
 
         let closed_hint = self.closed.last().and_then(closed_tab_label);
         let nothing_to_reopen = self.closed.is_empty();
-        let mut list = v_flex().gap_2().w(px(300.)).text_sm().text_color(muted);
+        let mut list = v_flex().gap_1().w(px(320.)).text_sm().text_color(muted);
         for action in HOME_SHORTCUTS {
             if action == "ReopenClosedTab" && nothing_to_reopen {
                 continue;
@@ -211,15 +212,33 @@ impl Tty7App {
             let emphasized = closed_hint.is_some() && action == "ReopenClosedTab";
             let label = home_shortcut_label(action, closed_hint.as_deref());
             list = list.child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .when(emphasized, |row| row.text_color(foreground))
-                    .child(label)
-                    .children(
-                        key_hint(action, cx)
-                            .map(|keys| div().font_family(self.font_family.clone()).child(keys)),
-                    ),
+                Button::new(action)
+                    .ghost()
+                    .w_full()
+                    .h(px(38.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .text_color(muted)
+                            .when(emphasized || action == "NewTab", |row| {
+                                row.text_color(foreground)
+                            })
+                            .child(label)
+                            .children(key_stroke(action, cx).map(Kbd::new)),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let command: Box<dyn gpui::Action> = match action {
+                            "NewTab" => Box::new(NewTab),
+                            "ReopenClosedTab" => Box::new(ReopenClosedTab),
+                            "ToggleSwitcher" => Box::new(ToggleSwitcher),
+                            "TogglePalette" => Box::new(TogglePalette),
+                            "OpenSettings" => Box::new(OpenSettings),
+                            _ => return,
+                        };
+                        window.dispatch_action(command, cx);
+                    }),
             );
         }
 
@@ -240,12 +259,11 @@ impl Tty7App {
             .items_center()
             .justify_center()
             .gap(px(48.))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| this.new_tab(window, cx)),
-            )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "enter" && !ev.keystroke.modifiers.modified() {
+                if this.home_focus.is_focused(window)
+                    && ev.keystroke.key == "enter"
+                    && !ev.keystroke.modifiers.modified()
+                {
                     this.new_tab(window, cx);
                 }
             }))

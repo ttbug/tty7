@@ -2462,6 +2462,56 @@ mod gpui_tests {
         });
     }
 
+    /// #901: Alt+1…9 is how vim switches tabs, and tty7's default was eating
+    /// the whole row of them. Both halves of what the reporter wanted have to
+    /// hold, and hold across a restart — the complaint was that the default
+    /// "keeps coming back".
+    #[gpui::test]
+    fn alt_digits_can_be_moved_off_the_tab_actions_for_good(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            let default_chord = per_platform("secondary-1", "alt-1");
+            running_on_json(
+                cx,
+                r#"{"keybindings": {"ActivateTab1": ["alt-shift-1"],
+                                    "ActivateTab2": []}}"#,
+            );
+            assert!(
+                fired(cx, default_chord).is_empty(),
+                "a list replaces the shipped chord, so the digit reaches the shell"
+            );
+            assert!(
+                fired(cx, per_platform("secondary-2", "alt-2")).is_empty(),
+                "and an empty list leaves the action with no chord at all"
+            );
+            assert_eq!(
+                fired(cx, "alt-shift-1").first(),
+                Some(&ActivateTab1::name_for_type()),
+                "the chord asked for in its place is live"
+            );
+            assert_eq!(effective_key("ActivateTab2", cx), None);
+
+            // The half that reads as "老是自动恢复": whatever the app saves has
+            // to load back as the same thing. A `Config` serialized and read
+            // again is exactly what a restart does with `config.json`.
+            let saved =
+                serde_json::to_string(&**cx.global::<Config>()).expect("the config serializes");
+            cx.set_global(Config(
+                serde_json::from_str(&saved).expect("the saved config parses"),
+            ));
+            rebind(cx);
+            assert!(
+                fired(cx, default_chord).is_empty(),
+                "the shipped chord must not come back across a save and reload"
+            );
+            assert_eq!(
+                fired(cx, "alt-shift-1").first(),
+                Some(&ActivateTab1::name_for_type()),
+            );
+            assert_eq!(effective_key("ActivateTab2", cx), None);
+        });
+    }
+
     #[gpui::test]
     fn a_chord_added_under_the_tmux_preset_joins_the_preset_chord(cx: &mut TestAppContext) {
         use gpui::Action as _;

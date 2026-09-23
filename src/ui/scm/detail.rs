@@ -46,7 +46,7 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_MONO, git_badge, info_chip};
+use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, git_badge, info_chip};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -720,26 +720,16 @@ impl Tty7App {
             .child(
                 div()
                     .flex_none()
-                    // `TEXT_MONO` and, below, `META`, which is what
-                    // `scm_file_row` reads too. This pair used to be written
-                    // out as bare 12 and 11 so that the prose above the list
-                    // could move off the panel's ramp without dragging the rows
-                    // with it — the two lists have to stay pixel-identical and
-                    // nothing enforces it but a comment.
-                    //
-                    // The escape hatch is gone because the thing it was
-                    // protecting against happened anyway, one level up: the
-                    // whole panel drifted off the interface font scale, and
-                    // spelling numbers out is what let it drift quietly. Both
-                    // rows now name the same two steps, so a move of the ramp
-                    // reaches them together or not at all.
-                    .text_size(rems(TEXT_MONO))
-                    .font_family(mono.clone())
-                    .text_color(if deco == DecoStatus::Deleted {
-                        cx.theme().muted_foreground
+                    // Match the working-tree list: UI names, secondary paths.
+                    .text_size(rems(TEXT))
+                    .text_color(if deco == DecoStatus::Conflict {
+                        status_color(deco, cx)
+                    } else if selected {
+                        gpui::rgb(sf.text_selected).into()
                     } else {
-                        cx.theme().foreground
+                        gpui::rgb(sf.text_resting).into()
                     })
+                    .when(selected, |s| s.font_weight(gpui::FontWeight::MEDIUM))
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
                     .child(name.to_string()),
             )
