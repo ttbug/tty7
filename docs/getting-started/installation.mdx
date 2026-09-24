@@ -46,6 +46,27 @@ AppImage bundles its own X11/Wayland/font libraries.
     tty7-app.exe --unregister-explorer-menu
     ```
 
+    **Portable mode.** Out of the box the ZIP keeps settings, sessions and
+    scrollback in `%APPDATA%\tty7`, like the installer. To keep them beside the
+    program instead — on a USB stick, or a machine you do not want to leave
+    traces on — create an empty folder named `data` next to `tty7-app.exe`:
+
+    ```text
+    tty7\
+      tty7-app.exe
+      tty7.exe
+      .tty7-portable
+      data\          <- everything tty7 writes goes here
+    ```
+
+    tty7 uses it from the next launch on; quit tty7 first (**Quit and Stop
+    Server** from the tray menu) so the background server restarts there too.
+    To bring your existing setup along, copy the contents of `%APPDATA%\tty7`
+    into `data`. In-app updates replace only the files the ZIP ships, so `data`
+    survives them. The `tty7` command in the same folder finds the same data, and
+    `TTY7_CONFIG_DIR` or `--config-dir` still override it — see
+    [config.json](/reference/configuration#where-the-directory-comes-from).
+
     Nothing has to be installed first. The executables link the Visual C++
     runtime statically, so the "Visual C++ 2015–2022 Redistributable" is not a
     prerequisite — releases up to and including 26.9.2 did need it, and failed

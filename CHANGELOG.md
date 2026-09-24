@@ -5,6 +5,594 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.9.3] - 2026-09-23
+
+### Added
+
+- **A tty7 server can be updated from the command palette, here or on the remote
+  host** (#931). Between dialect bumps a remote host kept whatever binary
+  already sat at `tty7-server-c{control}p{protocol}` — `replace` re-uploaded
+  only on a dialect mismatch — so a daemon-side fix never reached it, and
+  "Update Server" restarted the same old file. "Update tty7 server on
+  "{machine}"…" is listed when the workspace is on an SSH or WSL host whose
+  server tty7 installs (not a `--stdio` program) and forces the upload: the new
+  binary lands under a temporary name, must answer our dialect, and only then is
+  renamed over the published path and the daemon cycled. An upload that fails
+  that probe leaves the old file and the running server alone. The confirmation
+  says every session on that machine ends. "Update tty7 server on this
+  computer…" restarts the local daemon onto the build the app already ships,
+  through the same handoff-or-restart choice, and says "already running this
+  build" instead when the last probe reported our protocol and build. The build
+  string is the crate version, so two nightlies of one version look identical.
+  The remote update goes through the local daemon's router, so a local daemon
+  older than this asks for itself to be updated first rather than dropping the
+  request silently.
+
+- **The SSH host editor takes a password, a key file and its passphrase**
+  (#875). A host could be described in full in Settings and still not be
+  connectable from there: there was no password box on the form, so storing one
+  meant connecting and ticking "remember", and correcting one meant failing
+  first. The key file sat two disclosure triangles deep under Advanced as a
+  textarea of paths. An Authentication block now carries a masked password with
+  a reveal toggle, seeded from the keychain so a stored one can be read back,
+  corrected or cleared; identity files with a Browse… button that writes the
+  path back as `~/.ssh/...`; and a key passphrase stored against the key's
+  contents, the account the connect-time prompt already uses. Which boxes appear
+  follows the method, on the same split the handshake uses — a password for Auto
+  and Password, passphrases for Auto and Key, nothing for Agent, GSSAPI or 2FA —
+  since a box outside it would store a secret nobody is ever offered. Nothing
+  secret reaches the config file, which is why Save could not see a typed
+  password; the dirty check folds the secrets in now. A password is filed under
+  the endpoint, so saving a new address moves it and leaves nothing behind
+  unless another host still dials the old one. Test dials with what is on
+  screen rather than only what is stored. Labels now sit against their fields
+  rather than across the page from them.
+
+- **CodeBuddy CLI support, and Cursor CLI reports its session and status**
+  (#936, requested by @lgc653 in #892 and by @rrpolanco in #741). CodeBuddy
+  gets detection through all three of its binaries (`codebuddy`,
+  `codebuddy-code`, `cbc` — the last shared with the COIN-OR solver), hooks in
+  `~/.codebuddy/settings.json` or `$CODEBUDDY_CONFIG_DIR`, status, resume and
+  fork. It emits `SessionStart` with `source: "compact"` in the middle of a
+  turn, which is filtered out so the pane does not fall back to idle. Resume and
+  fork drop the stale session and worktree flags from the replayed launch, and
+  `--no-session-persistence` disables both. `cursor-agent` gets hooks in
+  `~/.cursor/hooks.json`. Cursor ignores a hooks file without `"version": 1`,
+  so tty7 writes it when it creates the file or finds the key missing, and never
+  overwrites a version the user set; a versionless file holding our hooks
+  reports Outdated so a refresh repairs it. Its payloads call the session
+  `conversation_id` and carry `workspace_roots` instead of `cwd`, and both are
+  read. A turn opens on `beforeSubmitPrompt` and closes on `stop`, with
+  `postToolUse` counted as activity; mapping `postToolUse` to the turn's start
+  instead froze the activity counter, shortened turn timing and hid turns that
+  ran no tools. `cursor-agent -p` does
+  not send `beforeSubmitPrompt` or `stop`, so a print-mode run records its
+  session id but shows no status dot.
+
+- **The Info panel says how far away a remote pane's shell is** (#862). The
+  Session table named the machine but never the distance to it, so a remote
+  workspace gone slow looked exactly like one that had not. A `latency` row now
+  shows the round trip of a `Ping` on tty7's control link. Only `Ping` is timed:
+  every other request does work on the far side, and timing a large `ReadFile`
+  would read as a network gone seconds slow. The row takes a ping of its own
+  every two seconds while the panel is open, rather than the keepalive's, which
+  only fires on an idle link. It is held per host, so moving between two panes
+  of one machine keeps the number; a dropped link keeps its last measurement,
+  since that is when someone is reading the row; and before the first ping
+  returns it reads `—` rather than `0 ms`. The measurement is client-side, so
+  it works against every server that can connect.
+
+- **A file in a remote workspace's tree can be downloaded from its context
+  menu** (#937, requested by @jerryokk in #723). The tree took uploads by drag
+  and drop but had no way to bring a file back. Download sits where a local tree
+  has Reveal in Finder and saves straight into `~/Downloads`, as the SSH pane's
+  SFTP panel already does, numbering a second copy `name (2).ext` rather than
+  overwriting the first. A file over the ~63 MB single-frame cap uploads share
+  is refused before anything crosses the wire, with a pointer to scp or rsync.
+  Files only; a folder would need a recursive walk or an archive.
+
+- **Windows portable mode keeps its data beside the executable** (#941,
+  requested by @netcatty in #852). If the folder holding `tty7-app.exe`
+  contains both the `.tty7-portable` marker and a `data\` folder, `data\` is
+  the config directory — settings, themes, sessions, scrollback, history, and
+  the daemon's socket and lock — and the `tty7.exe` beside it resolves the same
+  directory from outside tty7. The marker alone is not enough because every
+  portable ZIP has shipped it since #330 as the updater's cue: switching on it
+  would land every existing ZIP user on an empty directory with their settings
+  still in `%APPDATA%\tty7`. Creating `data\` is the opt-in. `--config-dir` and
+  `$TTY7_CONFIG_DIR` still win over it, a portable copy is never handed the
+  installed tty7's legacy tree, and an in-place update leaves `data\` alone.
+
+- **Next Tab and Previous Tab step to the neighbouring tab without the
+  switcher** (#934, requested by @rrpolanco in #867). `NextTab` (Ctrl+Tab) goes
+  through the recent-tab switcher, whose quick tap commits to the last-used tab,
+  so repeated taps bounced between two tabs and never reached a third. New
+  `SelectNextTab` / `SelectPrevTab` step along the order the strip or grouped
+  sidebar shows, wrapping around, with no popup. They take `⌘⇧]` / `⌘⇧[` on
+  macOS and Ctrl+PgDn / Ctrl+PgUp elsewhere, where `Ctrl+Shift+]` / `[` already
+  move between panes — which means those two chords no longer reach the PTY, and
+  vim's `:tabnext` binding with them; unbinding the two actions gives them back.
+  The tmux preset's `prefix n` / `prefix p` move to the new actions, since the
+  switcher never committed there with no modifier held. `NextTab` / `PrevTab`
+  keep their config names and are now labelled "Recent Tab Switcher"; the
+  palette's Next/Previous Tab entries, which already cycled, now follow the
+  shown order rather than the raw index.
+
+- **Stroke thickening on macOS can be turned off** (#939, requested by
+  @xiaozhaodong in #720). `font_thicken` (default on, so nothing changes
+  unasked) under Appearance → Terminal text → Thicken strokes stops CoreGraphics
+  smoothing from dilating glyph strokes, so text renders at the face's own
+  weight whatever its colour, like Ghostty's `font-thicken` and iTerm2's thin
+  strokes. It sets `AppleFontSmoothing = 0` in the process's volatile argument
+  domain before gpui first reads it — nothing is written to disk and no other
+  app is touched, and with the setting on a hand-written
+  `defaults write ... AppleFontSmoothing` keeps working. gpui caches the value
+  once, so a change applies after a restart.
+
+- **The code panel's Markdown preview and word wrap are actions**
+  (#935, requested by @swaynehales in #754). The two status-bar toggles were
+  mouse-only. `ToggleDocumentPreview` and `ToggleDocumentWrap` are in the
+  palette and bindable, with no default key, and the buttons call the same
+  code. The last state is remembered and applied to the next file opened;
+  preview only applies to Markdown, and a file opened at a line target, such as
+  a clicked `README.md:42`, opens as source so the cursor can be seen.
+
+- **An orphaned pane can be put back on screen with `tab new --pane %N`**
+  (#831, reported by @xAlisher in #716). The only verbs for an orphan were the
+  two that kill it. The tab is built from the live pane registry rather than
+  the tree, because closing a tab drops the pane from the tree at the moment
+  it orphans it; the ssh spec, agent and shell are therefore not recovered. A
+  pane the server is not running, or one a tab already holds, is refused. With
+  no workspace named, the pane goes back to its recorded owner. `pane ls --all`
+  now names this way back before the two ways to kill.
+
+- **`tty7 capture --tail N` keeps the last N lines of the answer** (#855,
+  reported by @rrpolanco in #841). It composes with `--scrollback` and
+  `--plain`. The daemon still replays the whole ring, so it saves the pipe, not
+  the wire.
+
+- **Qoder CLI support** (by @WhiteDG in #873).
+
+- **A Pi pane reports that it is waiting for you** (by @netcatty in #878). The
+  bridge now maps Pi's `ui_prompt_start` to a permission request or question
+  and `ui_prompt_end` back to working, each guarded so an Oh My Pi fork without
+  the hook loses only that event.
+
+- **Crush support** (by @akhenakh in #881). Crush only offers a pre hook.
+
+### Changed
+
+- **Settings is organised around what is being configured, and search results
+  can be edited** (#915). The groups are now General, Appearance, Terminal,
+  Keyboard & Mouse, Window & Tabs, SSH, Integrations and About; About keeps app
+  information and update status, and update preferences, proxy and tty7 server
+  controls move to General. Search matches configuration keys and localized
+  aliases, edits an ordinary setting in place, filters to modified settings,
+  resets a setting on its own, and is navigable from the keyboard; shortcuts and
+  larger forms keep their own editors. Ordinary settings save as they change and
+  show a failed write with a retry. Theme drafts and SSH forms get an explicit
+  Save and Cancel, and leaving unsaved work asks Save, Discard or Keep Editing.
+  Terminology is aligned across English, Chinese and Japanese.
+
+- **The native chrome has one colour and icon system, and agent marks carry
+  their brand colour** (#914, #916). Primary actions, navigation selection,
+  keyboard selection and status colours are separate roles, and UI status no
+  longer borrows the terminal's ANSI palette. Toolbar glyphs share one set of
+  sizes, and file names, paths, labels and selected rows are told apart. The
+  default Dark palette is charcoal with a restrained blue accent, and the
+  default left sidebar is 260px wide; a saved width is kept. The first pass
+  turned every agent in the rail into the same grey disc, which took away the
+  quickest way to tell one agent from another down a column. The mark itself is
+  now painted in its brand colour with no disc, at about a third of the coloured
+  area, so it no longer outweighs the status dot beside it; a colour that cannot
+  be seen on the surface under it — Codex's and Grok's black on a dark theme —
+  is lifted, keeping its hue. Resting toolbar tiles drop to the caption ink, so
+  `+` and the panel toggle are no longer the darkest marks in the sidebar.
+
+- **A keybinding in config adds a chord beside the default instead of
+  replacing it** (#887, reported by @rrpolanco in #868). `"NextTab":
+  "cmd-shift-]"` silently removed Ctrl+Tab: the keymap held one chord per action
+  and a configured one overwrote the slot. A string now adds; `""` still
+  unbinds; a list such as `["a", "b"]` is the exact set, replacing the default,
+  and `[]` unbinds. Every existing file still loads, and a save writes back the
+  shape it read. Configured chords are installed after every shipped one,
+  because gpui settles two bindings on one chord in favour of the one added
+  last, which let a user's `"NewTab": "ctrl-tab"` lose to `NextTab`. Settings →
+  Keybindings shows every chord an action has; recording a shortcut sets it and
+  writes the list form, and a chord taken from another action removes only that
+  chord from it rather than emptying the action.
+
+- **Workspaces are numbered in a stable order** (#938, requested by
+  @Morphone0429 in #760). `SelectWorkspace1`–`9` and the Window menu numbered
+  workspaces most recent first, so switching to one moved it to slot 1 and a
+  number never meant the same workspace twice. The number now follows the order
+  this client first had each workspace. A synced remote workspace this client
+  has never opened takes no number — otherwise connecting to a busy devbox would
+  take the next free slots — and on first open it takes the next free one
+  without shifting the others. The Window menu lists the first nine in that
+  order, open and closed together; a tenth and later, and never-opened synced
+  ones, are reached from the switcher. The switcher stays most recent first,
+  because the Ctrl+Tab hold-and-release depends on it, and shows each row's
+  number. Deleting a workspace moves the ones after it up a number.
+
+- **Panel text stays readable across themes and sizes** (#933). Compact
+  section headings take one size on both sidebars, Session labels take the body
+  size, and muted text is checked against the surface it actually sits on —
+  content, sidebar or popover. A Git file name shrinks with an ellipsis and
+  shows its full path on hover, the branch name keeps room in a narrow panel,
+  and rows and settings navigation grow with the interface font. Static process
+  IDs and separators are quieter, and settings description rows no longer look
+  clickable. Floating surfaces share one radius and one selection treatment.
+
+- **An SSH connection proves its remote server once, not once per pane**
+  (#824, reported by @qiudaomao in #695). Every new pane re-ran the full
+  installer probe on a connection that was already up and serving — `uname`,
+  a control probe that spawns the server binary, a walk of `/proc` for the
+  running build, and two SFTP reads, all serial and all before the pane's own
+  channel opened. The answer is now kept on the connection, so a reconnect
+  starts over by construction. It is dropped before a replace or restart, and
+  when a routed link closes without the remote sending a byte. A failed probe
+  is not remembered, and a build mismatch the probe found is raised again for
+  every pane rather than only the first. Round trips per later pane go from five
+  to none; the wall-clock gain on a real link has not been timed.
+
+- **The Windows binaries no longer need the Visual C++ redistributable** (#907,
+  reported by @ra9fael in #902). A default MSVC build links `VCRUNTIME140.dll`,
+  which is not part of Windows, so on a machine that had never installed the
+  redistributable tty7 failed before `main`. Every machine that builds tty7 has
+  it, so nobody positioned to notice could. The CRT is now linked statically,
+  set in the repository's cargo config so CI builds under the same flag a
+  release does. A check that reads the PE import tables directly, without
+  `dumpbin`, runs in CI and over the packaged ZIP and installer payload.
+
+- **The control dialect is v10, so remote hosts pick up the daemon fixes**
+  (#930). No message changed. A remote server's filename carries the dialect
+  number and tty7 keeps whatever binary already sits at it, so without a new
+  number the daemon-side fixes in this release would never reach a remote host.
+  Each remote host shows the Update Server prompt once, and accepting it ends
+  every session there. Locally, the first launch after the update shows the
+  daemon mismatch prompt once; where the daemon supports handoff, restarting
+  keeps the shells.
+
+- **The SFTP Files panel opens where the shell is now** (#932, requested by
+  @loinky in #826). It started at the shell's directory only the first time;
+  every later open went back to wherever you last browsed. A fresh open now
+  prefers the shell's current directory, then the last folder browsed, then the
+  login directory. Switching panes with the panel still open returns to the
+  folder browsed there, as before.
+
+- **The prompt editor starts input on its own row when the prompt leaves too
+  little room** (#940, requested by @imeilige in #767). A 119-column prompt in
+  a 143-column pane left 24 columns for the first row of input. When fewer than
+  `max(20, cols / 3)` columns remain, input starts at column 0 of the row below
+  — but only if that at least doubles the room, so a short prompt in a narrow
+  pane stays put. Clicks, Up/Down, the completion menu and the IME candidate
+  window all follow the moved start. It applies only to the built-in prompt
+  editor; with `prompt_editor: false` the shell lays out its own line.
+
+- **The Close Pane / Tab menu item is labelled Close** (#910). The palette and
+  the Keybindings page keep the full name, where it stands alone.
+### Fixed
+
+- **The ssh password prompt stops coming back after a reconnect** (#827, #924,
+  reported by @sparklive in #820). Three defects stacked on one dropped link.
+  Evicting a dead connection removed its slot from the cache, and that slot's
+  mutex was the only thing serialising dials to a host: every pane on the link
+  evicted the slot the one before it had just made, ran its own handshake and
+  raised its own sheet, so answering one only uncovered the next. The slot now
+  stays and only what it points at is dropped — one handshake, one prompt, and
+  the other panes reuse the connection it made. Closing the password sheet
+  failed only the `password` method, and on any host that also offers
+  `keyboard-interactive` that is the same question asked again; closing it now
+  ends the attempt. A declined remote-workspace reconnect went into backoff and
+  dialled again within a second, forever; it now suspends the machine and the
+  strip offers **Retry**. A password the server rejects still falls through to
+  the next method, and closing a key-passphrase sheet still just skips that key.
+  Separately, a routed prompt had no idea whether anyone was still waiting on
+  it: one left over from an attempt that had timed out stayed parked or on
+  screen, and typing into it sent the secret into a dropped channel. Such a
+  prompt is now retired, an on-screen one taken down, and the sheet waits no
+  longer than the daemon's handshake does (120s rather than 180s).
+
+- **A pane that comes back from a workspace switch keeps its full-screen
+  program** (#832, reported by @Infiniverse in #711). The replay arrived whole;
+  the client threw it away a few frames later. An attach ends with the pane's
+  shell state, and a client told the shell is at a prompt scrubs a leftover
+  alternate screen with `?1049l` — right for a `vim` whose `ssh` dropped, wrong
+  for the alternate screen the replay has just rebuilt, which it swapped away to
+  reveal the banner and the launch command underneath. The agent carried on
+  drawing differential updates into a grid that no longer held what they were
+  differences from. That prompt state is only as fresh as the last OSC 133
+  mark, and a program that sends none of its own leaves it set; the live path
+  already refused such a mark, and the replay now asks the pty the same
+  question and reports a prompt only when nothing but the shell owns it.
+
+- **A pane restored after a server stop no longer types mouse reports into its
+  new shell** (#853, reported by @hhdebb in #850). A restored pane replays the
+  killed program's raw bytes, so its `?1002h` was executed again against a shell
+  that never asked for it, and every pointer move landed on the prompt as an
+  SGR report. The preamble appended after the restored output now also turns
+  off mouse reporting and its encodings, focus reporting, bracketed paste,
+  application cursor keys and the kitty keyboard flags. It clears them
+  unconditionally rather than folding the snapshot for what was left on: the
+  program that set them is dead, the shell is brand new, and turning off a mode
+  that is already off is a no-op everywhere, where a fold that misread one
+  sequence would bring the bug back silently.
+
+- **A full-screen program keeps its terminal modes across a reconnect** (#828,
+  reported by @shihuaidexianyu in #774). A reattach replays the pane's output
+  ring, which drops from the front at 8 MiB, so a program that set its modes
+  once at startup — `btop` — came back on the primary screen with no mouse
+  reporting, and the wheel scrolled a screen that should not scroll. The daemon
+  now folds the bytes it hands the ring into a small mode tracker and re-sends,
+  ahead of the ring, the modes the ring itself can no longer speak for:
+  alternate screen, mouse reporting and encoding, alternate scroll, DECCKM,
+  focus reporting, bracketed paste. Only those, because re-sending a `?1049h`
+  the ring still carries made the ring's own copy a no-op and swept the shell
+  scrollback ahead of it into the alternate buffer. Cursor visibility and
+  autowrap are deliberately not restored, and a pane adopted across a daemon
+  restart starts with an empty fold.
+
+- **`:wq` on a remote pane lands where it was typed** (#828, reported by
+  @shihuaidexianyu in #774). The repair that puts back a cursor ConPTY parked
+  during a repaint was decided at compile time, so a Windows client applied it
+  to panes on a remote `tty7-server` and to native-SSH panes, neither of which
+  has a conhost in the way — and `wq` went two rows above the `:`. It is now
+  decided per pane from the route it was opened on, with the remote context
+  answering what the route cannot.
+
+- **Panes opened after tty7 restarts or updates keep Local Network access on
+  macOS** (#917, reported by @jgrund in #909). macOS attributes Local Network,
+  camera, microphone and similar decisions to a process's responsible process,
+  inherited at spawn — and the pane daemon was spawned by the GUI and outlives
+  it. After an in-place update, a crash or a force-quit, new shells answered to
+  a GUI that no longer existed, so Homebrew `node` or `python` got
+  `EHOSTUNREACH` on the LAN while `/usr/bin` tools, being exempt, kept working.
+  The daemon now re-execs itself in place at startup with the responsibility
+  disclaimed: same pid, same descriptors, but its own responsible process. It
+  always re-execs once rather than asking who it answers to, since a process
+  whose responsible parent has exited reports itself — exactly the orphaned
+  state this has to repair. Because it also runs on the far side of a handoff,
+  **Restart Server** repairs a daemon started by an older build without losing
+  panes; shells already open keep the attribution they were born with. The
+  call is private SPI resolved at run time, and startup carries on as before if
+  it is missing.
+
+- **F1–F12 reach the shell** (#835, reported by @steelywing in #834). No
+  function key was ever encoded, on any platform. They now send
+  `xterm-256color`'s own table, modified forms included, under both the legacy
+  and kitty encoders. Two swallows sat in front of the encoder as well: the
+  prompt editor dropped a named key it had no binding for, and F3/Shift+F3 were
+  eaten by Find Next/Previous with no find bar open — they now hand the key
+  back. Under the kitty protocol F3 is `CSI 13~`, since the letter form
+  collides with a cursor position report, and F13–F24 are sent in the
+  protocol's private-use range; the legacy path still sends nothing above F12,
+  because terminfo already spends `kf13` onwards on the modified F1–F8. F11
+  stays fullscreen, now as a pinned decision.
+
+- **A tab stops wearing the title of a program that has exited** (#908,
+  reported by @rrpolanco in #889). An OSC 0/2 title was last-writer-wins
+  forever, in the daemon's record and in the window, so after Claude Code, vim
+  or lazygit exited the tab kept its last title over the pane's own directory.
+  A title written between a command's `133;C` and `133;D` now belongs to that
+  command and is retired by its `D`; a title set at a prompt, or one a shell
+  writes for itself — which comes after the `D` — stands, and a pane with no
+  shell integration behaves exactly as before. A window reattaching mid-command
+  whose `C` has rolled out of the replay ring takes the replayed prompt state
+  as proof a command owns the pane, so it retires those titles too.
+
+- **Unread badges only mark turns the reader has not seen** (#888, #890,
+  reported by @rrpolanco in #870). Switching workspaces, reopening from the
+  tray and restarting the app all build new views over live panes, and a new
+  view saw an agent that was already `Done` as a turn finishing just now — so
+  every agent tab outside the active one got its `1` back. The daemon now
+  counts finished turns, and views leave a read mark per pane for the life of
+  the app: a rebuilt view whose mark matches takes the badge back as the reader
+  left it, while a turn that finished while it was away still badges. After a
+  restart, with no marks, a reattach adopts the replayed status as its baseline
+  instead of an edge; a relink keeps the view it already had, so a turn that
+  finished while the link was down still badges. Against a remote server older
+  than the turn count, a later turn finishing while away looks like the one
+  already seen until that server is updated.
+
+- **A symlinked config file stays a symlink** (#918). Every save wrote a temp
+  file and renamed it over the path, which replaces a symlink with a plain
+  file — so a `config.json` linked into a dotfiles repo quietly stopped syncing
+  the first time the sidebar was dragged. The link chain is resolved first,
+  relative and dangling targets included, and the rename lands on the real
+  file; a loop falls back to the old behaviour. It covers every file written
+  that way, `views.json`, `window.json` and the machine stores among them.
+
+- **One unreadable keybinding no longer resets the whole config, and a shortcut
+  can be left unbound** (#906, reported by @leoatchina in #901). A single
+  `keybindings` value serde could not read failed the entire `config.json`,
+  which was quarantined, the app started on defaults, and the next settings
+  write saved those defaults over everything the user had written. That line is
+  now logged and skipped on its own. And nothing in the app could unbind an
+  action: ⌫ on a Keybindings row reset it to the shipped chord, a no-op on a row
+  nobody had touched, so Alt+1…9 could not be handed back to vim. ⌫ on an
+  unrecorded row now writes the empty list, the row shows `—` and gains the
+  **Reset** button, and the capture hint says so.
+
+- **A tty7 retired to the tray comes back from the Dock** (by @fish2lab in
+  #880). With its last window closed the process stays up with its Dock icon,
+  but a click on the icon went to a reopen handler tty7 never registered. The
+  reopen now activates a window if one exists, and otherwise restores the
+  workspace that retired, the same way the tray's **Show tty7** does. Why a
+  window can vanish across display sleep is not explained by this.
+
+- **Reaching for ⌘ mid-flick no longer zooms the font to its minimum** (by
+  @wenlingang in #913). A trackpad's momentum tail carries the modifiers held
+  when each event is delivered, so pressing ⌘ while a scroll coasted turned the
+  rest of it into dozens of zoom steps, and the clamped size was saved. A
+  gesture now decides scroll or zoom at its first event and keeps that answer
+  to the end of its tail, a zoom whose modifier is released included; each new
+  gesture decides for itself. A wheel still decides notch by notch.
+
+- **The prompt gets its cursor shape back when a program exits** (#922,
+  reported by @rrpolanco in #837). nvim and vim restore terminfo's `Se` on the
+  way out, which for `xterm-256color` is `\e[2 q`, an explicit steady block, so
+  every prompt after them stayed a block whatever `cursor_style` said. The
+  reader notes the cursor style at `133;C` and restores it at `133;D` if the
+  command left a different one, back to following the configured default when
+  that is what the prompt had. `D` is the first thing the precmd writes, so a
+  vi-mode plugin still has the last word; a shell without integration keeps the
+  old behaviour.
+
+- **Narrowing a pane under a prompt leaves one clean prompt** (#929, reported by
+  @coolmanj in #654). With something right-aligned on the prompt line, the
+  reflow wrapped it onto a second row and left the cursor on the tail, and the
+  shell's SIGWINCH redraw — up by the rows it last drew, then clear below —
+  started from there, stranding the old prompt's head; a drag in and out filled
+  the pane with them. A column change at a prompt on the primary screen now
+  clears the cursor's line from its first row and puts the cursor where the
+  shell's redraw expects to start. Only the last line of a multi-line prompt is
+  handled.
+
+- **A resize whose echo went missing is sent again** (#923, reported by
+  @rrpolanco in #893). The grid reflows only when the daemon echoes a size
+  back, but a size once asked for was never asked for again, so a lost resize
+  or echo left the pane painting a grid shorter than its bounds — blank bottom
+  rows — until a divider drag asked for a different size. Past a grace period,
+  a grid that does not hold the requested size gets it sent again. One proven
+  way for the two to drift, not established as the report's.
+
+- **A replay never starts in the middle of an escape sequence** (#927, reported
+  by @404KSG in #857). The replay ring evicted at an arbitrary byte, so a cut
+  through a `133;C` mark came back as `33;C` on every reattach and a cut
+  through a CJK character as a replacement glyph; eviction now continues until
+  the front is outside every sequence and on a character boundary. The OSC 5522
+  clipboard sniffer dropped a held `ESC ]` when another escape interrupted it,
+  so a read boundary could turn `ESC [31m` into a literal `[31m`. Neither is
+  proven to be the report's duplicated lines.
+
+- **A tab comes back to the pane focus was last in** (#854, #921, reported by
+  @rrpolanco in #843 and #869). The pane to return to was sampled as the tab was
+  switched away from, which found nothing whenever focus was off the panes —
+  and a switch through the switcher first restored focus to the first leaf and
+  then wrote that down. It is recorded as focus arrives now, carried across a
+  connecting slot becoming its pane. Un-zooming hands focus to the pane that was
+  zoomed rather than to the record, and zooming with focus off the panes zooms
+  the pane the tab remembers instead of its first.
+
+- **Shift+Enter and Ctrl+J insert a newline in native Windows Codex** (by
+  @doitian in #895). They sent LF through ConPTY, which reports it as
+  Ctrl+Enter, a chord Codex ignores. A local ConPTY pane now gets explicit
+  Ctrl+J key events — one LF for VT readers — while remote ptys keep plain LF
+  and a negotiated kitty encoding still takes precedence.
+
+- **Leaving an ssh session no longer leaves `^U` at the prompt** (by
+  @spragginsdesigns in #877). The typeahead record kept lines already
+  submitted, so draining `exit` still asked for a line wipe with nothing to
+  replay. Enter now discards the submitted record, and Ctrl-D on an empty line
+  ends input the way Ctrl-C does; with text on the line it is an edit, and text
+  typed during a gap still gets its wipe.
+
+- **Holding Backspace in a WSL pane holds one steady bell flash** (#884,
+  reported by @seahoe in #874). bash rings on every key-repeat at an empty
+  line, and each flash armed its own 150 ms timer, so an older bell's timer
+  blanked a newer flash and the pane strobed. Only the latest bell's timer
+  clears it now; a single bell looks as before.
+
+- **Dim text stays readable on light themes** (#886, reported by @AaronNick in
+  #858). SGR 2 was a fixed 66% fade, which on a light background dropped
+  Catppuccin Latte's foreground from 7.06:1 to 3.18:1 and bright black to under
+  3:1 on every light builtin. A dim cell on a light background is now held at
+  4.5:1, never darker than its undimmed ink; dark backgrounds keep the old fade
+  byte for byte, and the legible-palette switch turns it off. The unreadable
+  Claude Code text in the report was its dark theme's truecolor, which tty7
+  renders as sent — `/theme auto` there picks the light one.
+
+- **`tty7 wait --until free` answers on remote and SSH panes** (#856, reported
+  by @rrpolanco in #840). A pane routed to a remote daemon had no local tree to
+  walk, and a pane running `ssh` has one that never empties, so both read busy
+  forever. The far shell's prompt marks now answer freeness there, and a remote
+  pane whose far shell has no shell integration ends the wait with `status:
+  unknown` and a reason instead of hanging. On a local pane a prompt mark can
+  only turn busy into free, so `free` now means "will take input", a nested
+  shell's prompt included.
+
+- **`tty7 capture` no longer answers a live pane with nothing after a resize**
+  (#855, reported by @rrpolanco in #841). A resize opens an empty segment in the
+  replay ring, and the default form returned the newest segment — that empty
+  placeholder. Empty segments are skipped now. That is all it fixes: on Unix
+  the segment a resize opens holds the prompt's repaint, so the default form
+  can still return just a prompt, and anything reading a pane under the GUI
+  should ask for `--scrollback`. `--json` reports the replay's `bytes`, and a
+  replay that renders blank says so on stderr.
+
+- **The Ports panel says when it could not look** (#830, reported by @zcyc in
+  #731). The process walk stopped at the 64 rows the panel draws, and it
+  visits the newest child last, so the server started a moment ago was the one
+  most likely to be cut; the walk now goes to 512 and only the drawn list is
+  trimmed. A missing `lsof` (it lives in `/usr/sbin`, which a hand-written
+  `PATH` drops), one wedged past three seconds, a Windows table that would not
+  answer, or a tree holding another user's process each used to read as
+  "nothing is listening". The panel and `tty7 procs` now say which, and say
+  nothing extra when the probe worked.
+
+- **Walking into a workspace the machine already has keeps its name, and the
+  machine tree keeps earlier copies** (#831, reported by @xAlisher in #716). A
+  name typed for one workspace was sent as a rename to whichever workspace the
+  window settled on, so arriving at an existing one renamed it after the
+  arriving client; the name now carries the workspace it was typed for and is
+  spent only on the create it rode with. `machine.json` was replaced whole on
+  every write, so the write that lost a layout erased the only copy; up to three
+  earlier generations are now kept beside it, at least five minutes apart, and
+  a tree that will not load is recovered from the newest one that parses.
+
+- **The Files panel lists a WSL pane's directory** (#925, reported by
+  @zt449569708 in #896). Its POSIX cwd was read as a Windows path, so the panel
+  said "Could not be read" and drops into it failed. It now goes through the
+  distro's `\\wsl$` share, and a cwd no host here can read roots nothing.
+
+- **Native SSH tabs group by their remote folder** (#926, reported by
+  @rrpolanco in #891). Under repo-or-directory grouping they all landed in
+  Scratch; the cwd the remote shell reports now files them under its folder.
+  Repo grouping still keeps them in Scratch.
+
+- **A fullscreen window on Windows and Linux drops its dead window buttons**
+  (by @hhdebb in #864). Minimize, maximize and close stayed on the title bar in
+  fullscreen, lit up under the pointer and did nothing. They go now and the room
+  they held comes back to the strip; the row itself stays, and entering
+  fullscreen says how to leave. macOS is unchanged.
+
+- **An agent's spinner is taken off the tab title it writes** (by @hhdebb in
+  #865). Braille spinner frames and Claude Code's `◐◑◒◓` and `✳` are stripped
+  from the front of a title, only with whitespace behind them and never from a
+  name the user typed.
+
+- **`font_fallbacks` applies to panes already open** (by @hhdebb in #879), and
+  changing `font_family` rebuilds the chain for the new family instead of
+  carrying the old one over, bold and italic faces included.
+
+- **The terminal is reported as the focused element to assistive clients** (by
+  @hhdebb in #872). A screen reader had nothing to announce, and a dictation
+  tool decided its paste had failed when it had not.
+
+- **A GitHub rate limit on the update check says when to retry** (by @ayamir in
+  #861), for a 429 as well as a 403.
+
+- **Settings rows keep their shape.** A long Codex failure note on the Agents
+  page lost its width cap and squeezed the label to one character per line (by
+  @wenlingang in #898); keybinding action names in CJK wrapped every few
+  characters over the rows below and now stay on one line (#928, reported by
+  @XuJinNet in #919).
+
+- **A docked document takes the window's right edge on macOS.** With the
+  detail panel closed, the panel toggle and the app menu tile stayed at the end
+  of the terminal column's strip, stranded in the middle of the window beside
+  the document's own header. They now give way to the docked column, and the
+  tab strip gets their width back; ⌘J and the palette still reach both.
+
+- **The file tree sits on the right panel's rail** (#859), so its root lines up
+  with the search field above it and a selected row is as wide as it is under
+  Info and Source Control.
+
+- **The docs explain why a shell started by hand stops reporting its
+  directory** (#825, reported by @hardboydu in #698), and no longer promise a
+  process-inspection fallback on SSH or Windows panes.
+
 ## [26.9.2] - 2026-09-10
 
 ### Added

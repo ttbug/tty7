@@ -105,9 +105,9 @@ fn tty7_process_owns_hook_terminal() -> bool {
 }
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
-    // Qoder also emits SessionStart after compacting the active turn.
-    // Preserve its status until a real turn or session boundary arrives.
-    if agent == "qodercli"
+    // Qoder and CodeBuddy also emit SessionStart after compacting the active
+    // turn. Preserve its status until a real turn or session boundary arrives.
+    if matches!(agent, "qodercli" | "codebuddy")
         && event == "session-start"
         && let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_json)
         && payload.get("source").and_then(|value| value.as_str()) == Some("compact")
@@ -135,6 +135,9 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     });
     for (key, alias) in [
         ("session_id", "sessionId"),
+        // Cursor names it after the conversation; only its `sessionStart`
+        // repeats the same id as `session_id`.
+        ("session_id", "conversation_id"),
         ("message", "message"),
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
@@ -148,6 +151,18 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         {
             body[key] = serde_json::Value::String(v.to_string());
         }
+    }
+    // Cursor puts `cwd` only on its tool events; the rest carry the workspace
+    // roots instead, and the first of those is where the session runs.
+    if body.get("cwd").is_none()
+        && let Some(root) = payload
+            .get("workspace_roots")
+            .and_then(|r| r.as_array())
+            .and_then(|r| r.first())
+            .and_then(|r| r.as_str())
+            .filter(|r| !r.is_empty())
+    {
+        body["cwd"] = serde_json::Value::String(root.to_string());
     }
     if let Some(prompt) = ["prompt", "userPrompt", "user_prompt"]
         .iter()
@@ -338,10 +353,12 @@ pub enum HookAgent {
     Crush,
     CommandCode,
     MiniMaxCode,
+    CodeBuddy,
+    Cursor,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 17] = [
+    pub const ALL: [HookAgent; 19] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -359,6 +376,8 @@ impl HookAgent {
         HookAgent::Crush,
         HookAgent::CommandCode,
         HookAgent::MiniMaxCode,
+        HookAgent::CodeBuddy,
+        HookAgent::Cursor,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -385,9 +404,10 @@ impl HookAgent {
             CLIAgent::Crush => Some(HookAgent::Crush),
             CLIAgent::CommandCode => Some(HookAgent::CommandCode),
             CLIAgent::MiniMaxCode => Some(HookAgent::MiniMaxCode),
+            CLIAgent::CodeBuddy => Some(HookAgent::CodeBuddy),
+            CLIAgent::Cursor => Some(HookAgent::Cursor),
             CLIAgent::Aider
             | CLIAgent::Amp
-            | CLIAgent::Cursor
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
@@ -409,6 +429,8 @@ impl HookAgent {
             HookAgent::QoderCLI => Some(QODER_HOOK_EVENTS),
             HookAgent::Crush => Some(CRUSH_HOOK_EVENTS),
             HookAgent::CommandCode => Some(COMMANDCODE_HOOK_EVENTS),
+            HookAgent::CodeBuddy => Some(CODEBUDDY_HOOK_EVENTS),
+            HookAgent::Cursor => Some(CURSOR_HOOK_EVENTS),
             HookAgent::Copilot
             | HookAgent::OpenCode
             | HookAgent::Pi
@@ -433,9 +455,21 @@ impl HookAgent {
     /// Whether this agent's hook-map entries carry `command` and `matcher` at
     /// the top level rather than nesting a `hooks` array of `{type, command}`
     /// objects inside the matcher. Claude's shape is the latter; Crush flattened
-    /// it, and still calls itself Claude-Code-compatible on the wire.
+    /// it, and still calls itself Claude-Code-compatible on the wire. Cursor's
+    /// `hooks.json` was flat from the start.
     fn flat_hook_map(self) -> bool {
-        matches!(self, HookAgent::Crush)
+        matches!(self, HookAgent::Crush | HookAgent::Cursor)
+    }
+
+    /// The schema version a hook map has to declare at its root, if the agent
+    /// demands one. Cursor ignores a `hooks.json` without `"version": 1`, so a
+    /// file tty7 creates — or finds without one — gets it; one the user already
+    /// versioned is left alone.
+    fn hook_map_version(self) -> Option<u64> {
+        match self {
+            HookAgent::Cursor => Some(1),
+            _ => None,
+        }
     }
 
     pub fn slug(self) -> &'static str {
@@ -457,6 +491,8 @@ impl HookAgent {
             HookAgent::Crush => "crush",
             HookAgent::CommandCode => "command-code",
             HookAgent::MiniMaxCode => "minimax-code",
+            HookAgent::CodeBuddy => "codebuddy",
+            HookAgent::Cursor => "cursor",
         }
     }
 
@@ -479,6 +515,8 @@ impl HookAgent {
             HookAgent::Crush => "Crush",
             HookAgent::CommandCode => "Command Code",
             HookAgent::MiniMaxCode => "MiniMax Code",
+            HookAgent::CodeBuddy => "CodeBuddy",
+            HookAgent::Cursor => "Cursor CLI",
         }
     }
 
@@ -522,6 +560,9 @@ impl HookAgent {
             // config-dir override for it.
             HookAgent::CommandCode => target.under_home(&[".commandcode", "settings.json"]),
             HookAgent::MiniMaxCode => target.minimax_plugin_manifest_path(),
+            HookAgent::CodeBuddy => target.codebuddy_settings_path(),
+            // The user-level file; Cursor merges it under any project one.
+            HookAgent::Cursor => target.under_home(&[".cursor", "hooks.json"]),
         }
     }
 
@@ -710,6 +751,19 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("crush.json");
         }
         self.under(&self.xdg_config_dir(), &["crush", "crush.json"])
+    }
+
+    /// CodeBuddy moves its whole home, `settings.json` included, to
+    /// `CODEBUDDY_CONFIG_DIR` when that is set and not blank. Local-only, like
+    /// the other overrides.
+    fn codebuddy_settings_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("CODEBUDDY_CONFIG_DIR")
+                .filter(|d| !d.to_string_lossy().trim().is_empty())
+        {
+            return PathBuf::from(dir).join("settings.json");
+        }
+        self.under_home(&[".codebuddy", "settings.json"])
     }
 
     fn traecli_hooks_path(&self) -> PathBuf {
@@ -1042,6 +1096,23 @@ const GROK_HOOK_EVENTS: &[(&str, &str, Option<&str>)] = &[
 ];
 
 const QODER_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    // An authorized MCP tool can still pause for user input mid-call.
+    ("Elicitation", "question-asked"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("StopFailure", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// CodeBuddy's hooks are Claude Code's, file layout and event names alike, but
+/// like Qoder it has a first-class `PermissionRequest`, so it takes Qoder's
+/// table rather than Claude's `Notification` sniffing. A turn that dies on an
+/// API error reports `StopFailure` instead of `Stop`; without it the pane
+/// would stay on working.
+const CODEBUDDY_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
     ("PermissionRequest", "permission-request"),
@@ -1532,6 +1603,27 @@ fn minimax_read_bytes(target: &HookTarget, path: &Path) -> io::Result<Vec<u8>> {
     target.host.read_file(path, MAX_CONFIG_BYTES)
 }
 
+/// Cursor's `hooks.json` events, camel-cased and flat (see
+/// [`HookAgent::flat_hook_map`]). The payloads name the session
+/// `conversation_id`, which [`build_hook_sequence`] reads as the session id.
+///
+/// The interactive `cursor-agent` TUI — what runs in a tty7 pane — fires the
+/// editor's turn hooks: `beforeSubmitPrompt` opens a turn and `stop` closes
+/// it, with a status of `completed`, `aborted` or `error`. `postToolUse` is
+/// plain tool activity. Print mode (`cursor-agent -p`) sends neither
+/// `beforeSubmitPrompt` nor `stop` (a known gap per Cursor staff, 2026-08),
+/// so a `-p` run records its session but shows no status.
+///
+/// None of these are Cursor's permission hooks, which would block the agent
+/// on the empty stdout `tty7 agent-hook` prints.
+const CURSOR_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("sessionStart", "session-start"),
+    ("beforeSubmitPrompt", "prompt-submit"),
+    ("postToolUse", "tool-complete"),
+    ("stop", "stop"),
+    ("sessionEnd", "session-end"),
+];
+
 fn hook_map_state(
     target: &HookTarget,
     path: &Path,
@@ -1546,6 +1638,11 @@ fn hook_map_state(
     };
     let marker = agent.marker();
     let (mut any, mut complete) = (false, true);
+    // A file without the version Cursor demands is ignored by it, hooks and
+    // all. Only a missing one counts: install never overwrites the user's.
+    if agent.hook_map_version().is_some() && root.get("version").is_none() {
+        complete = false;
+    }
     for (hook_event, tty7_event) in events {
         let ours = root
             .get("hooks")
@@ -1590,6 +1687,13 @@ fn hook_map_install(
             "{} is not a JSON object; not touching it",
             path.display()
         ));
+    }
+
+    if let Some(version) = agent.hook_map_version() {
+        root.as_object_mut()
+            .unwrap()
+            .entry("version")
+            .or_insert_with(|| serde_json::json!(version));
     }
 
     let hooks = root
@@ -1898,6 +2002,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Kimi
         | HookAgent::CommandCode
         | HookAgent::MiniMaxCode => None,
+        HookAgent::CodeBuddy | HookAgent::Cursor => None,
     }
 }
 
@@ -2392,6 +2497,8 @@ mod tests {
             .chain(CRUSH_HOOK_EVENTS)
             .chain(COMMANDCODE_HOOK_EVENTS)
             .chain(MINIMAX_HOOK_EVENTS)
+            .chain(CODEBUDDY_HOOK_EVENTS)
+            .chain(CURSOR_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -2449,6 +2556,8 @@ mod tests {
                 HookAgent::MiniMaxCode,
                 "/home/me/.minimax/plugins/tty7-agent-hooks/.minimax-plugin/plugin.json",
             ),
+            (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
+            (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -2472,6 +2581,8 @@ mod tests {
             HookAgent::QoderCLI,
             HookAgent::Crush,
             HookAgent::CommandCode,
+            HookAgent::CodeBuddy,
+            HookAgent::Cursor,
         ] {
             assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
             install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
@@ -2943,6 +3054,267 @@ mod tests {
         assert_eq!(state.status, AgentStatus::Done);
     }
 
+    /// CodeBuddy reuses Claude Code's hook shape and payload, so a turn walks
+    /// the same way — but it fires `SessionStart` with `source: "compact"`
+    /// in the middle of a turn, which must not reset the pane to idle.
+    #[test]
+    fn codebuddy_turns_survive_compaction_and_record_the_session() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        let apply_hook = |state: &mut AgentSessionState, hook: &str, input: &str| {
+            let event = HookAgent::CodeBuddy
+                .hook_map_events()
+                .unwrap()
+                .iter()
+                .find_map(|(name, event)| (*name == hook).then_some(*event))
+                .unwrap_or_else(|| panic!("CodeBuddy installs no {hook} hook"));
+            if let Some(event) = effective_event("codebuddy", event, input) {
+                let ev = round_trip("codebuddy", event, input);
+                assert_eq!(ev.agent, Some(CLIAgent::CodeBuddy));
+                state.apply_event(&ev);
+            }
+        };
+        let mut state = AgentSessionState::default();
+        apply_hook(
+            &mut state,
+            "SessionStart",
+            r#"{"session_id":"cb-1","cwd":"/repo","source":"startup"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Idle);
+        apply_hook(
+            &mut state,
+            "UserPromptSubmit",
+            r#"{"session_id":"cb-1","cwd":"/repo","prompt":"Fix the build"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Working);
+
+        let before = state.clone();
+        apply_hook(
+            &mut state,
+            "SessionStart",
+            r#"{"session_id":"cb-1","cwd":"/repo","source":"compact"}"#,
+        );
+        assert_eq!(state, before, "compaction must preserve the active turn");
+
+        apply_hook(
+            &mut state,
+            "PermissionRequest",
+            r#"{"session_id":"cb-1","tool_name":"Bash"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Waiting);
+        apply_hook(&mut state, "PostToolUse", r#"{"session_id":"cb-1"}"#);
+        assert_eq!(state.status, AgentStatus::Working);
+        apply_hook(&mut state, "StopFailure", r#"{"session_id":"cb-1"}"#);
+        assert_eq!(state.status, AgentStatus::Done, "a failed turn still ends");
+        assert_eq!(state.session_id.as_deref(), Some("cb-1"));
+        assert_eq!(state.cwd.as_deref(), Some(Path::new("/repo")));
+
+        assert!(
+            !HookAgent::CodeBuddy
+                .hook_map_events()
+                .unwrap()
+                .iter()
+                .any(|(hook, _)| *hook == "Notification"),
+            "PermissionRequest reports the block; Notification would only muddy it"
+        );
+    }
+
+    /// Cursor calls the session a conversation, and only its tool events say
+    /// where they ran. Both still have to reach the pane, or Copy Session ID
+    /// and resume stay dark.
+    #[test]
+    fn cursor_payloads_name_the_session_and_its_workspace() {
+        let ev = round_trip(
+            "cursor",
+            "stop",
+            r#"{"conversation_id":"cur-1","generation_id":"g-1","status":"completed",
+                "workspace_roots":["/repo","/other"],"hook_event_name":"stop"}"#,
+        );
+        assert_eq!(ev.agent, Some(CLIAgent::Cursor));
+        assert_eq!(ev.session_id.as_deref(), Some("cur-1"));
+        assert_eq!(ev.cwd.as_deref(), Some(Path::new("/repo")));
+
+        let ev = round_trip(
+            "cursor",
+            "prompt-submit",
+            r#"{"conversation_id":"cur-1","cwd":"/repo/sub","workspace_roots":["/repo"],
+                "tool_name":"Shell"}"#,
+        );
+        assert_eq!(
+            ev.cwd.as_deref(),
+            Some(Path::new("/repo/sub")),
+            "a real cwd beats the workspace root"
+        );
+
+        let ev = round_trip(
+            "cursor",
+            "session-start",
+            r#"{"session_id":"cur-2","conversation_id":"cur-2","workspace_roots":[]}"#,
+        );
+        assert_eq!(ev.session_id.as_deref(), Some("cur-2"));
+        assert_eq!(ev.cwd, None, "an empty root list names no directory");
+    }
+
+    /// A `cursor-agent` turn opens on `beforeSubmitPrompt` and closes on
+    /// `stop`; tool calls in between only move the activity counter.
+    #[test]
+    fn cursor_cli_turns_open_on_submit_and_close_on_stop() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        let apply_hook = |state: &mut AgentSessionState, hook: &str, input: &str| {
+            let event = HookAgent::Cursor
+                .hook_map_events()
+                .unwrap()
+                .iter()
+                .find_map(|(name, event)| (*name == hook).then_some(*event))
+                .unwrap_or_else(|| panic!("Cursor installs no {hook} hook"));
+            let event = effective_event("cursor", event, input).unwrap();
+            state.apply_event(&round_trip("cursor", event, input));
+        };
+        let mut state = AgentSessionState::default();
+        apply_hook(
+            &mut state,
+            "sessionStart",
+            r#"{"session_id":"cur-1","conversation_id":"cur-1","workspace_roots":["/repo"]}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Idle);
+        assert_eq!(state.session_id.as_deref(), Some("cur-1"));
+
+        for turn in 1..=2 {
+            apply_hook(
+                &mut state,
+                "beforeSubmitPrompt",
+                r#"{"conversation_id":"cur-1","prompt":"Fix the build"}"#,
+            );
+            assert_eq!(state.status, AgentStatus::Working, "turn {turn}");
+            let before = state.activity;
+            apply_hook(
+                &mut state,
+                "postToolUse",
+                r#"{"conversation_id":"cur-1","tool_name":"Shell","cwd":"/repo"}"#,
+            );
+            assert_eq!(state.status, AgentStatus::Working, "turn {turn}");
+            assert_eq!(state.activity, before + 1, "a tool call is activity");
+            apply_hook(
+                &mut state,
+                "stop",
+                r#"{"conversation_id":"cur-1","status":"completed"}"#,
+            );
+            assert_eq!(state.status, AgentStatus::Done, "turn {turn}");
+            assert_eq!(state.turns, turn, "each turn is counted once");
+        }
+
+        // A turn that answers without a tool still shows as working.
+        apply_hook(
+            &mut state,
+            "beforeSubmitPrompt",
+            r#"{"conversation_id":"cur-1","prompt":"Explain this"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Working);
+        apply_hook(
+            &mut state,
+            "stop",
+            r#"{"conversation_id":"cur-1","status":"aborted"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Done);
+
+        apply_hook(
+            &mut state,
+            "sessionEnd",
+            r#"{"session_id":"cur-1","conversation_id":"cur-1","reason":"user_close"}"#,
+        );
+        assert_eq!(state.status, AgentStatus::Idle);
+        assert_eq!(state.session_id.as_deref(), Some("cur-1"));
+    }
+
+    /// Cursor's `hooks.json` is flat like Crush's, but it is also ignored
+    /// outright without `"version": 1` at the root — so a file tty7 creates
+    /// has to carry one, and a user's own file keeps whatever it declares.
+    #[test]
+    fn cursor_hooks_file_is_versioned_flat_and_preserves_user_entries() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-cursor-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let config = HookAgent::Cursor.target_path(&target);
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap()
+        };
+
+        // From nothing: tty7 creates the file, so it declares the version.
+        install_hooks(&target, HookAgent::Cursor).expect("install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Cursor),
+            HooksState::Installed
+        );
+        let created = read();
+        assert_eq!(created["version"], 1);
+        for (hook, event) in CURSOR_HOOK_EVENTS {
+            let entries = created["hooks"][*hook].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{hook}");
+            assert_eq!(
+                entries[0],
+                serde_json::json!({ "command": target.hook_command(HookAgent::Cursor, event) }),
+                "{hook} is one flat entry naming its emitter"
+            );
+        }
+        uninstall_hooks(&target, HookAgent::Cursor).unwrap();
+        assert_eq!(
+            hooks_state(&target, HookAgent::Cursor),
+            HooksState::NotInstalled
+        );
+
+        // A user's file with hooks of their own and a version already set.
+        let user_config = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "stop": [{ "command": "./audit.sh", "timeout": 5 }],
+                "beforeShellExecution": [{ "command": "./guard.sh", "matcher": "rm" }]
+            }
+        });
+        std::fs::write(&config, user_config.to_string()).unwrap();
+        install_hooks(&target, HookAgent::Cursor).unwrap();
+        install_hooks(&target, HookAgent::Cursor).expect("re-install succeeds");
+        let merged = read();
+        let stop = merged["hooks"]["stop"].as_array().unwrap();
+        assert_eq!(
+            stop.len(),
+            2,
+            "one tty7 entry beside the user's after two installs"
+        );
+        assert_eq!(stop[0], user_config["hooks"]["stop"][0]);
+        assert_eq!(
+            merged["hooks"]["beforeShellExecution"], user_config["hooks"]["beforeShellExecution"],
+            "a permission hook tty7 does not install is left alone"
+        );
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Cursor).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(read(), user_config, "uninstall restores the user's file");
+
+        // Hooks written into a file Cursor would ignore are not installed yet.
+        let mut unversioned = serde_json::json!({ "hooks": {} });
+        for (hook, event) in CURSOR_HOOK_EVENTS {
+            unversioned["hooks"][*hook] = serde_json::json!([
+                { "command": target.hook_command(HookAgent::Cursor, event) }
+            ]);
+        }
+        std::fs::write(&config, unversioned.to_string()).unwrap();
+        assert_eq!(
+            hooks_state(&target, HookAgent::Cursor),
+            HooksState::Outdated
+        );
+        assert_eq!(refresh_hooks(&target), 1);
+        assert_eq!(read()["version"], 1);
+        assert_eq!(
+            hooks_state(&target, HookAgent::Cursor),
+            HooksState::Installed
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Crush's lone `PreToolUse` has no `Stop` to close a turn behind it, so it
     /// must not open one: the pane would read as busy until Crush exits.
     #[test]
@@ -3249,6 +3621,8 @@ mod tests {
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
+            (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
+            (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -3573,6 +3947,105 @@ mod tests {
             std::fs::read_to_string(settings)
                 .unwrap()
                 .contains("agent-hook qodercli")
+        );
+        assert_eq!(
+            uninstall_hooks(&target, agent).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        for path in [settings, untouched] {
+            let actual: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(actual, user_config, "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn codebuddy_config_dir_controls_local_hook_lifecycle() {
+        const CASE_ENV: &str = "TTY7_TEST_CODEBUDDY_CONFIG_CASE";
+        const ROOT_ENV: &str = "TTY7_TEST_CODEBUDDY_CONFIG_ROOT";
+        let Ok(case) = std::env::var(CASE_ENV) else {
+            // Each case gets its own environment, without changing the one
+            // shared by the other tests or touching the user's settings.
+            for case in ["override", "blank", "unset"] {
+                let sandbox = tempfile::tempdir().unwrap();
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "core::agent_hooks::tests::codebuddy_config_dir_controls_local_hook_lifecycle",
+                        "--nocapture",
+                    ])
+                    .env(CASE_ENV, case)
+                    .env(ROOT_ENV, sandbox.path());
+                match case {
+                    "override" => {
+                        child.env("CODEBUDDY_CONFIG_DIR", sandbox.path().join("custom config"))
+                    }
+                    // CodeBuddy trims the value, so whitespace is as unset as empty.
+                    "blank" => child.env("CODEBUDDY_CONFIG_DIR", "  "),
+                    _ => child.env_remove("CODEBUDDY_CONFIG_DIR"),
+                };
+                let output = crate::core::proc::output_within(
+                    crate::core::proc::hide_console(&mut child),
+                    std::time::Duration::from_secs(30),
+                )
+                .expect("run the isolated CodeBuddy hook test");
+                assert!(
+                    output.status.success(),
+                    "{case}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        };
+
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
+        let host = local_host();
+        let target = HookTarget {
+            host: &*host,
+            home: root.join("home"),
+            exe: std::env::current_exe().unwrap(),
+        };
+        let default_settings = target.home.join(".codebuddy").join("settings.json");
+        let custom_settings = root.join("custom config").join("settings.json");
+        let (settings, untouched) = if case == "override" {
+            (&custom_settings, &default_settings)
+        } else {
+            (&default_settings, &custom_settings)
+        };
+        let user_config = serde_json::json!({
+            "model": "codebuddy-test",
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "echo user-hook" }] }]
+            }
+        });
+        for path in [settings, untouched] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, user_config.to_string()).unwrap();
+        }
+
+        let agent = HookAgent::CodeBuddy;
+        assert_eq!(agent.target_path(&target), *settings);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            agent.target_path(&remote),
+            PathBuf::from("/home/me/.codebuddy/settings.json"),
+            "a local override must not redirect remote hooks"
+        );
+
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        assert_eq!(
+            install_hooks(&target, agent).unwrap(),
+            HookOutcome::Installed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::Installed);
+        assert!(
+            std::fs::read_to_string(settings)
+                .unwrap()
+                .contains("agent-hook codebuddy")
         );
         assert_eq!(
             uninstall_hooks(&target, agent).unwrap(),

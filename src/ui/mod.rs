@@ -35,6 +35,7 @@ pub mod rounding;
 pub mod scm;
 pub mod scrollbar;
 pub mod settings;
+pub mod settings_window;
 pub mod sftp;
 pub mod sftp_host;
 pub mod ssh_connect;

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,16 @@ pub struct Config {
     pub font_family_bold: Option<String>,
     pub font_family_italic: Option<String>,
     pub font_features: Option<FontFeatures>,
+    /// macOS only: let CoreGraphics font smoothing thicken glyph strokes — by
+    /// more the lighter the text, which is why light-on-dark looks bolder.
+    /// On by default, because it is what every macOS app draws with.
+    ///
+    /// Off pins `AppleFontSmoothing` to `0` for this process alone, so glyphs
+    /// are drawn at the face's own weight. gpui reads that preference once, the
+    /// first time it rasterizes text, so a change applies at the next launch.
+    /// Ignored elsewhere, where there is no such dilation to turn off.
+    #[serde(default = "default_true")]
+    pub font_thicken: bool,
     pub font_size: f32,
     pub line_height: f32,
     /// The interface's root font size, in pixels — everything outside the
@@ -236,6 +246,17 @@ pub struct Config {
     /// impression than one they asked for.
     #[serde(default)]
     pub scm_graph_expanded: bool,
+    /// Whether a file opens in the code panel with soft wrap on. Not a
+    /// setting anyone picks up front: it is whatever the status bar's Wrap
+    /// toggle (or `ToggleDocumentWrap`) was last left at, so the next file
+    /// opens the way the last one was being read.
+    #[serde(default)]
+    pub editor_soft_wrap: bool,
+    /// Whether a Markdown file opens rendered rather than as source — the last
+    /// state of the Preview / Edit toggle, remembered the same way as
+    /// [`Self::editor_soft_wrap`]. Files that are not Markdown ignore it.
+    #[serde(default)]
+    pub editor_markdown_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub sidebar_grouping: SidebarGrouping,
     /// Which sidebar groups are folded shut, by group key: the repo root the
@@ -618,6 +639,7 @@ impl Default for Config {
             font_family_bold: None,
             font_family_italic: None,
             font_features: None,
+            font_thicken: true,
             font_size: 15.0,
             line_height: 1.4,
             ui_font_size: default_ui_font_size(),
@@ -654,6 +676,8 @@ impl Default for Config {
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
+            editor_soft_wrap: false,
+            editor_markdown_preview: false,
             sidebar_grouping: SidebarGrouping::Repo,
             sidebar_collapsed_groups: Vec::new(),
             sidebar_diff_preview: true,
@@ -900,10 +924,86 @@ pub fn set_config_dir(dir: PathBuf) {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = CONFIG_DIR_OVERRIDE.get() {
-        return Some(dir.clone());
+    resolve_config_dir(
+        CONFIG_DIR_OVERRIDE.get().cloned(),
+        env_config_dir(),
+        portable_config_dir(),
+        default_config_dir,
+    )
+}
+
+/// Where the config directory comes from, first match wins: `--config-dir`,
+/// then `$TTY7_CONFIG_DIR`, then a portable install's own data folder, then
+/// the platform default. Explicit beats implicit, so a portable copy can still
+/// be pointed somewhere else for one launch or one session.
+///
+/// `default` is a closure because the answer rarely gets that far and the
+/// default reads the environment again.
+fn resolve_config_dir(
+    flag: Option<PathBuf>,
+    env: Option<PathBuf>,
+    portable: Option<PathBuf>,
+    default: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    flag.or(env).or(portable).or_else(default)
+}
+
+fn env_config_dir() -> Option<PathBuf> {
+    std::env::var_os("TTY7_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The marker the Windows portable ZIP ships beside its executables. The
+/// updater reads it as "this is a portable install" (see `update.rs` and
+/// `tty7-updater`); here it is half of the opt-in to keeping data beside the
+/// executables too.
+pub const PORTABLE_MARKER: &str = ".tty7-portable";
+
+/// The folder, beside the executables, a portable install keeps its whole
+/// config directory in — `config.json`, sessions, scrollback, history, the
+/// daemon's socket and lock.
+///
+/// Never one of the updater's managed roots: those are moved aside and
+/// replaced on every update, and this is the one thing in the install
+/// directory that must survive one.
+pub const PORTABLE_DATA_DIR: &str = "data";
+
+/// `<exe dir>\data`, when the running executable is a portable install that
+/// opted in to keeping its data there. Windows only; `None` everywhere else.
+///
+/// Resolved once per process: the executable does not move, and a folder
+/// created while tty7 runs must not move the config directory under a live
+/// daemon.
+fn portable_config_dir() -> Option<PathBuf> {
+    // `cfg!` rather than `#[cfg]`, so every platform's build type-checks it.
+    if !cfg!(windows) {
+        return None;
     }
-    machine_config_dir()
+    static PORTABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PORTABLE
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            portable_data_dir(exe.parent()?)
+        })
+        .clone()
+}
+
+/// The portable data folder for executables in `exe_dir`, if both the marker
+/// and the folder are there.
+///
+/// The folder has to exist rather than being created on demand, because the
+/// marker alone says nothing new: every portable ZIP has shipped it since the
+/// in-app updater arrived, as the updater's cue. Keying on the marker by
+/// itself would move every existing portable user onto an empty directory at
+/// their next update — their settings and sessions still sitting in
+/// `%APPDATA%\tty7`, looking lost. Creating `data` is the explicit opt-in, as
+/// the `.portable` file is for Windows Terminal. The ZIP cannot ship the folder
+/// either: the updater rejects package entries outside its managed roots, and
+/// anything inside them is replaced on update.
+pub fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let data = exe_dir.join(PORTABLE_DATA_DIR);
+    (exe_dir.join(PORTABLE_MARKER).is_file() && data.is_dir()).then_some(data)
 }
 
 /// The config directory this machine resolves to when no single invocation
@@ -915,11 +1015,12 @@ fn config_dir() -> Option<PathBuf> {
 /// elsewhere" (see `machine::adopt_legacy_data_dir`). It cannot be answered by
 /// whether the override is set: `daemon::spawn` passes `--config-dir` to every
 /// daemon it starts, the ordinary install's included.
+///
+/// A portable install's data folder is deliberately not part of it: that copy
+/// is a second tty7 beside whatever the machine has installed, and must not
+/// inherit the installed one's legacy tree.
 pub fn machine_config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("TTY7_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    default_config_dir()
+    env_config_dir().or_else(default_config_dir)
 }
 
 #[cfg(not(windows))]
@@ -1482,6 +1583,18 @@ mod tests {
 
         let default_cfg = Config::default();
         assert!(default_cfg.font_features.is_none());
+    }
+
+    #[test]
+    fn font_thicken_defaults_on_and_reads_an_explicit_off() {
+        // On is what tty7 drew before the key existed, so a config that never
+        // names it must keep rendering exactly as it did.
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(cfg.font_thicken);
+        assert!(Config::default().font_thicken);
+
+        let cfg: Config = serde_json::from_str(r#"{"font_thicken":false}"#).unwrap();
+        assert!(!cfg.font_thicken);
     }
 
     #[test]
@@ -2382,5 +2495,61 @@ mod tests {
         let p = config_path("config.json").expect("config path resolves");
         assert!(p.ends_with("config.json"));
         assert_eq!(p.parent(), config_dir_path().as_deref());
+    }
+
+    #[test]
+    fn config_dir_resolution_prefers_explicit_over_portable_over_default() {
+        let dir = |name: &str| Some(PathBuf::from(name));
+        let default = || dir("default");
+
+        assert_eq!(
+            resolve_config_dir(dir("flag"), dir("env"), dir("portable"), default),
+            dir("flag"),
+            "--config-dir wins over everything"
+        );
+        assert_eq!(
+            resolve_config_dir(None, dir("env"), dir("portable"), default),
+            dir("env"),
+            "$TTY7_CONFIG_DIR still redirects a portable copy"
+        );
+        assert_eq!(
+            resolve_config_dir(None, None, dir("portable"), default),
+            dir("portable"),
+            "a portable install keeps its data beside the executables"
+        );
+        assert_eq!(
+            resolve_config_dir(None, None, None, default),
+            dir("default")
+        );
+        assert_eq!(resolve_config_dir(None, None, None, || None), None);
+    }
+
+    #[test]
+    fn portable_data_needs_both_the_marker_and_the_folder() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let data = exe_dir.path().join(PORTABLE_DATA_DIR);
+
+        assert_eq!(portable_data_dir(exe_dir.path()), None, "a plain directory");
+
+        // Every portable ZIP ships the marker for the updater, so the marker
+        // alone must not relocate an existing portable user's data.
+        std::fs::write(exe_dir.path().join(PORTABLE_MARKER), "portable-v1").unwrap();
+        assert_eq!(portable_data_dir(exe_dir.path()), None, "marker only");
+
+        std::fs::create_dir(&data).unwrap();
+        assert_eq!(portable_data_dir(exe_dir.path()), Some(data.clone()));
+
+        // A `data` folder without the marker — an installer layout, or any
+        // directory someone ran a build from — is not a portable install.
+        std::fs::remove_file(exe_dir.path().join(PORTABLE_MARKER)).unwrap();
+        assert_eq!(portable_data_dir(exe_dir.path()), None, "folder only");
+    }
+
+    #[test]
+    fn a_file_named_data_is_not_a_portable_data_folder() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        std::fs::write(exe_dir.path().join(PORTABLE_MARKER), "portable-v1").unwrap();
+        std::fs::write(exe_dir.path().join(PORTABLE_DATA_DIR), "").unwrap();
+        assert_eq!(portable_data_dir(exe_dir.path()), None);
     }
 }

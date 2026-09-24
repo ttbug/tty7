@@ -7,7 +7,8 @@ description: "Every key tty7 reads, its type, and its default."
 |---|---|
 | macOS / Linux | `~/.config/tty7/config.json` |
 | Windows | `%APPDATA%\tty7\config.json` |
-| Override the whole directory | `TTY7_CONFIG_DIR` |
+| Windows, portable mode | `<folder of tty7-app.exe>\data\config.json` |
+| Override the whole directory | `TTY7_CONFIG_DIR`, or `--config-dir` |
 
 Every key is optional — a missing one means its default, so you only write what
 you change. Out-of-range numbers are clamped rather than rejected, and an
@@ -26,6 +27,26 @@ failing the file.
 }
 ```
 
+## Where the directory comes from
+
+The config directory holds everything an instance keeps, not just
+`config.json`: themes, sessions, scrollback, history, and the background
+server's socket. The first of these wins:
+
+1. `--config-dir <dir>` on the command line — `tty7-app.exe --config-dir D:\tty7-data`,
+   or `tty7-app --config-dir ~/tty7-alt` elsewhere. The app hands it on to the
+   server it starts, so the whole instance moves.
+2. The `TTY7_CONFIG_DIR` environment variable. Unlike a flag it also reaches
+   launches you do not control — Explorer's **Open in tty7**, a desktop file,
+   the `tty7` command in another terminal.
+3. **Windows portable mode**: a `data` folder next to `tty7-app.exe` in an
+   unzipped portable ZIP (the one carrying a `.tty7-portable` file). See
+   [Installation](/getting-started/installation).
+4. The platform default in the table above.
+
+Two directories are two independent instances, each with its own server and
+sessions.
+
 ## Typography
 
 | Key | Type | Default | |
@@ -35,6 +56,7 @@ failing the file.
 | `font_family_bold` | string | — | A distinct bold face. |
 | `font_family_italic` | string | — | A distinct italic face. |
 | `font_features` | object | — | OpenType tags, e.g. `{"calt": true, "liga": 1}`. Four alphanumeric characters per tag. |
+| `font_thicken` | bool | `true` | macOS: let font smoothing thicken strokes, light text most. `false` draws glyphs at their own weight. Applies after a restart. |
 | `font_size` | number | `15` | Terminal text size in px (4–256). |
 | `line_height` | number | `1.4` | Multiple of the font size (0.5–4). |
 | `ui_font_size` | number | `16` | The interface's root size in px (12–24). |
@@ -81,6 +103,8 @@ their id from the file name. [More about themes →](/customization/themes)
 | `document_layout` | enum | `"dock"` | Where an open file or diff is drawn: `dock` beside the terminal, or `fill` over the workspace. What a fresh tab starts as — each tab keeps its own from there. |
 | `document_ratio` | number | `0.5` | The docked column’s share of the terminal column (0.2–0.8). Named widths are `0.333`, `0.5`, `0.667`. |
 | `scm_graph_expanded` | bool | `false` | Whether the history section starts open. |
+| `editor_soft_wrap` | bool | `false` | Whether files open in the code panel with soft wrap on. Follows the status bar's Wrap toggle — whatever it was last left at. |
+| `editor_markdown_preview` | bool | `false` | Whether Markdown files open rendered rather than as source. Follows the Preview / Edit toggle the same way. |
 | `show_tray_icon` | bool | `true` | The tray / menu bar status item. |
 
 ## Terminal

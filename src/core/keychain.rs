@@ -100,6 +100,29 @@ impl CredentialStore for OsCredentialStore {
     }
 }
 
+/// A store with nothing in it, for building a spec whose secrets are going to
+/// be stripped anyway. Asking the real one costs a trip to `securityd` per
+/// credential, and the callers that want no secrets are the ones on the UI
+/// thread.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoCredentials;
+
+impl CredentialStore for NoCredentials {
+    fn get(&self, _service: &str, _account: &str) -> CredentialResult<Option<String>> {
+        Ok(None)
+    }
+
+    fn set(&self, _service: &str, _account: &str, _secret: &str) -> CredentialResult<()> {
+        Err(CredentialError::Backend(
+            "this store holds no credentials".into(),
+        ))
+    }
+
+    fn delete(&self, _service: &str, _account: &str) -> CredentialResult<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub struct InMemoryCredentialStore {

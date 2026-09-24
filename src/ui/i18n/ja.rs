@@ -135,6 +135,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsFontLigaturesDesc => {
             "ターミナルテキストで一般的なプログラミング用リガチャー（合字）を有効にする"
         }
+        L10nKey::SettingsFontThicken => "ストロークを太くする",
+        L10nKey::SettingsFontThickenDesc => {
+            "macOS のフォントスムージング：文字をやや太く描画し、明るい文字ほど太くなる。tty7 の再起動後に反映"
+        }
         L10nKey::SettingsCursor => "カーソル",
         L10nKey::SettingsCursorShape => "カーソルの形状",
         L10nKey::SettingsCursorShapeDesc => "ターミナルカーソルの描画方法",
@@ -807,6 +811,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCrush => "Crush",
         L10nKey::SettingsAgentCommandCode => "Command Code",
         L10nKey::SettingsAgentMiniMaxCode => "MiniMax Code",
+        L10nKey::SettingsAgentCodeBuddy => "CodeBuddy",
+        L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -875,6 +881,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchFontLigaturesKeywords => {
             "タイポグラフィ グリフ fira font ligatures typography glyph fira"
+        }
+        L10nKey::SettingsSearchFontThickenKeywords => {
+            "フォントスムージング 太字 細字 ウェイト font smoothing thicken bold weight thin AppleFontSmoothing"
         }
         L10nKey::SettingsSearchFontSizeKeywords => {
             "タイポグラフィ 文字 拡大 縮小 ズーム font size typography text bigger smaller zoom"
@@ -955,6 +964,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchMiniMaxCodeKeywords => {
             "エージェント 統合 フック インストール MiniMax Code minimax-code mcode agent integration hooks install"
+        }
+        L10nKey::SettingsSearchCodeBuddyKeywords => {
+            "エージェント 統合 フック インストール codebuddy cbc tencent agent integration hooks install"
+        }
+        L10nKey::SettingsSearchCursorCliKeywords => {
+            "エージェント 統合 フック インストール cursor cursor-agent agent integration hooks install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"
@@ -1109,6 +1124,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeDeleteFailed => "{name} を削除できませんでした",
         L10nKey::FileTreeCreateFailed => "{name} を作成できませんでした",
         L10nKey::FileTreeRenameFailed => "{name} の名前を変更できませんでした",
+        L10nKey::FileTreeDownloadFailed => "{name} をダウンロードできませんでした",
+        L10nKey::FileTreeDownloaded => "{path} にダウンロードしました",
+        L10nKey::FileTreeDownloadTooLarge => {
+            "{limit} MB を超えています。scp または rsync でダウンロードしてください"
+        }
         L10nKey::FileTreeContextOpen => "開く",
         L10nKey::FileTreeContextCdHere => "ここで cd",
         L10nKey::FileTreeContextInsertPath => "ターミナルにパスを挿入",
@@ -1158,8 +1178,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorFileTooLarge => "「{path}」はエディタで開くには大きすぎます（{size} MB）",
         L10nKey::EditorBinaryFile => "「{path}」はバイナリファイルのようです",
         L10nKey::PanelInfoTitle => "情報",
-        L10nKey::PanelChangesTitle => "ソース管理",
-        L10nKey::PanelScmTitle => "ソース管理",
+        L10nKey::PanelChangesTitle => "変更",
+        L10nKey::PanelScmTitle => "変更",
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
@@ -1554,6 +1574,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSwapPanePrevious => "前のペインと入れ替え",
         L10nKey::CmdNextTab => "次のタブ",
         L10nKey::CmdPreviousTab => "前のタブ",
+        L10nKey::CmdRecentTabSwitcher => "最近のタブを切り替える",
+        L10nKey::CmdRecentTabSwitcherReverse => "最近のタブを切り替える（逆順）",
         L10nKey::CmdCopyWorkingDirectory => "作業ディレクトリをコピー",
         L10nKey::CmdCopySessionId => "セッション ID をコピー",
         L10nKey::CmdCopySessionIdSubtitle => "コーディングエージェント自身のセッション ID",
@@ -1593,6 +1615,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentWidthThird => "ドキュメント: 幅3分の1",
         L10nKey::CmdDocumentWidthHalf => "ドキュメント: 幅半分",
         L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",
+        L10nKey::CmdToggleDocumentPreview => "ドキュメント: Markdown プレビューを切り替え",
+        L10nKey::CmdToggleDocumentWrap => "ドキュメント: 折り返しを切り替え",
         L10nKey::CmdGitCommit => "Git: コミット",
         L10nKey::CmdGitStageAll => "Git: すべての変更をステージ",
         L10nKey::CmdGitUnstageAll => "Git: すべてのステージを取り消す",

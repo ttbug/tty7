@@ -37,6 +37,11 @@ impl WorkspaceStore {
         let Some(store) = Self::try_store(cx) else {
             return WorkspaceId::new();
         };
+        // A synced reference being opened takes the next workspace number
+        // rather than the slot it was mirrored into (#760).
+        if let Some(id) = id {
+            store.views.mark_claimed(id);
+        }
         let view = match id {
             // A named workspace keeps its name even when this client has never
             // opened it: the CLI and other clients make workspaces too, and the
@@ -195,9 +200,6 @@ impl WorkspaceStore {
                 if let (Some(h), Some(via)) = (view.host.as_mut(), host.via.clone()) {
                     h.via = Some(via);
                 }
-                // Claimed is opened: the reference stops being a mirror of
-                // someone else's listing and becomes this client's own.
-                view.synced = false;
                 view.id
             }
             None => {
@@ -207,6 +209,10 @@ impl WorkspaceStore {
                 id
             }
         };
+        // Claimed is opened: the reference stops being a mirror of someone
+        // else's listing and becomes this client's own — numbered after the
+        // ones it already had (#760).
+        store.views.mark_claimed(id);
         store.views.save();
         id
     }

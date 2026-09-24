@@ -45,7 +45,7 @@ the panel tabs. They are all in the command palette, and all bindable here.
 ```json
 {
   "keybindings": {
-    "NextTab": "cmd-shift-]",
+    "NextTab": "ctrl-alt-]",
     "SplitRight": ["cmd-d"],
     "ResizePaneLeft": "ctrl-alt-left",
     "ToggleFullscreen": ""
@@ -57,7 +57,7 @@ An action's value takes one of two shapes:
 
 | Value | Means |
 |---|---|
-| `"cmd-shift-]"` | **Add** this shortcut. The default keeps working — <kbd>⌃ ⇥</kbd> still switches tabs |
+| `"ctrl-alt-]"` | **Add** this shortcut. The default keeps working — <kbd>⌃ ⇥</kbd> still opens the tab switcher |
 | `["cmd-d"]` | **Replace**: exactly these shortcuts, nothing else. List several to have several |
 | `""` or `[]` | **Unbind** the action |
 

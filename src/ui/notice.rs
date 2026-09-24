@@ -26,13 +26,10 @@ pub(crate) fn pill(accent: Hsla, cx: &App) -> Div {
         .occlude()
         .items_center()
         .gap_2()
-        .px_3()
-        .py_1p5()
-        .rounded_lg()
-        .bg(theme.popover)
-        .border_1()
+        .px_4()
+        .py_2()
+        .map(|panel| crate::ui::theme::floating_surface(panel, cx))
         .border_color(accent.opacity(0.4))
-        .shadow_md()
         // Off the right panel's ramp on purpose: these float over the
         // terminal, not inside a panel, and are sized against the terminal's
         // own text.

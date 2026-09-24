@@ -1096,6 +1096,25 @@ impl ControlClient {
         self.call_full(req, blob).map(|r| r.reply)
     }
 
+    /// Sends `req` without waiting for its answer. The reply, when it comes,
+    /// finds nobody waiting for its `req_id` and the reader drops it.
+    ///
+    /// For requests whose answer nobody acts on, made from places that cannot
+    /// afford a round trip: a `Drop` that may run on the UI thread, where a
+    /// `call` parks every window for as long as the peer takes to answer — up
+    /// to the request's whole deadline on a link that has gone quiet.
+    pub fn post(&self, req: ControlRequest) -> io::Result<()> {
+        if !self.is_connected() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "control connection is down",
+            ));
+        }
+        let req_id = self.inner.next_req_id.fetch_add(1, Ordering::Relaxed);
+        log::debug!(target: "tty7::control", "#{req_id} {req:?} (not awaited)");
+        self.inner.send(&ControlClientMsg::Request { req_id, req })
+    }
+
     pub fn call_full(&self, req: ControlRequest, blob: &[u8]) -> io::Result<ControlResponse> {
         let deadline = req.deadline();
         self.call_with_deadline(req, blob, deadline)
@@ -2486,6 +2505,45 @@ mod tests {
             slow.join().unwrap(),
             ReplyOk::Output(o) if o.stdout_trimmed() == "clean"
         ));
+    }
+
+    /// `post` returns while the peer is still sitting on its answer, and that
+    /// answer, when it does arrive, is not handed to the next caller.
+    #[test]
+    fn a_post_does_not_wait_for_its_answer() {
+        let (seen_tx, seen_rx) = mpsc::channel::<u64>();
+        let (answer_tx, answer_rx) = mpsc::channel::<()>();
+        let client = client_with_peer(no_events(), move |mut sock| {
+            let closed = match ControlClientMsg::read(&mut sock).unwrap() {
+                ControlClientMsg::Request {
+                    req_id,
+                    req: ControlRequest::WatchClose { id: 7 },
+                } => req_id,
+                other => panic!("unexpected message {other:?}"),
+            };
+            seen_tx.send(closed).unwrap();
+            answer_rx.recv().unwrap();
+            reply_to(&mut sock, closed, ReplyOk::Unit);
+            match ControlClientMsg::read(&mut sock).unwrap() {
+                ControlClientMsg::Request { req_id, .. } => {
+                    reply_to(&mut sock, req_id, ReplyOk::Path("/next".into()))
+                }
+                other => panic!("unexpected message {other:?}"),
+            }
+        });
+
+        client.post(ControlRequest::WatchClose { id: 7 }).unwrap();
+        seen_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the post reached the peer");
+        answer_tx.send(()).unwrap();
+
+        let next = client
+            .call(ControlRequest::Canonicalize {
+                path: "/next".into(),
+            })
+            .unwrap();
+        assert_eq!(next, ReplyOk::Path("/next".into()));
     }
 
     #[test]

@@ -2193,7 +2193,15 @@ impl Element for TerminalElement {
             invert_cursor_cell(&mut buf, geom.cols, row, col, &colors);
         }
 
-        let cursor_bounds = cursor_cell.map(|(row, col)| geom.cell_rect(row, col, 1));
+        // With the input bar up, the IME composes into the bar, which starts a
+        // row below the prompt when the prompt left it too little room.
+        let ime_cell = cursor.map(|c| {
+            self.view
+                .read(cx)
+                .input_ime_cell(c.row, c.col, geom.cols)
+                .unwrap_or((c.row, c.ime_col))
+        });
+        let cursor_bounds = ime_cell.map(|(row, col)| geom.cell_rect(row, col, 1));
         let focus_handle = self.view.read(cx).focus_handle.clone();
         window.handle_input(
             &focus_handle,

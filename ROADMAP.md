@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 已解决 `feat/tmp` 合并 `main` 的冲突：保留当前分支的侧边栏视觉、Command Code、MiniMax Code 与 SSH 认证修复，同时合入 main 的 CodeBuddy、Cursor CLI、独立设置窗口、远程终端分片解析、Windows portable mode 等新改动。
 - 远程 server 下载源已切换为 `https://github.com/ttbug/tty7/releases/download`，同步更新正式版、nightly 与校验文件下载地址断言；目标仓库发布资产和真实 SSH 安装仍待确认。
 - 已创建项目级开发约定并明确 UI 修改与验证规则。
 - 侧边栏改动已通过 `cargo fmt --check` 和 `git diff --check`。
@@ -48,6 +49,7 @@
 
 ## 最近验证
 
+- 2026-09-24 合并 `main` 冲突处理：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7-core --lib cli_agent` 38 项、`cargo test -p tty7-core --lib agent_hooks` 52 项、`cargo test -p tty7 'ui::settings::' --no-fail-fast` 62 项、`cargo test -p tty7 'terminal::remote::' --no-fail-fast` 94 项全部通过。编译仅有项目既有 warning。
 - 2026-09-23 server 下载源切换：`cargo test -p tty7-core --lib daemon::install:: --offline` 在沙箱外 142 项通过（沙箱内 8 项受本地端口绑定与 `ps` 权限限制）；`cargo fmt --check`、`git diff --check` 通过。未重新打包客户端。
 - 2026-09-23 14:04 下载源切换后的 DMG 重新交付：`cargo build --release --locked --target aarch64-apple-darwin`（6m58s）与 updater 构建通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 `dist/tty7-26.9.2-macos-arm64.dmg`（27 MiB，SHA-256 `a8cc61d504644ae5e6b08026aa34a27deebbff802e885cf21a4db0e23cbc4608`）和 `dist/tty7-26.9.2-macos-arm64.zip`（23 MiB，SHA-256 `1f42c9afe5316b6e53b85c2bab83793d4229ca6893c23fb9f38c2f955de84ee7`）。DMG CRC VALID，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.2`，包内 `tty7-app`、`tty7`、`tty7-updater` 均为 thin arm64，UUID 分别为 `B1A3834C-9416-3C4E-A714-BBD11C34E59B`、`620925C8-A034-3D82-B092-8051238BBB1A`、`5AC20CD3-6444-3EA0-8136-4C2D7C9962F3`，与 release 产物一致；app 签名验证通过，二进制包含 `https://github.com/ttbug/tty7/releases/download`。旧 dist 已备份至 `/private/tmp/tty7-dist-backup-repack-20260923`。
 - 2026-09-23 12:53 DMG 重新交付（xview 1.9）：代码在上次 11:57 出包后仍有 12:37–12:42 的改动，故重新构建。`cargo build --release --locked --target aarch64-apple-darwin`（6m32s，25 条既有警告）与 `cargo build --release --locked --features updater --bin tty7-updater --target aarch64-apple-darwin` 通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 `dist/xview-1.9-macos-arm64.dmg`（28164367 bytes，脚本内原名 `tty7-26.9.2-macos-arm64.dmg`，按上次 `xview-1.8` 递增重命名）与 `dist/tty7-26.9.2-macos-arm64.zip`（24012652 bytes）。包内三个主程序 UUID 与 release 产物逐一比对一致（tty7-app `18286FCE-436C-3943-B219-FD85A37F11A7`、tty7 `620925C8-A034-3D82-B092-8051238BBB1A`、tty7-updater `5AC20CD3-6444-3EA0-8136-4C2D7C9962F3`），排除旧版混入。DMG CRC VALID，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.2`，ad-hoc 签名 arm64。DMG SHA-256 `d6ee301f5fea03008e25b423e4fdfa5f02d020dea3b1479178e4c45e40a063d8`，ZIP SHA-256 `e9c36856b2f1349d6fcb8b08eab5529069e46563532f7c35214be8a2cd631144`。旧 dist 产物已备份至 `/private/tmp/tty7-dist-backup-20260923`（打包脚本会清空 dist）。

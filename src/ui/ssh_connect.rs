@@ -755,6 +755,29 @@ mod tests {
         assert_eq!(spec.password, None);
     }
 
+    /// A pane's route is built on the UI thread with the keychain left out of
+    /// it; that must describe the same connection as the full spec with its
+    /// secrets stripped, jump host and all.
+    #[test]
+    fn a_spec_built_without_credentials_is_the_full_one_stripped() {
+        let store = InMemoryCredentialStore::new();
+        store
+            .set_password("deploy", "10.0.0.5", 22, "hunter2")
+            .unwrap();
+        store.set_password("ops", "bastion", 22, "s3cret").unwrap();
+        let jump = profile("bastion", "bastion", "ops");
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.jump_host = Some(jump.id);
+        let profiles = [p.clone(), jump];
+
+        let full = build_native_ssh_spec(&p, &profiles, &store, true);
+        assert_eq!(full.password.as_deref(), Some("hunter2"));
+        assert_eq!(
+            build_native_ssh_spec(&p, &profiles, &crate::core::keychain::NoCredentials, true),
+            full.without_secrets()
+        );
+    }
+
     /// The pane wears this until the remote shell titles itself, so a host
     /// nobody bothered to name still says where it went (#438). Every host
     /// imported from `~/.ssh/config` used to arrive nameless, and every one

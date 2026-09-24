@@ -37,6 +37,13 @@ just that machine. <kbd>⌘ ⇧ N</kbd> opens the New Workspace form, where you
 pick the machine (this computer, or any configured SSH host) and optionally a
 name.
 
+The first nine workspaces are also numbered 1 to 9: the number sits beside
+each one in the switcher, and the **Window** menu lists them in that order.
+Numbers go by the order the workspaces were first opened on this computer and
+do not change as you switch between them, so a key bound to **Go to
+Workspace 3** (`SelectWorkspace3`, unbound by default) always reaches the same
+one. Deleting a workspace moves the ones after it up a number.
+
 Workspaces are how tty7 keeps ten repositories from becoming forty
 indistinguishable tabs. They also travel: a workspace on a remote machine is
 still a workspace, opened from the same switcher.

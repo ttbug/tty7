@@ -510,16 +510,16 @@ pub fn refresh_menu(cx: &mut App) {
 
 pub const MENU_SLOTS: usize = 9;
 
+/// The workspaces behind `SelectWorkspace1`…`9` and the Workspaces menu, in
+/// slot order, each with whether a window has it open. A stable order —
+/// [`WindowViews::numbered`](crate::core::session::WindowViews::numbered) —
+/// not the most recently used one: slot 3 is the same workspace however
+/// often the others are switched to (#760).
 pub fn menu_order(cx: &App) -> Vec<(WorkspaceId, bool)> {
-    let all = WorkspaceStore::all(cx);
-    let mut open: Vec<_> = all.views.iter().filter(|w| w.open).collect();
-    let mut closed: Vec<_> = all.views.iter().filter(|w| !w.open).collect();
-    open.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-    closed.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-    open.into_iter()
-        .map(|w| (w.id, true))
-        .chain(closed.into_iter().map(|w| (w.id, false)))
+    WorkspaceStore::all(cx)
+        .numbered()
         .take(MENU_SLOTS)
+        .map(|w| (w.id, w.open))
         .collect()
 }
 

@@ -2935,9 +2935,10 @@ impl TerminalView {
         let cols = self.terminal.term.lock().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
         let len = chars.len();
-        let (positions, _r, _c) = input_char_positions(&chars, scol, cols);
+        let start = input_start(scol, cols);
+        let (positions, _r, _c) = input_char_positions(&chars, start, cols);
         let end_caret = if len == 0 {
-            (0usize, scol)
+            start
         } else {
             let (r, c, w) = positions[len - 1];
             if chars[len - 1] == '\n' {
@@ -2952,11 +2953,15 @@ impl TerminalView {
         } else {
             end_caret
         };
-        let mut max_row = positions.iter().map(|&(r, _, _)| r).max().unwrap_or(0);
+        let mut max_row = positions
+            .iter()
+            .map(|&(r, _, _)| r)
+            .max()
+            .unwrap_or(start.0);
         if chars.last() == Some(&'\n') {
             max_row += 1;
         }
-        if (down && cur_row >= max_row) || (!down && cur_row == 0) {
+        if (down && cur_row >= max_row) || (!down && cur_row <= start.0) {
             self.editor_goal_col = None;
             return false;
         }
@@ -4191,6 +4196,26 @@ impl TerminalView {
         (row >= 0).then_some((row as usize, col))
     }
 
+    /// Where the IME should compose when the input bar has moved below the
+    /// prompt (see [`input_start`]): the start of the bar's first row. `None`
+    /// when the bar is beside the prompt, or not up at all — the prompt's own
+    /// cursor cell is right then. Takes the cursor as the frame snapshot saw
+    /// it rather than locking the terminal again mid-paint.
+    pub(super) fn input_ime_cell(
+        &self,
+        row: usize,
+        col: usize,
+        cols: usize,
+    ) -> Option<(usize, usize)> {
+        if !self.input_active() || self.reverse_search.is_some() {
+            return None;
+        }
+        match input_start(col, cols.max(1)) {
+            (0, _) => None,
+            (rows, col) => Some((row + rows, col)),
+        }
+    }
+
     pub(super) fn input_scroll_rows(&self) -> usize {
         if !self.input_active() || self.reverse_search.is_some() {
             return 0;
@@ -4214,7 +4239,7 @@ impl TerminalView {
             &chars,
             self.cmd.cursor(),
             &self.marked_text,
-            ccol,
+            input_start(ccol, cols.max(1)),
             cols.max(1),
         );
         input_overflow_shift(crow, caret_vrow, visual_rows, rows)
@@ -4230,7 +4255,14 @@ impl TerminalView {
         }
         let cols = self.terminal.term.lock().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
-        wrapped_click_index(&chars, scol, cols, col, row - srow, clamp)
+        wrapped_click_index(
+            &chars,
+            input_start(scol, cols),
+            cols,
+            col,
+            row - srow,
+            clamp,
+        )
     }
 
     pub fn editor_click(
@@ -6567,8 +6599,13 @@ impl TerminalView {
 
         let blank = move |w: gpui::Pixels| div().flex_none().w(w).h(lh);
 
-        let mut lines: Vec<Vec<gpui::AnyElement>> =
-            vec![vec![blank(cell_w * (ccol as f32)).into_any_element()]];
+        // The prompt's row, then the input's. Starting below the prompt leaves
+        // that row empty — the prompt shows through it — and the input begins
+        // at column 0 of the next.
+        let cols = self.terminal.term.lock().columns().max(1);
+        let (start_row, start_col) = input_start(ccol, cols);
+        let mut lines: Vec<Vec<gpui::AnyElement>> = (0..start_row).map(|_| Vec::new()).collect();
+        lines.push(vec![blank(cell_w * (start_col as f32)).into_any_element()]);
 
         let is_multiline = chars.contains(&'\n');
 
@@ -6685,13 +6722,16 @@ impl TerminalView {
             return None;
         }
         let (srow, scol) = self.cursor_cell()?;
-        let srow = srow.saturating_sub(self.input_scroll_rows());
 
         const MAX_ROWS: usize = 10;
         let (total_rows, total_cols) = {
             let term = self.terminal.term.lock();
             (term.screen_lines(), term.columns())
         };
+        // Anchored to where the input starts, which is a row below the prompt
+        // when the prompt left it too little room.
+        let (start_row, scol) = input_start(scol, total_cols.max(1));
+        let srow = (srow + start_row).saturating_sub(self.input_scroll_rows());
         // How wide the menu ends up, decided before the rows so their
         // descriptions can be elided against it. A menu wider than the pane
         // has its right-hand column clipped by the pane, and the clip takes
@@ -7254,7 +7294,7 @@ impl Render for TerminalView {
                     None => menu,
                 };
                 let menu = menu
-                    .min_w(px(220.))
+                    .min_w(px(240.))
                     .action_context(menu_focus.clone())
                     .menu_element_with_disabled(
                         Box::new(CopyText),
@@ -7868,8 +7908,41 @@ fn menu_layout(
     (place_above, visible, first)
 }
 
+/// The fewest columns the input is given beside the prompt, however wide the
+/// pane. Below this nearly any command with an argument or two wraps on its
+/// first row, and a row that short is harder to read than a row lower down.
+const INPUT_MIN_BESIDE_PROMPT: usize = 20;
+
+/// Where the input bar starts, as `(row, column)` with the prompt's own row as
+/// row 0: right after the prompt, or — when the prompt has left too little of
+/// its row — at column 0 of the row below, with the whole width to itself
+/// (#767).
+///
+/// "Too little" is under a third of the pane, and never under
+/// [`INPUT_MIN_BESIDE_PROMPT`]. A third keeps an ordinary prompt on its own
+/// line in any pane you would type in (`user@host ~/src/app % ` is about 25
+/// columns; an 80-column pane still leaves 55), and only moves the input when
+/// a deep path or a busy theme has eaten most of the row — the report behind
+/// this had a 119-column prompt in a 143-column pane, 24 columns left. The
+/// floor covers narrow panes, where a third is a handful of columns.
+///
+/// The move also has to gain something: in a pane barely wider than the
+/// floor, a short prompt leaves under 20 columns and a new row would hardly
+/// give more. So it only happens when the prompt is at least as wide as what
+/// it left — the new row at least doubles the room.
+fn input_start(scol: usize, cols: usize) -> (usize, usize) {
+    let left = cols.saturating_sub(scol);
+    let floor = INPUT_MIN_BESIDE_PROMPT.max(cols / 3);
+    if left < floor && scol >= left {
+        (1, 0)
+    } else {
+        (0, scol)
+    }
+}
+
 /// Where each character of the input bar lands: `(row, column, width)`, one
-/// entry per character, plus the row and column the text ends on.
+/// entry per character, plus the row and column the text ends on. `start` is
+/// where the first one goes, from [`input_start`].
 ///
 /// Walks the same cells the bar draws rather than re-deriving widths per
 /// character — an emoji presentation sequence is two columns and a stranded
@@ -7881,12 +7954,11 @@ fn menu_layout(
 /// caret takes after the cell, which is where a caret sitting on one belongs.
 fn input_char_positions(
     chars: &[char],
-    scol: usize,
+    start: (usize, usize),
     cols: usize,
 ) -> (Vec<(usize, usize, usize)>, usize, usize) {
     let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(chars.len());
-    let mut r = 0usize;
-    let mut c = scol;
+    let (mut r, mut c) = start;
     for cell in input_cells(chars) {
         if chars[cell.start] == '\n' {
             positions.push((r, c, 0));
@@ -7911,7 +7983,7 @@ fn input_overlay_rows(
     chars: &[char],
     cursor: usize,
     marked: &str,
-    scol: usize,
+    start: (usize, usize),
     cols: usize,
 ) -> (usize, usize) {
     let mut merged: Vec<char> = Vec::with_capacity(chars.len() + marked.len());
@@ -7919,7 +7991,7 @@ fn input_overlay_rows(
     merged.extend_from_slice(&chars[..cursor]);
     merged.extend(marked.chars());
     merged.extend_from_slice(&chars[cursor..]);
-    let (positions, r, c) = input_char_positions(&merged, scol, cols);
+    let (positions, r, c) = input_char_positions(&merged, start, cols);
     let end_row = if cursor >= chars.len() && marked.is_empty() && c >= cols {
         r + 1
     } else {
@@ -7937,14 +8009,14 @@ fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows
 
 fn wrapped_click_index(
     chars: &[char],
-    scol: usize,
+    start: (usize, usize),
     cols: usize,
     col: usize,
     target: usize,
     clamp: bool,
 ) -> Option<usize> {
     let len = chars.len();
-    let (positions, r, c) = input_char_positions(chars, scol, cols);
+    let (positions, r, c) = input_char_positions(chars, start, cols);
     let end_row = if c >= cols { r + 1 } else { r };
     if target > end_row {
         return clamp.then_some(len);
@@ -8168,9 +8240,9 @@ mod tests {
     use super::{
         description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
         fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, menu_layout,
-        paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
-        trim_trailing_spaces, wheel_route, wrapped_click_index,
+        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, input_start,
+        menu_layout, paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step,
+        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -9539,7 +9611,7 @@ mod tests {
     #[test]
     fn input_char_positions_reserve_two_columns_for_wide_chars() {
         let chars: Vec<char> = "a🀄b".chars().collect();
-        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        let (positions, _, _) = input_char_positions(&chars, (0, 0), 80);
         assert_eq!(positions, vec![(0, 0, 1), (0, 1, 2), (0, 3, 1)]);
     }
 
@@ -9556,7 +9628,7 @@ mod tests {
             "a\nb",
         ] {
             let chars: Vec<char> = text.chars().collect();
-            let (positions, _, _) = input_char_positions(&chars, 0, 80);
+            let (positions, _, _) = input_char_positions(&chars, (0, 0), 80);
             assert_eq!(positions.len(), chars.len(), "{text:?}");
             for cell in input_cells(&chars) {
                 let drawn = if chars[cell.start] == '\n' {
@@ -9577,7 +9649,7 @@ mod tests {
     #[test]
     fn input_char_positions_reserve_two_columns_for_an_emoji_presentation_sequence() {
         let chars: Vec<char> = "\u{2764}\u{FE0F}X".chars().collect();
-        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        let (positions, _, _) = input_char_positions(&chars, (0, 0), 80);
         assert_eq!(positions, vec![(0, 0, 2), (0, 2, 0), (0, 2, 1)]);
         assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 0, 0), Some(0));
         assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 1, 0), Some(0));
@@ -9589,7 +9661,7 @@ mod tests {
     #[test]
     fn input_char_positions_give_a_stranded_combining_mark_a_column() {
         let chars: Vec<char> = "\u{0301}ab".chars().collect();
-        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        let (positions, _, _) = input_char_positions(&chars, (0, 0), 80);
         assert_eq!(positions, vec![(0, 0, 1), (0, 1, 1), (0, 2, 1)]);
     }
 
@@ -9598,7 +9670,7 @@ mod tests {
     #[test]
     fn input_char_positions_wrap_a_cell_without_splitting_it() {
         let chars: Vec<char> = "abc\u{2764}\u{FE0F}".chars().collect();
-        let (positions, r, c) = input_char_positions(&chars, 0, 4);
+        let (positions, r, c) = input_char_positions(&chars, (0, 0), 4);
         assert_eq!(positions[3], (1, 0, 2));
         assert_eq!((r, c), (1, 2));
     }
@@ -9687,7 +9759,7 @@ mod tests {
 
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
         let chars: Vec<char> = text.chars().collect();
-        wrapped_click_index(&chars, scol, cols, col, row, false)
+        wrapped_click_index(&chars, (0, scol), cols, col, row, false)
     }
 
     #[test]
@@ -9719,10 +9791,10 @@ mod tests {
     #[test]
     fn wrapped_click_index_rows_past_the_input_need_clamp() {
         let chars: Vec<char> = "ls".chars().collect();
-        assert_eq!(wrapped_click_index(&chars, 4, 80, 3, 2, false), None);
-        assert_eq!(wrapped_click_index(&chars, 4, 80, 3, 2, true), Some(2));
-        assert_eq!(wrapped_click_index(&[], 4, 80, 30, 0, false), Some(0));
-        assert_eq!(wrapped_click_index(&chars, 4, 80, 3, 1, false), None);
+        assert_eq!(wrapped_click_index(&chars, (0, 4), 80, 3, 2, false), None);
+        assert_eq!(wrapped_click_index(&chars, (0, 4), 80, 3, 2, true), Some(2));
+        assert_eq!(wrapped_click_index(&[], (0, 4), 80, 30, 0, false), Some(0));
+        assert_eq!(wrapped_click_index(&chars, (0, 4), 80, 3, 1, false), None);
     }
 
     #[test]
@@ -9730,7 +9802,7 @@ mod tests {
         assert_eq!(click("abcdef", 4, 10, 0, 1), Some(6));
         assert_eq!(click("abcdef", 4, 10, 7, 1), Some(6));
         let chars: Vec<char> = "abcdef".chars().collect();
-        assert_eq!(wrapped_click_index(&chars, 4, 10, 0, 2, false), None);
+        assert_eq!(wrapped_click_index(&chars, (0, 4), 10, 0, 2, false), None);
     }
 
     #[test]
@@ -9748,13 +9820,81 @@ mod tests {
     fn input_overlay_rows_counts_wraps_slot_marked_and_newlines() {
         let rows = |text: &str, cursor: usize, marked: &str, scol: usize, cols: usize| {
             let chars: Vec<char> = text.chars().collect();
-            input_overlay_rows(&chars, cursor, marked, scol, cols)
+            input_overlay_rows(&chars, cursor, marked, (0, scol), cols)
         };
         assert_eq!(rows("", 0, "", 3, 8), (1, 0));
         assert_eq!(rows("aaaaaaaaaa", 10, "", 6, 8), (3, 2));
         assert_eq!(rows("aaaaaaaaaa", 3, "", 6, 8), (2, 1));
         assert_eq!(rows("ab\ncd", 5, "", 0, 8), (2, 1));
         assert_eq!(rows("ab", 1, "漢", 6, 8), (2, 1));
+    }
+
+    #[test]
+    fn the_input_stays_beside_an_ordinary_prompt() {
+        // `user@host ~/src/app % ` in an 80-column pane: 55 columns left.
+        assert_eq!(input_start(25, 80), (0, 25));
+        // No prompt at all, and a bare `$ `.
+        assert_eq!(input_start(0, 80), (0, 0));
+        assert_eq!(input_start(2, 143), (0, 2));
+        // Exactly a third left is enough.
+        assert_eq!(input_start(60, 90), (0, 60));
+    }
+
+    #[test]
+    fn a_prompt_that_eats_the_row_pushes_the_input_below_it() {
+        // #767: a 119-column prompt in a 143-column pane left 24.
+        assert_eq!(input_start(119, 143), (1, 0));
+        // One column short of a third.
+        assert_eq!(input_start(61, 90), (1, 0));
+        // A narrow pane falls back to the 20-column floor, not a third of it.
+        assert_eq!(input_start(25, 40), (1, 0));
+        assert_eq!(input_start(20, 40), (0, 20));
+        // A cursor parked in the last column, or past it, has no room at all.
+        assert_eq!(input_start(79, 80), (1, 0));
+        assert_eq!(input_start(80, 80), (1, 0));
+    }
+
+    #[test]
+    fn a_new_row_has_to_gain_something() {
+        // A 20-column pane: a `$ ` prompt leaves 18, under the floor, but a
+        // fresh row would give only two more.
+        assert_eq!(input_start(2, 20), (0, 2));
+        // Half the row is the break-even point.
+        assert_eq!(input_start(9, 20), (0, 9));
+        assert_eq!(input_start(10, 20), (1, 0));
+    }
+
+    /// Everything that reads the layout — the overlay's height, the caret's
+    /// row, clicks — sees the input a row down, with the prompt's row empty.
+    #[test]
+    fn input_below_the_prompt_is_laid_out_from_the_next_row() {
+        let start = input_start(119, 143);
+        let chars: Vec<char> = "git status".chars().collect();
+        let (positions, r, c) = input_char_positions(&chars, start, 143);
+        assert_eq!(positions[0], (1, 0, 1));
+        assert_eq!((r, c), (1, 10));
+        // Two rows tall — the prompt's and the input's — with the caret on
+        // the second, so an overflow shift keeps the input on screen.
+        assert_eq!(input_overlay_rows(&chars, 10, "", start, 143), (2, 1));
+        assert_eq!(input_overlay_rows(&[], 0, "", start, 143), (2, 1));
+        // Wrapping uses the whole width of the new row.
+        let long: Vec<char> = "a".repeat(150).chars().collect();
+        assert_eq!(input_overlay_rows(&long, 150, "", start, 143), (3, 2));
+        // A click on the prompt's row lands before the first character; on
+        // the input row it hits the character under it.
+        assert_eq!(
+            wrapped_click_index(&chars, start, 143, 130, 0, false),
+            Some(0)
+        );
+        assert_eq!(
+            wrapped_click_index(&chars, start, 143, 4, 1, false),
+            Some(4)
+        );
+        assert_eq!(
+            wrapped_click_index(&chars, start, 143, 60, 1, false),
+            Some(10)
+        );
+        assert_eq!(wrapped_click_index(&chars, start, 143, 0, 2, false), None);
     }
 
     #[test]

@@ -642,8 +642,12 @@ impl WatchHandle for RemoteWatch {
 impl Drop for RemoteWatch {
     fn drop(&mut self) {
         self.watches.remove(self.id);
+        // Posted, not called: the last handle is often let go on the UI
+        // thread — a watcher whose repository changed, an open that landed
+        // after its subscription moved on — and waiting there for the peer's
+        // acknowledgement froze every window for a round trip each time.
         if self.client.is_connected() {
-            let _ = self.client.call(ControlRequest::WatchClose { id: self.id });
+            let _ = self.client.post(ControlRequest::WatchClose { id: self.id });
         }
     }
 }

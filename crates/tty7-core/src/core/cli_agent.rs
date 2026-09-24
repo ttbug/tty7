@@ -30,10 +30,11 @@ pub enum CLIAgent {
     Crush,
     CommandCode,
     MiniMaxCode,
+    CodeBuddy,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 24] = [
+    pub const ALL: [CLIAgent; 25] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -58,6 +59,7 @@ impl CLIAgent {
         CLIAgent::Crush,
         CLIAgent::CommandCode,
         CLIAgent::MiniMaxCode,
+        CLIAgent::CodeBuddy,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -112,6 +114,11 @@ impl CLIAgent {
             // POSIX launcher may also exec node with the package entrypoint,
             // which is detected separately below.
             CLIAgent::MiniMaxCode => &["mcode", "minimax-code"],
+            // Tencent's terminal agent. The npm package installs `codebuddy`,
+            // `codebuddy-code` and the short `cbc`, all pointing at one script.
+            // `cbc` also names the COIN-OR solver; a solver run wearing the
+            // avatar until it exits is the cost of catching the short name.
+            CLIAgent::CodeBuddy => &["codebuddy", "codebuddy-code", "cbc"],
         }
     }
 
@@ -141,6 +148,7 @@ impl CLIAgent {
             CLIAgent::Crush => "crush",
             CLIAgent::CommandCode => "command-code",
             CLIAgent::MiniMaxCode => "minimax-code",
+            CLIAgent::CodeBuddy => "codebuddy",
         }
     }
 
@@ -175,6 +183,7 @@ impl CLIAgent {
             CLIAgent::Crush => "Crush",
             CLIAgent::CommandCode => "Command Code",
             CLIAgent::MiniMaxCode => "MiniMax Code",
+            CLIAgent::CodeBuddy => "CodeBuddy",
         }
     }
 
@@ -215,6 +224,7 @@ impl CLIAgent {
             // platform: the short shim is `cmd`, which is the Windows shell.
             CLIAgent::CommandCode => Some(format!("command-code{flags} --resume {session_id}")),
             CLIAgent::MiniMaxCode => Some(format!("mcode{flags} --session {session_id}")),
+            CLIAgent::CodeBuddy => Some(format!("codebuddy{flags} --resume {session_id}")),
             _ => None,
         }
     }
@@ -233,7 +243,7 @@ impl CLIAgent {
             CLIAgent::CommandCode => &["--no-session"],
             // Print mode still emits a session id in hooks when persistence
             // is disabled, but there is no saved conversation to reopen.
-            CLIAgent::QoderCLI => &["--no-session-persistence"],
+            CLIAgent::QoderCLI | CLIAgent::CodeBuddy => &["--no-session-persistence"],
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
@@ -256,6 +266,9 @@ impl CLIAgent {
             )),
             CLIAgent::CommandCode => Some(format!(
                 "command-code{flags} --resume {session_id} --fork-session"
+            )),
+            CLIAgent::CodeBuddy => Some(format!(
+                "codebuddy{flags} --resume {session_id} --fork-session"
             )),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
@@ -286,7 +299,8 @@ impl CLIAgent {
             | CLIAgent::Qwen
             | CLIAgent::Goose
             | CLIAgent::QoderCLI
-            | CLIAgent::CommandCode => Some("Fork Session"),
+            | CLIAgent::CommandCode
+            | CLIAgent::CodeBuddy => Some("Fork Session"),
             _ => None,
         }
     }
@@ -492,6 +506,22 @@ impl CLIAgent {
             // `--resume` option all select the session that the generated
             // command supplies itself.
             CLIAgent::MiniMaxCode => &["--session", "--continue", "-c", "--resume"],
+            // CodeBuddy keeps Claude Code's session flags. `--resume-session-at`
+            // cuts a resumed conversation short and only makes sense next to
+            // the resume it came with. Unlike Qoder, `-w` *is* `--worktree`
+            // here, and replaying either would branch off a fresh tree.
+            CLIAgent::CodeBuddy => &[
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "--session-id",
+                "--fork-session",
+                "--resume-session-at",
+                "--worktree",
+                "-w",
+                "--worktree-branch",
+            ],
             _ => &[],
         };
         let mut i = 0;
@@ -564,6 +594,8 @@ impl CLIAgent {
             // MiniMax Agent's official favicon uses this cyan field; the
             // terminal-bubble mark is drawn black for contrast.
             CLIAgent::MiniMaxCode => 0x65C7FF,
+            // The near-black field CodeBuddy's own app icon sits on.
+            CLIAgent::CodeBuddy => 0x1F1F1F,
         }
     }
 
@@ -613,6 +645,7 @@ impl CLIAgent {
             // Command Code's mark: a rounded-square frame around the ⌘ glyph.
             CLIAgent::CommandCode => "icons/agents/command-code.svg",
             CLIAgent::MiniMaxCode => "icons/agents/minimax-code.svg",
+            CLIAgent::CodeBuddy => "icons/agents/codebuddy.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -1117,6 +1150,35 @@ mod tests {
                 "on {launcher}"
             );
         }
+    }
+
+    /// All three of CodeBuddy's npm bins are node scripts pointing at one file,
+    /// so the pty sees node plus whichever shim name was typed.
+    #[test]
+    fn codebuddy_is_detected_through_each_of_its_binaries() {
+        for launcher in [
+            "codebuddy",
+            "codebuddy-code",
+            "cbc",
+            "/opt/homebrew/bin/codebuddy",
+            "/usr/local/bin/cbc",
+        ] {
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&["node", launcher])),
+                Some(CLIAgent::CodeBuddy),
+                "on {launcher}"
+            );
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&[launcher])),
+                Some(CLIAgent::CodeBuddy),
+                "on {launcher}"
+            );
+        }
+        assert_eq!(
+            CLIAgent::from_slug("codebuddy"),
+            Some(CLIAgent::CodeBuddy),
+            "hook events name the agent by this slug"
+        );
     }
 
     #[test]
@@ -1949,6 +2011,62 @@ mod tests {
             CLIAgent::Crush.fork_command("c-1", None),
             None,
             "Crush has no fork command"
+        );
+    }
+
+    #[test]
+    fn codebuddy_resume_and_fork_drop_stale_session_and_worktree_flags() {
+        assert_eq!(
+            CLIAgent::CodeBuddy.resume_command("cb-1", None).as_deref(),
+            Some("codebuddy --resume cb-1")
+        );
+        assert_eq!(
+            CLIAgent::CodeBuddy.fork_command("cb-1", None).as_deref(),
+            Some("codebuddy --resume cb-1 --fork-session")
+        );
+        for stale in [
+            vec!["--resume", "cb-0"],
+            vec!["-r", "cb-0"],
+            vec!["--continue"],
+            vec!["-c"],
+            vec!["--session-id", "cb-0"],
+            vec!["--resume", "cb-0", "--resume-session-at", "m-9"],
+            vec!["--worktree"],
+            vec!["--worktree", "old-tree", "--worktree-branch", "main"],
+            vec!["-w", "old-tree"],
+            vec!["--worktree=old-tree"],
+            vec!["--resume", "cb-0", "--fork-session"],
+        ] {
+            let mut launch = argv(&["codebuddy", "--model", "m-1"]);
+            launch.extend(argv(&stale));
+            launch.extend(argv(&["--permission-mode", "acceptEdits"]));
+            assert_eq!(
+                CLIAgent::CodeBuddy
+                    .resume_command("cb-2", Some(&launch))
+                    .as_deref(),
+                Some("codebuddy --model m-1 --permission-mode acceptEdits --resume cb-2"),
+                "launch argv: {launch:?}"
+            );
+            assert_eq!(
+                CLIAgent::CodeBuddy
+                    .fork_command("cb-2", Some(&launch))
+                    .as_deref(),
+                Some(
+                    "codebuddy --model m-1 --permission-mode acceptEdits --resume cb-2 --fork-session"
+                ),
+                "launch argv: {launch:?}"
+            );
+        }
+
+        let ephemeral = argv(&["codebuddy", "-p", "--no-session-persistence"]);
+        assert_eq!(
+            CLIAgent::CodeBuddy.resume_command("cb-1", Some(&ephemeral)),
+            None,
+            "nothing was saved, so there is nothing to reopen"
+        );
+        assert_eq!(
+            CLIAgent::CodeBuddy.fork_command("cb-1", Some(&ephemeral)),
+            None
         );
     }
 

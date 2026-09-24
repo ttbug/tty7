@@ -462,6 +462,36 @@ impl WindowViews {
             .collect()
     }
 
+    /// The workspaces `SelectWorkspace1`…`9`, the Workspaces menu and the
+    /// switcher number, in the order the numbers keep: the order this client
+    /// first had each one (#760). The list is append-only apart from
+    /// deletions, so a number stays with its workspace however often it is
+    /// switched to, closed or reopened — the MRU order it used to follow
+    /// handed slot 1 to whichever one was used last.
+    ///
+    /// Synced references are left out: a machine's listing mirrored at
+    /// connect time is not a workspace this client has had, and letting it in
+    /// would hand the next nine slots to whatever another client made there.
+    /// Opening one is what [`WindowViews::mark_claimed`] numbers it for.
+    pub fn numbered(&self) -> impl Iterator<Item = &WindowView> {
+        self.views.iter().filter(|w| !w.synced)
+    }
+
+    /// The entry for `id` stops being a synced reference and becomes this
+    /// client's own. A synced entry is moved to the end first, so it takes
+    /// the next free number rather than slotting in among — and shifting —
+    /// the ones already handed out.
+    pub fn mark_claimed(&mut self, id: WorkspaceId) {
+        let Some(at) = self.views.iter().position(|w| w.id == id) else {
+            return;
+        };
+        if self.views[at].synced {
+            let mut view = self.views.remove(at);
+            view.synced = false;
+            self.views.push(view);
+        }
+    }
+
     pub fn open_views(&self) -> impl Iterator<Item = &WindowView> {
         self.views.iter().filter(|w| w.open)
     }
@@ -1075,5 +1105,61 @@ mod tests {
             views: vec![open_one, detached],
         };
         assert_eq!(all.workspace_to_restore(), Some(open_id));
+    }
+
+    fn numbers(views: &WindowViews) -> Vec<WorkspaceId> {
+        views.numbered().map(|w| w.id).collect()
+    }
+
+    #[test]
+    fn workspace_numbers_do_not_follow_use() {
+        let (a, b, c) = (view(), view(), view());
+        let (a_id, b_id, c_id) = (a.id, b.id, c.id);
+        let mut views = WindowViews {
+            views: vec![a, b, c],
+            ..WindowViews::default()
+        };
+        // Using the third one, closing the first: the MRU order the numbers
+        // used to follow would now be c, b, a (#760).
+        views.get_mut(c_id).unwrap().last_active = u64::MAX;
+        views.get_mut(a_id).unwrap().open = false;
+        views.active = Some(c_id);
+        assert_eq!(numbers(&views), vec![a_id, b_id, c_id]);
+    }
+
+    #[test]
+    fn a_synced_reference_takes_no_number_until_it_is_opened() {
+        let a = view();
+        let mut synced = view();
+        synced.synced = true;
+        synced.open = false;
+        let b = view();
+        let (a_id, s_id, b_id) = (a.id, synced.id, b.id);
+        let mut views = WindowViews {
+            views: vec![a, synced, b],
+            ..WindowViews::default()
+        };
+        assert_eq!(numbers(&views), vec![a_id, b_id]);
+
+        // Opened, it takes the next number instead of pushing `b` along.
+        views.mark_claimed(s_id);
+        assert_eq!(numbers(&views), vec![a_id, b_id, s_id]);
+        assert!(!views.get(s_id).unwrap().synced);
+
+        // Claiming one that already has its number leaves it where it is.
+        views.mark_claimed(a_id);
+        assert_eq!(numbers(&views), vec![a_id, b_id, s_id]);
+    }
+
+    #[test]
+    fn deleting_a_workspace_closes_the_gap_behind_it() {
+        let (a, b, c) = (view(), view(), view());
+        let (a_id, b_id, c_id) = (a.id, b.id, c.id);
+        let mut views = WindowViews {
+            views: vec![a, b, c],
+            ..WindowViews::default()
+        };
+        views.views.retain(|w| w.id != b_id);
+        assert_eq!(numbers(&views), vec![a_id, c_id]);
     }
 }

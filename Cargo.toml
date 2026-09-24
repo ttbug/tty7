@@ -222,7 +222,10 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 # `set_dock_icon_for_bare_binary` in main.rs.
 # NSUserNotification is the click-to-reveal notification path — see
 # `terminal::remote::macos_notify` for why it is driven directly.
-objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSUserNotification"] }
+# NSUserDefaults (with NSDictionary / NSValue for the domain it takes) pins
+# `AppleFontSmoothing` for this process when `font_thicken` is off — see
+# `apply_font_thicken` in main.rs.
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSString", "NSUserDefaults", "NSUserNotification", "NSValue"] }
 
 # Dictionary-based Chinese word segmentation for double-click selection
 # (`terminal::smart_select`), as a *fallback* where the OS has no tokenizer of
@@ -276,7 +279,7 @@ edition = "2024"
 # they must never drift apart. This is the line a release bump edits (and the
 # one nightly's `awk '/^version = /'` stamps: it is the first such line in the
 # file, since the package entries above are all `version.workspace = true`).
-version = "26.9.2"
+version = "26.9.3"
 
 [workspace.dependencies]
 # Our fork's `tty7` branch carries the local customizations tty7 relies on:

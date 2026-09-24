@@ -278,8 +278,8 @@ impl Tty7App {
             .items_center()
             .gap(px(8.))
             .px(px(4.))
-            .py(px(3.))
-            .rounded(px(5.))
+            .py(px(5.))
+            .rounded(crate::ui::rounding::ROW_RADIUS)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .on_click(cx.listener(move |this, _, window, cx| {

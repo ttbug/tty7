@@ -16,6 +16,10 @@ use crate::host::{
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(100);
 
+/// How often a directory on a WSL distro's share is re-read, since nothing
+/// there says when it changed (#942).
+const WSL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// What every git we spawn runs with, on top of what `git_output_with_env`
 /// already sets: nothing may stop and ask a human anything.
 ///
@@ -369,23 +373,66 @@ impl Drop for LocalWatch {
 
 struct LocalWatchInner {
     watcher: notify::RecommendedWatcher,
+    /// The directories no change notification ever arrives for, re-read on a
+    /// timer instead. Made the first time one is watched: most sessions never
+    /// open a WSL tree, and an idle poller is still a thread.
+    poller: Option<notify::PollWatcher>,
+    handler: RawHandler,
     dirs: Arc<Mutex<WatchedDirs>>,
+}
+
+type RawHandler = Arc<dyn Fn(notify::Result<notify::Event>) + Send + Sync>;
+
+/// Whether `dir` is on a WSL distro's `\\wsl$` (or `\\wsl.localhost`) share.
+///
+/// The share's redirector takes a `ReadDirectoryChangesW` and then never
+/// reports anything, so a watch there looks healthy and is deaf: a file the
+/// shell in the distro removes stays in the tree for good (#942). Nor does it
+/// keep an NTFS alternate data stream as one: `Zone.Identifier` lands as a
+/// file of its own named `name:Zone.Identifier`.
+pub fn is_wsl_share(dir: &Path) -> bool {
+    let s = dir.to_string_lossy().to_ascii_lowercase();
+    let s = match s.strip_prefix(r"\\?\unc\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s,
+    };
+    s.starts_with(r"\\wsl$\") || s.starts_with(r"\\wsl.localhost\")
+}
+
+impl LocalWatchInner {
+    fn watcher_for(&mut self, dir: &Path) -> &mut dyn Watcher {
+        if !is_wsl_share(dir) {
+            return &mut self.watcher;
+        }
+        if self.poller.is_none() {
+            let handler = Arc::clone(&self.handler);
+            let config = notify::Config::default().with_poll_interval(WSL_POLL_INTERVAL);
+            match notify::PollWatcher::new(move |res| handler(res), config) {
+                Ok(poller) => self.poller = Some(poller),
+                Err(e) => log::warn!("watch: no poller for {}: {e}", dir.display()),
+            }
+        }
+        match &mut self.poller {
+            Some(poller) => poller,
+            None => &mut self.watcher,
+        }
+    }
 }
 
 impl WatchHandle for LocalWatch {
     fn set_dirs(&self, dirs: &[PathBuf]) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let want: HashSet<PathBuf> = dirs.iter().cloned().collect();
-        let LocalWatchInner { watcher, dirs } = &mut *inner;
+        let dirs = Arc::clone(&inner.dirs);
         let mut set = dirs.lock().unwrap_or_else(|e| e.into_inner());
 
         for gone in set.given.difference(&want) {
-            let _ = watcher.unwatch(gone);
+            let _ = inner.watcher_for(gone).unwatch(gone);
         }
         let added: Vec<PathBuf> = want.difference(&set.given).cloned().collect();
         set.by_canonical.clear();
         for d in &added {
-            let _ = watcher.watch(d, RecursiveMode::NonRecursive);
+            let _ = inner.watcher_for(d).watch(d, RecursiveMode::NonRecursive);
         }
         for d in &want {
             let canon = fs::canonicalize(d).unwrap_or_else(|_| d.clone());
@@ -402,19 +449,27 @@ fn local_watch(dirs: &[PathBuf], gitignore: Arc<Mutex<GitignoreChain>>) -> io::R
     let (batch_tx, batch_rx) = smol::channel::unbounded::<Vec<PathBuf>>();
     let watched: Arc<Mutex<WatchedDirs>> = Arc::new(Mutex::new(WatchedDirs::default()));
 
-    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    // Shared by the notifying watcher and the poller, so a batch coalesces
+    // events from both the same way.
+    let handler: RawHandler = Arc::new(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res
             && !ev.paths.is_empty()
             && crate::host::is_content_change(&ev.kind)
         {
             let _ = raw_tx.send(ev.paths);
         }
+    });
+    let watcher = notify::recommended_watcher({
+        let handler = Arc::clone(&handler);
+        move |res| handler(res)
     })
     .map_err(notify_to_io)?;
 
     let handle = LocalWatch {
         inner: Mutex::new(LocalWatchInner {
             watcher,
+            poller: None,
+            handler,
             dirs: Arc::clone(&watched),
         }),
         batch_tx: batch_tx.clone(),
@@ -523,6 +578,28 @@ mod tests {
     }
 
     crate::host_conformance_suite!(local, sandbox);
+
+    #[test]
+    fn wsl_shares_are_polled_and_nothing_else_is() {
+        for dir in [
+            r"\\wsl$\Ubuntu\home\me",
+            r"\\WSL$\Ubuntu",
+            r"\\wsl.localhost\Ubuntu-24.04\mnt\c",
+            r"\\?\UNC\wsl$\Ubuntu\home\me",
+            r"\\?\UNC\wsl.localhost\Ubuntu\home",
+        ] {
+            assert!(is_wsl_share(Path::new(dir)), "{dir}");
+        }
+        for dir in [
+            r"C:\Users\me",
+            r"\\server\share\wsl$\x",
+            r"\\wslhost\share",
+            r"\\?\C:\Users\me",
+            "/home/me",
+        ] {
+            assert!(!is_wsl_share(Path::new(dir)), "{dir}");
+        }
+    }
 
     #[test]
     fn sort_matches_the_file_trees_order() {

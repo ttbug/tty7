@@ -13,7 +13,10 @@ impl<T: Styled + Sized> RoundedCorners for T {}
 
 pub(crate) const TRACK_RADIUS: Pixels = px(8.);
 
-pub(crate) const CARD_RADIUS: Pixels = px(6.);
+/// Inset cards, interactive rows, and floating panels share the A style scale.
+pub(crate) const CARD_RADIUS: Pixels = px(10.);
+pub(crate) const ROW_RADIUS: Pixels = px(7.);
+pub(crate) const POPOVER_RADIUS: Pixels = px(10.);
 
 pub(crate) const HAIRLINE: Pixels = px(1.);
 

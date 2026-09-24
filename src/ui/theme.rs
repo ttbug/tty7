@@ -1,5 +1,5 @@
 use gpui::{
-    App, Background, Hsla, Menu, MenuItem, OsAction, Pixels, Point, SystemMenuType, Window,
+    App, Background, Hsla, Menu, MenuItem, OsAction, Pixels, Point, Styled, SystemMenuType, Window,
     WindowBackgroundAppearance, linear_color_stop, linear_gradient, point, px, rgb,
 };
 use gpui_component::scroll::ScrollbarShow;
@@ -912,6 +912,19 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     if let Some(window) = window.as_deref_mut() {
         window.set_traffic_light_position(traffic_light_position());
     }
+}
+
+/// Shared opaque floating surface. In-window GPUI layers cannot blur the
+/// terminal beneath them, so depth comes from the edge and shadow instead.
+pub(crate) fn floating_surface<T: Styled>(element: T, cx: &App) -> T {
+    let theme = cx.theme();
+    element
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
+        .border_1()
+        .border_color(theme.border.opacity(0.65))
+        .rounded(crate::ui::rounding::POPOVER_RADIUS)
+        .shadow_xl()
 }
 
 /// On-state shares the accent role with sliders and primary actions.

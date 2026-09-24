@@ -301,7 +301,9 @@ impl Tty7App {
             status.upstream.as_deref(),
             status.ahead_behind,
             unpushable.is_none(),
-        ) {
+        )
+        .filter(|_| status.upstream.is_some())
+        {
             notes.push(branch_note(&text, muted, &mono));
         }
 
@@ -313,7 +315,7 @@ impl Tty7App {
             // sync tile at the end plus 2px of air. The branch trigger beside
             // it is the same 24, so the row has one interior height and the
             // type sits inside it rather than setting it.
-            .h(px(28.))
+            .min_h(rems(28. / 16.))
             .pl(px(CONTENT_INSET))
             .pr(px(crate::ui::app::tile_trailing_inset_sm()))
             .child(
@@ -347,7 +349,7 @@ impl Tty7App {
             // branch name is wider than the row, and what got pushed off the
             // end was the sync tile: gone entirely, with no way to reach it.
             .child(
-                div().flex_1().min_w(px(0.)).child(
+                div().flex_1().min_w(rems(3.)).child(
                     Button::new("scm-branch")
                         .ghost()
                         .small()
@@ -368,7 +370,7 @@ impl Tty7App {
                                 .child(head_label(&status.head)),
                         )
                         .w_full()
-                        .h(px(24.))
+                        .h(rems(24. / 16.))
                         .rounded(px(5.))
                         .text_color(fg)
                         .when(detached, |s| s.font_family(mono.clone()))
@@ -1339,7 +1341,7 @@ impl Tty7App {
             .px(px(ROW_INSET))
             .py(px(3.))
             .text_size(rems(META))
-            .text_color(cx.theme().muted_foreground.opacity(0.75))
+            .text_color(cx.theme().muted_foreground)
             .child(text)
             .into_any_element()
     }
@@ -1363,7 +1365,7 @@ impl Tty7App {
             .relative()
             .items_center()
             .gap(px(8.))
-            .h(px(ROW_H))
+            .min_h(rems(ROW_H / 16.))
             .px(px(ROW_INSET))
             .rounded(px(5.))
             .cursor_pointer()
@@ -1404,7 +1406,7 @@ impl Tty7App {
                     .flex_none()
                     .text_size(rems(META_MONO))
                     .font_family(mono)
-                    .text_color(cx.theme().muted_foreground.opacity(0.75))
+                    .text_color(cx.theme().muted_foreground)
                     .child(count.to_string()),
             )
             .child(actions)

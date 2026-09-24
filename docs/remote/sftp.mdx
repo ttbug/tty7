@@ -13,9 +13,12 @@ second login, no second password.
 
 ## Browsing
 
-The panel opens on the remote home directory. **Go to Shell Directory** in the
-overflow menu jumps it to wherever the pane's shell currently is, which is
-usually where you actually want to be.
+The panel opens wherever the pane's shell currently is. If tty7 cannot tell
+(the remote shell does not report its directory), it opens on the last folder
+you browsed in that pane, or on the remote home directory the first time.
+Switching between panes with the panel open brings each pane back to the folder
+you left it on. **Go to Shell Directory** in the overflow menu jumps back to the
+shell's directory at any time.
 
 Right-click a row for **Edit** (**Open** on a directory), **Download**,
 **Follow Symlink**, **Rename**, **chmod…**, and delete. The overflow menu adds

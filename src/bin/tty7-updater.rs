@@ -3957,6 +3957,59 @@ mod windows {
         }
 
         #[test]
+        fn portable_replacement_keeps_the_portable_data_folder() {
+            // A portable install that opted in keeps its whole config
+            // directory in `data\` beside the executables. The updater
+            // only moves its managed roots, so the folder must never become
+            // one: it would be moved into the backup and deleted with it.
+            let data_dir = tty7_core::core::config::PORTABLE_DATA_DIR;
+            assert!(
+                !PORTABLE_MANAGED_ROOTS
+                    .iter()
+                    .any(|root| root.eq_ignore_ascii_case(data_dir)),
+                "the portable data folder must not be a managed root"
+            );
+
+            let install = tempfile::tempdir().unwrap();
+            let payload = tempfile::tempdir().unwrap();
+            fs::write(install.path().join("tty7-app.exe"), b"old app").unwrap();
+            fs::write(
+                install.path().join(PORTABLE_MARKER),
+                PORTABLE_MARKER_CONTENT,
+            )
+            .unwrap();
+            let data = install.path().join(data_dir);
+            fs::create_dir_all(data.join("scrollback")).unwrap();
+            fs::write(data.join("config.json"), b"{\"font_size\": 20}").unwrap();
+            fs::write(data.join("scrollback/1.bin"), b"history").unwrap();
+            fs::write(payload.path().join("tty7-app.exe"), b"new app").unwrap();
+            fs::write(
+                payload.path().join(PORTABLE_MARKER),
+                PORTABLE_MARKER_CONTENT,
+            )
+            .unwrap();
+
+            replace_portable_and_relaunch(
+                install.path(),
+                payload.path(),
+                |_| Ok(()),
+                |_| panic!("the previous version must not relaunch after success"),
+                &|_| {},
+            )
+            .unwrap();
+
+            assert_eq!(
+                fs::read(install.path().join("tty7-app.exe")).unwrap(),
+                b"new app"
+            );
+            assert_eq!(
+                fs::read(data.join("config.json")).unwrap(),
+                b"{\"font_size\": 20}"
+            );
+            assert_eq!(fs::read(data.join("scrollback/1.bin")).unwrap(), b"history");
+        }
+
+        #[test]
         fn a_backup_carries_the_incomplete_marker_exactly_while_files_move() {
             let install = tempfile::tempdir().unwrap();
             let payload = tempfile::tempdir().unwrap();

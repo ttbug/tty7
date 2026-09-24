@@ -85,6 +85,10 @@ impl TabCode {
     pub(crate) fn active_file(&self) -> Option<&OpenFile> {
         self.files.get(self.active)
     }
+
+    fn active_file_mut(&mut self) -> Option<&mut OpenFile> {
+        self.files.get_mut(self.active)
+    }
 }
 
 pub(crate) struct EditorPanelState {
@@ -520,13 +524,17 @@ impl Tty7App {
         let Some((_, line, column)) = self.editor.pending_cursor.take() else {
             return;
         };
-        let Some(file) = self.tab_code().and_then(|c| {
+        let Some(file) = self.tab_code_mut().and_then(|c| {
             c.files
-                .iter()
+                .iter_mut()
                 .find(|f| f.host.id() == host && f.path == *opened)
         }) else {
             return;
         };
+        // A line to land on is a place in the source. A Markdown file that
+        // would otherwise open rendered (the remembered preview) opens as
+        // text here, or the cursor would be placed somewhere nobody can see.
+        file.preview = false;
         let input = file.input.clone();
         // The grid counts from one and `Position` counts from zero, and a
         // compiler that says "line 1" means the first line either way.
@@ -712,6 +720,13 @@ impl Tty7App {
             return;
         }
         let language = language_for_path(&path);
+        let (wrap, preview) = {
+            let cfg = cx.global::<crate::core::config::Config>();
+            (
+                cfg.editor_soft_wrap,
+                cfg.editor_markdown_preview && language == "markdown",
+            )
+        };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -724,7 +739,7 @@ impl Tty7App {
                 .searchable(true)
                 .replaceable(true)
                 .folding(true)
-                .soft_wrap(false)
+                .soft_wrap(wrap)
                 .default_value(text)
         });
         let sub = cx.subscribe_in(&input, window, {
@@ -766,8 +781,8 @@ impl Tty7App {
                 save_then_close: false,
                 reload_seq: 0,
                 conflict: false,
-                preview: false,
-                wrap: false,
+                preview,
+                wrap,
                 preview_scroll: gpui::ScrollHandle::new(),
                 _sub: sub,
                 _observe: observe,
@@ -832,6 +847,46 @@ impl Tty7App {
         if let Some(f) = self.tab_code().and_then(|c| c.active_file()) {
             f.input.update(cx, |input, cx| input.focus(window, cx));
         }
+    }
+
+    /// The status bar's Preview / Edit button, and `ToggleDocumentPreview`.
+    /// Acts on the active tab's open file, and only when that file is
+    /// Markdown and the code panel is on screen — anything else has no
+    /// rendered form to switch to. The new state is remembered for the next
+    /// Markdown file opened.
+    pub(crate) fn toggle_document_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.code_panel_visible() {
+            return;
+        }
+        let Some(f) = self.tab_code_mut().and_then(|c| c.active_file_mut()) else {
+            return;
+        };
+        if language_for_path(&f.path) != "markdown" {
+            return;
+        }
+        f.preview = !f.preview;
+        let preview = f.preview;
+        self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
+        cx.notify();
+    }
+
+    /// The status bar's Wrap button, and `ToggleDocumentWrap`. Same reach as
+    /// [`Self::toggle_document_preview`], for any file; the new state becomes
+    /// what the next file opens with.
+    pub(crate) fn toggle_document_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.code_panel_visible() {
+            return;
+        }
+        let Some(f) = self.tab_code_mut().and_then(|c| c.active_file_mut()) else {
+            return;
+        };
+        f.wrap = !f.wrap;
+        let wrap = f.wrap;
+        f.input.clone().update(cx, |st, cx| {
+            st.set_soft_wrap(wrap, window, cx);
+        });
+        self.update_config(cx, |cfg| cfg.editor_soft_wrap = wrap);
+        cx.notify();
     }
 
     pub(crate) fn editor_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
@@ -1425,15 +1480,7 @@ impl Tty7App {
                         })
                         .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
                         .xsmall()
-                        .on_click(cx.listener(|this, _, _w, cx| {
-                            if let Some(code) = this.tab_code_mut() {
-                                let ix = code.active;
-                                if let Some(f) = code.files.get_mut(ix) {
-                                    f.preview = !f.preview;
-                                    cx.notify();
-                                }
-                            }
-                        })),
+                        .on_click(cx.listener(|this, _, _w, cx| this.toggle_document_preview(cx))),
                 )
             })
             .when_some(wrap, |this, wrap| {
@@ -1446,19 +1493,11 @@ impl Tty7App {
                         })
                         .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
                         .xsmall()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            let Some(code) = this.tab_code_mut() else {
-                                return;
-                            };
-                            let ix = code.active;
-                            if let Some(f) = code.files.get_mut(ix) {
-                                f.wrap = !f.wrap;
-                                let wrap = f.wrap;
-                                f.input.clone().update(cx, |st, cx| {
-                                    st.set_soft_wrap(wrap, window, cx);
-                                });
-                            }
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.toggle_document_wrap(window, cx)
+                            }),
+                        ),
                 )
             })
             .when_some(cursor, |this, t| this.child(div().child(t)))

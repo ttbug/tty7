@@ -29,7 +29,7 @@ const MAX_DEPTH: usize = 64;
 /// `write_file` puts the whole file in a single control frame, alongside the
 /// JSON naming the path, and the frame as a whole has to fit in `MAX_FRAME`.
 /// The megabyte of slack is for that JSON and the framing around it.
-const REMOTE_FILE_MAX: u64 = (crate::daemon::protocol::MAX_FRAME - 1024 * 1024) as u64;
+pub(crate) const REMOTE_FILE_MAX: u64 = (crate::daemon::protocol::MAX_FRAME - 1024 * 1024) as u64;
 
 /// How many working names beside a destination are tried before a replacement
 /// gives up.
@@ -266,6 +266,17 @@ fn copy_file(host: &dyn Host, src: &Path, dest: &Path, len: u64) -> io::Result<(
     // One syscall path locally, and the one that keeps the mode bits:
     // `write_file` would drop the executable bit off every script copied in.
     if host.id().is_local() {
+        // Except onto a WSL share: `fs::copy` is `CopyFileEx` on Windows, which
+        // brings a downloaded file's `Zone.Identifier` stream along, and the
+        // share keeps that as a second file beside the first (#942). The
+        // distro has no use for the mark, and Linux mode bits are the share's
+        // to pick anyway, so only the contents go.
+        if tty7_core::host::local::is_wsl_share(dest) {
+            let mut from = std::fs::File::open(src)?;
+            let mut to = std::fs::File::create(dest)?;
+            io::copy(&mut from, &mut to)?;
+            return Ok(());
+        }
         std::fs::copy(src, dest)?;
         return Ok(());
     }
@@ -278,6 +289,79 @@ fn copy_file(host: &dyn Host, src: &Path, dest: &Path, len: u64) -> io::Result<(
     let bytes = std::fs::read(src)?;
     host.write_file(dest, &bytes)?;
     Ok(())
+}
+
+/// Fetch `src` from `host` into a new file in the local directory `dir`.
+///
+/// The counterpart of a drop, for the direction a drop cannot go: the tree's
+/// rows name files on the host, and this is how one comes back to this
+/// machine. Named the way the SFTP panel's Download names things — the remote
+/// name, numbered rather than written over when it is taken.
+///
+/// `max` is the ceiling on the file; over it, nothing is transferred. For a
+/// remote host that is [`REMOTE_FILE_MAX`], since `read_file` answers in a
+/// single control frame just as `write_file` asks in one.
+pub(crate) fn download_file(
+    host: &dyn Host,
+    src: &Path,
+    dir: &Path,
+    max: u64,
+) -> io::Result<PathBuf> {
+    use std::io::Write as _;
+
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // A remote name is whatever the far side's filesystem allows, which can be
+    // a path on this one.
+    if !crate::daemon::ssh::sftp::safe_local_name(&name) {
+        return Err(io::Error::other(t_fmt(
+            L10nKey::SftpErrorUnsafeRemoteName,
+            &[("name", &format!("{name:?}"))],
+        )));
+    }
+    let meta = host.stat(src)?;
+    if meta.is_dir {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory));
+    }
+    // Asked up front so the answer is the limit, not whatever the far end
+    // says when `read_file` refuses — and so nothing crosses the wire first.
+    if meta.len > max {
+        return Err(io::Error::other(t_fmt(
+            L10nKey::FileTreeDownloadTooLarge,
+            &[("limit", &(max / (1024 * 1024)).to_string())],
+        )));
+    }
+    let bytes = host.read_file(src, max)?;
+    std::fs::create_dir_all(dir)?;
+    // The name is chosen only once the bytes are here, and taken with
+    // `create_new`: two downloads of the same file racing each other each get
+    // their own number instead of one landing on the other.
+    for _ in 0..WORKING_NAME_TRIES {
+        let Some(dest) = crate::ui::sftp::free_local_path(dir, &name, &Default::default()) else {
+            break;
+        };
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = file.write_all(&bytes) {
+            drop(file);
+            let _ = std::fs::remove_file(&dest);
+            return Err(e);
+        }
+        return Ok(dest);
+    }
+    Err(io::Error::other(t_fmt(
+        L10nKey::SftpErrorNoFreeLocalName,
+        &[("name", &name)],
+    )))
 }
 
 #[cfg(test)]
@@ -599,5 +683,48 @@ mod tests {
 
         assert_eq!(report.errors.len(), 1, "the walk has to stop and say so");
         assert!(report.copied.is_empty());
+    }
+
+    #[test]
+    fn a_download_lands_under_its_name_and_numbers_a_second_copy() {
+        let root = scratch("download");
+        let src = root.join("far/report.log");
+        write(&src, "hello");
+        let into = root.join("Downloads");
+
+        let first = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap();
+        let second = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap();
+
+        assert_eq!(first, into.join("report.log"));
+        assert_eq!(second, into.join("report (2).log"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "hello");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "hello");
+    }
+
+    #[test]
+    fn a_download_over_the_limit_says_so_and_writes_nothing() {
+        let root = scratch("download-big");
+        let src = root.join("far/big.bin");
+        write(&src, &"x".repeat(4096));
+        let into = root.join("Downloads");
+
+        let err = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            t_fmt(L10nKey::FileTreeDownloadTooLarge, &[("limit", "0")])
+        );
+        assert!(!into.join("big.bin").exists());
+    }
+
+    #[test]
+    fn a_folder_is_not_downloaded_as_a_file() {
+        let root = scratch("download-dir");
+        let src = root.join("far/pkg");
+        std::fs::create_dir_all(&src).unwrap();
+        let into = root.join("Downloads");
+
+        assert!(download_file(&*LocalHost::shared(), &src, &into, 1024).is_err());
+        assert!(!into.join("pkg").exists());
     }
 }

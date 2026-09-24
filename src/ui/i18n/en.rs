@@ -133,6 +133,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsFontLigaturesDesc => {
             "Enable common programming ligature features for terminal text."
         }
+        L10nKey::SettingsFontThicken => "Thicken strokes",
+        L10nKey::SettingsFontThickenDesc => {
+            "macOS font smoothing: draws text a little bolder, light text most. Takes effect after restarting tty7."
+        }
         L10nKey::SettingsCursor => "Cursor",
         L10nKey::SettingsCursorShape => "Cursor shape",
         L10nKey::SettingsCursorShapeDesc => "How the terminal cursor is drawn.",
@@ -797,6 +801,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentCrush => "Crush",
         L10nKey::SettingsAgentCommandCode => "Command Code",
         L10nKey::SettingsAgentMiniMaxCode => "MiniMax Code",
+        L10nKey::SettingsAgentCodeBuddy => "CodeBuddy",
+        L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -842,6 +848,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",
         L10nKey::SettingsSearchFontLigaturesKeywords => "typography glyph fira",
+        L10nKey::SettingsSearchFontThickenKeywords => {
+            "font smoothing thicken bold weight thin dilation antialiasing AppleFontSmoothing"
+        }
         L10nKey::SettingsSearchFontSizeKeywords => "typography text bigger smaller zoom",
         L10nKey::SettingsSearchForwardSshLoopbackLinksKeywords => {
             "ssh remote port tunnel localhost forward links ports autoforward detect"
@@ -899,6 +908,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchMiniMaxCodeKeywords => {
             "agent integration hooks install minimax code minimax-code mcode"
+        }
+        L10nKey::SettingsSearchCodeBuddyKeywords => {
+            "agent integration hooks install codebuddy codebuddy-code cbc tencent"
+        }
+        L10nKey::SettingsSearchCursorCliKeywords => {
+            "agent integration hooks install cursor cursor-agent"
         }
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
@@ -1043,6 +1058,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeDeleteFailed => "Could not delete {name}",
         L10nKey::FileTreeCreateFailed => "Could not create {name}",
         L10nKey::FileTreeRenameFailed => "Could not rename {name}",
+        L10nKey::FileTreeDownloadFailed => "Could not download {name}",
+        L10nKey::FileTreeDownloaded => "Downloaded to {path}",
+        L10nKey::FileTreeDownloadTooLarge => {
+            "Larger than {limit} MB — fetch it with scp or rsync instead."
+        }
         L10nKey::FileTreeContextOpen => "Open",
         L10nKey::FileTreeContextCdHere => "cd Here",
         L10nKey::FileTreeContextInsertPath => "Insert Path in Terminal",
@@ -1093,8 +1113,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorFileTooLarge => "\"{path}\" is too large for the editor ({size} MB)",
         L10nKey::EditorBinaryFile => "\"{path}\" looks like a binary file",
         L10nKey::PanelInfoTitle => "Info",
-        L10nKey::PanelChangesTitle => "Source Control",
-        L10nKey::PanelScmTitle => "Source Control",
+        L10nKey::PanelChangesTitle => "Changes",
+        L10nKey::PanelScmTitle => "Changes",
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
@@ -1490,6 +1510,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSwapPanePrevious => "Swap Pane Previous",
         L10nKey::CmdNextTab => "Next Tab",
         L10nKey::CmdPreviousTab => "Previous Tab",
+        L10nKey::CmdRecentTabSwitcher => "Recent Tab Switcher",
+        L10nKey::CmdRecentTabSwitcherReverse => "Recent Tab Switcher (Reverse)",
         L10nKey::CmdCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::CmdCopySessionId => "Copy Session ID",
         L10nKey::CmdCopySessionIdSubtitle => "the coding agent's own session id",
@@ -1529,6 +1551,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdDocumentWidthThird => "Document: Third Width",
         L10nKey::CmdDocumentWidthHalf => "Document: Half Width",
         L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",
+        L10nKey::CmdToggleDocumentPreview => "Document: Toggle Markdown Preview",
+        L10nKey::CmdToggleDocumentWrap => "Document: Toggle Word Wrap",
         L10nKey::CmdGitCommit => "Git: Commit",
         L10nKey::CmdGitStageAll => "Git: Stage All Changes",
         L10nKey::CmdGitUnstageAll => "Git: Unstage All Changes",

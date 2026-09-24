@@ -119,6 +119,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsItalicFontDesc => "斜体文字使用的字体；默认由主字体合成。",
         L10nKey::SettingsFontLigatures => "字体连字",
         L10nKey::SettingsFontLigaturesDesc => "为终端文字启用常见的编程连字特性。",
+        L10nKey::SettingsFontThicken => "笔画加粗",
+        L10nKey::SettingsFontThickenDesc => {
+            "macOS 字体平滑：文字画得稍粗，浅色文字最明显。重启 tty7 后生效。"
+        }
         L10nKey::SettingsCursor => "光标",
         L10nKey::SettingsCursorShape => "光标形状",
         L10nKey::SettingsCursorShapeDesc => "终端光标的绘制方式。",
@@ -704,6 +708,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCrush => "Crush",
         L10nKey::SettingsAgentCommandCode => "Command Code",
         L10nKey::SettingsAgentMiniMaxCode => "MiniMax Code",
+        L10nKey::SettingsAgentCodeBuddy => "CodeBuddy",
+        L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -770,6 +776,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchFontLigaturesKeywords => {
             "字体连字 连字 字形 typography ligatures glyph fira"
+        }
+        L10nKey::SettingsSearchFontThickenKeywords => {
+            "字体平滑 加粗 变细 字重 笔画 font smoothing thicken bold weight thin AppleFontSmoothing"
         }
         L10nKey::SettingsSearchFontSizeKeywords => {
             "字号 字体大小 文字 放大 缩小 typography font size bigger smaller zoom"
@@ -846,6 +855,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchMiniMaxCodeKeywords => {
             "MiniMax Code agent 集成 hook 安装 minimax-code mcode agent integration hooks install"
+        }
+        L10nKey::SettingsSearchCodeBuddyKeywords => {
+            "CodeBuddy 腾讯云代码助手 agent 集成 钩子 安装 codebuddy cbc tencent"
+        }
+        L10nKey::SettingsSearchCursorCliKeywords => {
+            "Cursor CLI agent 集成 钩子 安装 cursor cursor-agent"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"
@@ -996,6 +1011,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeDeleteFailed => "无法删除 {name}",
         L10nKey::FileTreeCreateFailed => "无法创建 {name}",
         L10nKey::FileTreeRenameFailed => "无法重命名 {name}",
+        L10nKey::FileTreeDownloadFailed => "无法下载 {name}",
+        L10nKey::FileTreeDownloaded => "已下载到 {path}",
+        L10nKey::FileTreeDownloadTooLarge => "超过 {limit} MB，请改用 scp 或 rsync 下载。",
         L10nKey::FileTreeContextOpen => "打开",
         L10nKey::FileTreeContextCdHere => "cd 到此处",
         L10nKey::FileTreeContextInsertPath => "在终端中插入路径",
@@ -1041,8 +1059,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorFileTooLarge => "“{path}”太大，无法在编辑器中打开（{size} MB）",
         L10nKey::EditorBinaryFile => "“{path}”看起来是二进制文件",
         L10nKey::PanelInfoTitle => "信息",
-        L10nKey::PanelChangesTitle => "源代码管理",
-        L10nKey::PanelScmTitle => "源代码管理",
+        L10nKey::PanelChangesTitle => "更改",
+        L10nKey::PanelScmTitle => "更改",
         L10nKey::PanelFilesTitle => "文件",
         L10nKey::PanelNoSession => "没有活动会话。",
         L10nKey::PanelNoSessionHint => "打开一个标签页以在此处查看其 shell、目录和进程。",
@@ -1399,6 +1417,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSwapPanePrevious => "与上一窗格交换",
         L10nKey::CmdNextTab => "下一标签页",
         L10nKey::CmdPreviousTab => "上一标签页",
+        L10nKey::CmdRecentTabSwitcher => "最近标签页切换器",
+        L10nKey::CmdRecentTabSwitcherReverse => "最近标签页切换器（反向）",
         L10nKey::CmdCopyWorkingDirectory => "复制工作目录",
         L10nKey::CmdCopySessionId => "复制会话 ID",
         L10nKey::CmdCopySessionIdSubtitle => "编码 agent 自身的会话 ID",
@@ -1439,6 +1459,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentWidthThird => "文档：三分之一宽",
         L10nKey::CmdDocumentWidthHalf => "文档：一半宽",
         L10nKey::CmdDocumentWidthTwoThirds => "文档：三分之二宽",
+        L10nKey::CmdToggleDocumentPreview => "文档：切换 Markdown 预览",
+        L10nKey::CmdToggleDocumentWrap => "文档：切换自动换行",
         L10nKey::CmdGitCommit => "Git：提交",
         L10nKey::CmdGitStageAll => "Git：暂存全部更改",
         L10nKey::CmdGitUnstageAll => "Git：取消暂存全部更改",

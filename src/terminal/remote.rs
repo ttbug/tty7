@@ -1293,32 +1293,26 @@ impl RemoteTerminal {
                                 command_cuts(&mut command_tok, &out_batch, &mut cuts);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
-                                    let mut term = term.lock();
-                                    if quit.load(Ordering::SeqCst) {
-                                        return;
-                                    }
-                                    let t1 = trace.then(std::time::Instant::now);
-                                    if cuts.is_empty() {
-                                        processor.advance(&mut *term, &out_batch);
-                                    } else {
-                                        let mut at = 0usize;
-                                        for (off, cut) in cuts {
-                                            processor.advance(&mut *term, &out_batch[at..off]);
-                                            at = off;
-                                            match cut {
-                                                ReaderCut::Parked(cut) => {
-                                                    parked_cursor.apply(&mut term, cut)
-                                                }
-                                                ReaderCut::Command(mark) => {
-                                                    command_cursor.apply(&mut term, mark)
-                                                }
+                                    let Some(waited) = feed_grid(
+                                        &term,
+                                        &mut processor,
+                                        &out_batch,
+                                        cuts,
+                                        &quit,
+                                        |term, cut| match cut {
+                                            ReaderCut::Parked(cut) => {
+                                                parked_cursor.apply(term, cut)
                                             }
-                                        }
-                                        processor.advance(&mut *term, &out_batch[at..]);
-                                    }
-                                    if let (Some(t0), Some(t1)) = (t0, t1) {
-                                        tr_lock_t += t1 - t0;
-                                        tr_adv_t += t1.elapsed();
+                                            ReaderCut::Command(mark) => {
+                                                command_cursor.apply(term, mark)
+                                            }
+                                        },
+                                    ) else {
+                                        return;
+                                    };
+                                    if let Some(t0) = t0 {
+                                        tr_lock_t += waited;
+                                        tr_adv_t += t0.elapsed() - waited;
                                     }
                                 }
                                 let mut notes = Vec::new();
@@ -1447,23 +1441,21 @@ impl RemoteTerminal {
                                 // comes back with the prompt's cursor.
                                 let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
-                                {
+                                let fed =
+                                    feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
+                                        if let ReaderCut::Command(mark) = cut {
+                                            command_cursor.apply(term, mark);
+                                        }
+                                    });
+                                if fed.is_none() {
+                                    return;
+                                }
+                                if processor.sync_timeout().sync_timeout().is_some() {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    let mut at = 0usize;
-                                    for (off, cut) in cuts {
-                                        processor.advance(&mut *term, &bytes[at..off]);
-                                        at = off;
-                                        if let ReaderCut::Command(mark) = cut {
-                                            command_cursor.apply(&mut term, mark);
-                                        }
-                                    }
-                                    processor.advance(&mut *term, &bytes[at..]);
-                                    if processor.sync_timeout().sync_timeout().is_some() {
-                                        processor.stop_sync(&mut *term);
-                                    }
+                                    processor.stop_sync(&mut *term);
                                 }
                                 mode_tok.feed(&bytes, |payload| {
                                     if let Some(mode) = payload.strip_prefix(b"133;V;") {
@@ -3301,6 +3293,109 @@ mod chunking_tests {
         let bytewise: Vec<&[u8]> = bytes.chunks(1).collect();
         assert_eq!(parse(&bytewise), whole, "a byte at a time");
     }
+
+    /// A batch several lock-holds long, colored and multi-byte so slices end
+    /// mid-sequence and mid-character.
+    fn long_batch() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut n = 0;
+        while bytes.len() < 3 * MAX_LOCKED_FEED + 777 {
+            bytes.extend_from_slice(format!("\x1b[3{}m行{n}\x1b[0m\r\n", n % 8).as_bytes());
+            n += 1;
+        }
+        bytes
+    }
+
+    fn fresh() -> Term<VoidListener> {
+        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        Term::new(config, &TermSize::new(COLS, ROWS), VoidListener)
+    }
+
+    /// Where the cursor stood at each cut, and the screen after the whole batch.
+    type Seen = (Vec<(i32, usize)>, Vec<String>);
+
+    fn screen(term: &Term<VoidListener>) -> Vec<String> {
+        let grid = term.grid();
+        (0..ROWS as i32)
+            .map(|line| {
+                (0..COLS)
+                    .map(|col| grid[Line(line)][Column(col)].c)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn cursor(term: &Term<VoidListener>) -> (i32, usize) {
+        let point = term.grid().cursor.point;
+        (point.line.0, point.column.0)
+    }
+
+    /// The reader lets go of the grid every `MAX_LOCKED_FEED` bytes, and not
+    /// one of those slices may show: the screen, and the state each cut acts
+    /// on, come out as if the batch had been parsed in one hold — including a
+    /// cut that lands exactly on a slice boundary.
+    #[test]
+    fn a_batch_fed_in_slices_parses_as_one() {
+        let bytes = long_batch();
+        let offsets = [
+            0,
+            5,
+            MAX_LOCKED_FEED,
+            MAX_LOCKED_FEED + 1,
+            2 * MAX_LOCKED_FEED + 9,
+            bytes.len(),
+        ];
+
+        let whole: Seen = {
+            let mut term = fresh();
+            let mut processor: ansi::Processor = ansi::Processor::new();
+            let mut at = 0;
+            let mut stops = Vec::new();
+            for &off in &offsets {
+                processor.advance(&mut term, &bytes[at..off]);
+                at = off;
+                stops.push(cursor(&term));
+            }
+            (stops, screen(&term))
+        };
+
+        let term = FairMutex::new(fresh());
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let cuts = offsets
+            .iter()
+            .map(|&off| (off, ReaderCut::Command(CommandMark::Finished)))
+            .collect();
+        let mut stops = Vec::new();
+        let fed = feed_grid(
+            &term,
+            &mut processor,
+            &bytes,
+            cuts,
+            &AtomicBool::new(false),
+            |term, _| stops.push(cursor(term)),
+        );
+        assert!(fed.is_some());
+        assert_eq!((stops, screen(&term.lock())), whole);
+    }
+
+    /// A reader retired while it waited for the grid writes nothing into it:
+    /// the grid belongs to its successor now.
+    #[test]
+    fn a_retired_reader_leaves_the_grid_alone() {
+        let term = FairMutex::new(fresh());
+        let before = screen(&term.lock());
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let fed = feed_grid(
+            &term,
+            &mut processor,
+            b"stale",
+            Vec::new(),
+            &AtomicBool::new(true),
+            |_, _| {},
+        );
+        assert!(fed.is_none());
+        assert_eq!(screen(&term.lock()), before);
+    }
 }
 
 /// A point in a batch of pty output where the reader stops advancing the
@@ -3324,6 +3419,68 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
         // after it.
         cuts.sort_by_key(|(off, _)| *off);
     }
+}
+
+/// How much output the reader parses per hold of the grid lock. Every UI-thread
+/// handler that touches the grid — a scroll, a selection drag, a keystroke —
+/// queues on this lock, and one UI thread serves every window, so a hold is how
+/// long all of them can stall. Alacritty's own reader lets go at the same size
+/// (`MAX_LOCKED_READ`).
+const MAX_LOCKED_FEED: usize = 64 * 1024;
+
+/// Parses `bytes` into the emulator, stopping at each of `cuts` for `on_cut` to
+/// act on the state the bytes before it left behind — and letting go of the
+/// grid every [`MAX_LOCKED_FEED`] bytes, so a waiting handler gets its turn
+/// between slices rather than after the whole batch. A relink replays up to
+/// 8 MB in one frame; parsed in one hold, that froze every window for as long
+/// as it took.
+///
+/// The lock is fair, so re-taking it queues behind whoever arrived meanwhile.
+/// vte keeps its own state across `advance` calls, so where a slice ends — mid
+/// escape sequence, mid UTF-8 — makes no difference to what is parsed.
+///
+/// Returns how long it spent waiting for the lock, or `None` if `quit` was
+/// raised while it waited: a retired reader must not write into a grid its
+/// successor now owns.
+fn feed_grid<T: EventListener>(
+    term: &FairMutex<Term<T>>,
+    processor: &mut ansi::Processor,
+    bytes: &[u8],
+    cuts: Vec<(usize, ReaderCut)>,
+    quit: &AtomicBool,
+    mut on_cut: impl FnMut(&mut Term<T>, ReaderCut),
+) -> Option<std::time::Duration> {
+    let mut waited = std::time::Duration::ZERO;
+    let mut lock = || {
+        let t = std::time::Instant::now();
+        let grid = term.lock();
+        waited += t.elapsed();
+        (!quit.load(Ordering::SeqCst)).then_some(grid)
+    };
+    let mut grid = lock()?;
+    let mut held = 0usize;
+    let mut at = 0usize;
+    let mut cuts = cuts.into_iter();
+    let mut next = cuts.next();
+    loop {
+        let stop = next.as_ref().map_or(bytes.len(), |(off, _)| *off);
+        while at < stop {
+            if held == MAX_LOCKED_FEED {
+                drop(grid);
+                grid = lock()?;
+                held = 0;
+            }
+            let end = stop.min(at + MAX_LOCKED_FEED - held);
+            processor.advance(&mut *grid, &bytes[at..end]);
+            held += end - at;
+            at = end;
+        }
+        let Some((_, cut)) = next else { break };
+        on_cut(&mut grid, cut);
+        next = cuts.next();
+    }
+    drop(grid);
+    Some(waited)
 }
 
 fn alacritty_cursor_style(style: ConfigCursorStyle) -> CursorStyle {

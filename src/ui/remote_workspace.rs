@@ -1214,7 +1214,7 @@ pub(crate) fn pane_workspace_for(
     workspace: WorkspaceId,
 ) -> Option<crate::terminal::PaneWorkspace> {
     let host = WorkspaceStore::remote_ref(cx, workspace)?;
-    let spec = remote_connect::spec_for(&host.target, cx)
+    let spec = remote_connect::public_spec_for(&host.target, cx)
         .ok()
         .map(|spec| Box::new(spec.without_secrets()));
     // Answered here because the terminal cannot ask the network itself: the

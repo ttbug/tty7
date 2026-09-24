@@ -531,10 +531,14 @@ impl Tty7App {
         if !self.scm.graph.expanded {
             // Folded, the section is one line — but it keeps the rule above it,
             // or it reads as the last row of the file list rather than as a
-            // section of its own.
+            // section of its own. It is also the last thing in the window, so
+            // it takes some air under it: flush against the bottom edge it
+            // sat in the window's rounded corner like a clipped row.
             return Some(
                 div()
                     .flex_none()
+                    .pt(px(2.))
+                    .pb(px(4.))
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(self.graph_header(repo, None, cx))

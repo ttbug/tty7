@@ -166,14 +166,10 @@ impl Tty7App {
 
         let card = v_flex()
             .occlude()
-            .w(px(420.))
-            .gap_3()
-            .p_4()
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .shadow_lg()
+            .w(px(440.))
+            .gap_4()
+            .p_5()
+            .map(|panel| crate::ui::theme::floating_surface(panel, cx))
             .child(
                 div()
                     .text_sm()

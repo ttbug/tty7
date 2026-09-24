@@ -729,11 +729,7 @@ impl Tty7App {
             .w(px(460.))
             .gap_2()
             .p_2()
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .shadow_lg()
+            .map(|panel| crate::ui::theme::floating_surface(panel, cx))
             .child(div().flex_1().text_sm().child(text.to_string()))
             .child(
                 Button::new(("ssh-banner-dismiss", ix))
@@ -787,18 +783,11 @@ impl Tty7App {
             .occlude()
             .track_focus(&self.ssh_prompt.focus_handle)
             .key_context("SshPrompt")
-            .w(px(420.))
-            .gap_3()
-            .p_4()
-            .bg(cx.theme().popover)
-            .border_1()
-            .rounded_lg()
-            .shadow_lg()
-            .border_color(if danger_sheet {
-                danger
-            } else {
-                cx.theme().border
-            })
+            .w(px(440.))
+            .gap_4()
+            .p_5()
+            .map(|panel| crate::ui::theme::floating_surface(panel, cx))
+            .when(danger_sheet, |panel| panel.border_color(danger))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     this.cancel_ssh_prompt(window, cx);

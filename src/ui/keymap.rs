@@ -370,8 +370,22 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("ResizePaneDown", ""),
         ("SwapPaneNext", ""),
         ("SwapPanePrev", ""),
+        // Ctrl+Tab opens the most-recently-used switcher (a quick tap lands
+        // on the tab you were just in); these step to the neighbouring tab
+        // in strip order with no popup (#867). ⌘⇧] / ⌘⇧[ is iTerm2's and
+        // Safari's chord. Off macOS Ctrl+Shift+] is FocusNextPane, so they
+        // take Ctrl+PgDn / Ctrl+PgUp, the chord GNOME Terminal, xfce4-terminal
+        // and every browser use for the same thing.
         ("NextTab", "ctrl-tab"),
         ("PrevTab", "ctrl-shift-tab"),
+        (
+            "SelectNextTab",
+            per_platform("secondary-shift-]", "ctrl-pagedown"),
+        ),
+        (
+            "SelectPrevTab",
+            per_platform("secondary-shift-[", "ctrl-pageup"),
+        ),
         ("ActivateTab1", per_platform("secondary-1", "alt-1")),
         ("ActivateTab2", per_platform("secondary-2", "alt-2")),
         ("ActivateTab3", per_platform("secondary-3", "alt-3")),
@@ -520,6 +534,10 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),
+        // Unbound for the same reason, and because the obvious chords belong
+        // to the editor that has the focus when you would reach for them.
+        ("ToggleDocumentPreview", ""),
+        ("ToggleDocumentWrap", ""),
         // Implemented, dispatchable, and until now unbindable: `set_binding`
         // only fills slots that exist here, so `"ShowRightPanelInfo": "ctrl-1"`
         // in config.json was dropped without a word, and the Keybindings page —
@@ -654,8 +672,20 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::TabsPanes,
             t(L10nKey::CmdSwapPanePrevious).to_string(),
         ),
-        "NextTab" => (CommandGroup::TabsPanes, t(L10nKey::CmdNextTab).to_string()),
+        // `NextTab` / `PrevTab` keep their names — `Config::keybindings` is
+        // keyed by them — but what they do is open the MRU switcher, so that
+        // is what the page calls them. "Next Tab" belongs to the action that
+        // actually goes to the next tab, the same one the palette runs.
+        "NextTab" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdRecentTabSwitcher).to_string(),
+        ),
         "PrevTab" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdRecentTabSwitcherReverse).to_string(),
+        ),
+        "SelectNextTab" => (CommandGroup::TabsPanes, t(L10nKey::CmdNextTab).to_string()),
+        "SelectPrevTab" => (
             CommandGroup::TabsPanes,
             t(L10nKey::CmdPreviousTab).to_string(),
         ),
@@ -720,6 +750,14 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "DocumentWidthTwoThirds" => (
             CommandGroup::View,
             t(L10nKey::CmdDocumentWidthTwoThirds).to_string(),
+        ),
+        "ToggleDocumentPreview" => (
+            CommandGroup::View,
+            t(L10nKey::CmdToggleDocumentPreview).to_string(),
+        ),
+        "ToggleDocumentWrap" => (
+            CommandGroup::View,
+            t(L10nKey::CmdToggleDocumentWrap).to_string(),
         ),
         "ShowRightPanelInfo" => (
             CommandGroup::View,
@@ -1018,8 +1056,11 @@ fn tmux_preset(prefix: &str) -> Vec<(String, String)> {
         ("ToggleMaximizePane", p("z")),
         ("FocusNextPane", p("o")),
         ("FocusPrevPane", p(";")),
-        ("NextTab", p("n")),
-        ("PrevTab", p("p")),
+        // tmux's `next-window` / `previous-window`: straight to the
+        // neighbour, no chooser. The MRU switcher it used to open never
+        // committed here — the modifier it waits on is not held (#867).
+        ("SelectNextTab", p("n")),
+        ("SelectPrevTab", p("p")),
         ("ActivateTab1", p("1")),
         ("ActivateTab2", p("2")),
         ("ActivateTab3", p("3")),
@@ -1340,6 +1381,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "SwapPanePrev" => KeyBinding::new(keystroke, SwapPanePrev, None),
         "NextTab" => KeyBinding::new(keystroke, NextTab, None),
         "PrevTab" => KeyBinding::new(keystroke, PrevTab, None),
+        "SelectNextTab" => KeyBinding::new(keystroke, SelectNextTab, None),
+        "SelectPrevTab" => KeyBinding::new(keystroke, SelectPrevTab, None),
         "ActivateTab1" => KeyBinding::new(keystroke, ActivateTab1, None),
         "ActivateTab2" => KeyBinding::new(keystroke, ActivateTab2, None),
         "ActivateTab3" => KeyBinding::new(keystroke, ActivateTab3, None),
@@ -1412,6 +1455,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
         "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),
         "DocumentWidthTwoThirds" => KeyBinding::new(keystroke, DocumentWidthTwoThirds, None),
+        "ToggleDocumentPreview" => KeyBinding::new(keystroke, ToggleDocumentPreview, None),
+        "ToggleDocumentWrap" => KeyBinding::new(keystroke, ToggleDocumentWrap, None),
         "EditorSave" => KeyBinding::new(keystroke, EditorSave, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
         "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),
@@ -2519,17 +2564,22 @@ mod gpui_tests {
             running_on_json(
                 cx,
                 r#"{"keybinding_preset": "tmux",
-                    "keybindings": {"NextTab": "ctrl-alt-]", "SplitRight": ["ctrl-alt-d"]}}"#,
+                    "keybindings": {"SelectNextTab": "ctrl-alt-]", "SplitRight": ["ctrl-alt-d"]}}"#,
             );
             // The preset is a scheme, and it still replaces the default chord.
-            assert!(fired(cx, "ctrl-tab").is_empty());
+            assert!(fired(cx, per_platform("secondary-shift-]", "ctrl-pagedown")).is_empty());
             // A chord added on top of it is added to the preset's chord.
             assert_eq!(
                 fired(cx, "ctrl-b n").first(),
-                Some(&NextTab::name_for_type())
+                Some(&SelectNextTab::name_for_type())
             );
             assert_eq!(
                 fired(cx, "ctrl-alt-]").first(),
+                Some(&SelectNextTab::name_for_type())
+            );
+            // The MRU switcher the preset no longer takes over keeps Ctrl+Tab.
+            assert_eq!(
+                fired(cx, "ctrl-tab").first(),
                 Some(&NextTab::name_for_type())
             );
             // A list replaces the preset's chord the way it replaces a default.

@@ -507,13 +507,11 @@ impl TerminalView {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let popover = theme.popover;
-        let accent = theme.accent;
         let danger = theme.red;
 
         let total = state.matches.len();
         let has_query = !state.input.read(cx).value().is_empty();
         let has_matches = !state.matches.is_empty();
-        let focused = self.search_focused;
         let regex_error = self.search_regex_error;
         let case_on = self.search_case_sensitive;
         let regex_on = self.search_regex;
@@ -603,13 +601,9 @@ impl TerminalView {
             .pr_1()
             .rounded_lg()
             .border_1()
-            .border_color(if regex_error {
-                danger
-            } else if focused {
-                accent
-            } else {
-                border
-            })
+            // Focus is shown by the caret, not by the frame: an accent border
+            // over the bar's drop shadow read as a glow.
+            .border_color(if regex_error { danger } else { border })
             .bg(popover)
             .shadow_md()
             .child(div().flex_1().min_w_0().child(field))

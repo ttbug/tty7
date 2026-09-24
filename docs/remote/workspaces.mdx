@@ -118,9 +118,11 @@ Two dialogs you may meet:
 
 - **Fork an agent session.** The fork command would run against the *local*
   agent, so tty7 does not offer it.
-- **Move very large files through the Files panel.** Drag-and-drop across the
-  link is capped at what one control frame can carry; past that the panel tells
-  you to use [SFTP](/remote/sftp).
+- **Move very large files through the Files panel.** Drag a file onto the tree
+  to upload it; right-click a file → **Download** to copy it into this machine's
+  Downloads folder (numbered, never overwritten, as in [SFTP](/remote/sftp)).
+  Both directions are capped at what one control frame can carry, about 63 MB;
+  past that the panel says so and points you at SFTP, `scp` or `rsync`.
 
 ## From the CLI
 

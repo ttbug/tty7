@@ -217,6 +217,9 @@ pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
+/// Work to run against the settings window once it has been built.
+type SettingsFollowUp = Box<dyn FnOnce(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
+
 pub(crate) const TILE_SIZE: f32 = 32.;
 pub(crate) const TILE_GLYPH: f32 = 16.;
 /// A tile that sits in a body row rather than in chrome: the box shrinks to
@@ -922,6 +925,9 @@ pub struct Tty7App {
     _sidebar_search_sub: Subscription,
     _file_search_sub: Subscription,
     settings: Option<SettingsState>,
+    /// The window settings are drawn in, and the workspace window that opened
+    /// it. Tests keep settings in the workspace's single window.
+    settings_window: Option<(gpui::AnyWindowHandle, gpui::AnyWindowHandle)>,
     pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
     /// A close question is on screen. It carries no target: the answer acts on
     /// the tab or pane captured when the question was raised, not on whatever
@@ -1525,6 +1531,7 @@ impl Tty7App {
             file_search,
             _file_search_sub: file_search_sub,
             settings: None,
+            settings_window: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             close_prompt_open: false,
             window_bounds: window_bounds_to_remember(window),
@@ -3495,6 +3502,11 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
+    }
+
+    /// Saved only: gpui reads this preference once per process.
+    pub(crate) fn set_font_thicken(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.font_thicken = on);
     }
 
     pub(crate) fn set_macos_option_as_alt(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -6004,11 +6016,65 @@ impl Tty7App {
     }
 
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((handle, _)) = self.settings_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.settings_window = None;
+            self.settings = None;
+        }
         if self.settings.is_some() {
             self.close_settings_checked(window, cx);
             return;
         }
         self.remember_active_pane(window, cx);
+        if cfg!(test) {
+            self.build_settings_state(window, cx);
+            return;
+        }
+        self.open_settings_window_then(window, cx, None);
+    }
+
+    fn open_settings_window_then(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: Option<SettingsFollowUp>,
+    ) {
+        let owner = window.window_handle();
+        let app = cx.entity();
+        cx.defer(move |cx| {
+            let options = crate::ui::settings_window::window_options(cx);
+            let opened = cx.open_window(options, |window, cx| {
+                app.update(cx, |this, cx| {
+                    this.build_settings_state(window, cx);
+                    if let Some(then) = then {
+                        then(this, window, cx);
+                    }
+                });
+                let view =
+                    cx.new(|cx| crate::ui::settings_window::SettingsWindow::new(&app, window, cx));
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            });
+            match opened {
+                Ok(handle) => app.update(cx, |this, _| {
+                    this.settings_window = Some((handle.into(), owner));
+                }),
+                Err(e) => {
+                    log::error!("failed to open the settings window: {e}");
+                    app.update(cx, |this, cx| {
+                        this.settings = None;
+                        cx.notify();
+                    });
+                }
+            }
+        });
+    }
+
+    fn build_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus_handle = cx.focus_handle();
         let mut subs = Vec::new();
         let (font_select, font_bold_select, font_italic_select, ui_font_select) =
@@ -6675,7 +6741,30 @@ impl Tty7App {
                     s.content_scroll.offset()
                 },
             );
-            self.focus_active(window, cx);
+            match self.settings_window.take() {
+                Some((settings, owner)) => {
+                    let app = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = settings.update(cx, |_, window, _| window.remove_window());
+                        let _ = owner.update(cx, |_, window, cx| {
+                            window.activate_window();
+                            let _ = app.update(cx, |this, cx| this.focus_active(window, cx));
+                        });
+                    });
+                }
+                None => self.focus_active(window, cx),
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn has_settings(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    pub(crate) fn forget_settings_window(&mut self, cx: &mut Context<Self>) {
+        if self.settings_window.take().is_some() {
+            self.settings = None;
             cx.notify();
         }
     }
@@ -6686,10 +6775,57 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.is_none() {
-            self.toggle_settings(window, cx);
+        self.open_settings_then(window, cx, move |this, window, cx| {
+            this.navigate_settings(section, None, window, cx)
+        });
+    }
+
+    pub(crate) fn open_settings_then(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        if let Some((handle, _)) = self.settings_window {
+            let app = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    let _ = app.update(cx, |this, cx| then(this, window, cx));
+                });
+            });
+            return;
         }
-        self.navigate_settings(section, None, window, cx);
+        if self.settings.is_none() {
+            self.remember_active_pane(window, cx);
+            if !cfg!(test) {
+                self.open_settings_window_then(window, cx, Some(Box::new(then)));
+                return;
+            }
+            self.build_settings_state(window, cx);
+        }
+        then(self, window, cx);
+    }
+
+    pub(crate) fn close_settings_then(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let owner = self.settings_window.map(|(_, owner)| owner);
+        self.close_settings(window, cx);
+        match owner {
+            None => then(self, window, cx),
+            Some(owner) => {
+                let app = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let _ = owner.update(cx, |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| then(this, window, cx));
+                    });
+                });
+            }
+        }
     }
 
     /// Resolve a pending form before performing both parts of an external
@@ -6701,8 +6837,10 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
-            this.open_settings_section(SettingsSection::Ssh, window, cx);
-            this.ssh_form_load(&profile, window, cx);
+            this.open_settings_then(window, cx, move |this, window, cx| {
+                this.navigate_settings(SettingsSection::Ssh, None, window, cx);
+                this.ssh_form_load(&profile, window, cx);
+            });
         });
     }
 
@@ -8429,19 +8567,20 @@ impl Render for Tty7App {
         let bg_image = window_background_image_layer(cx);
         let settings_bg = crate::ui::theme::overlay_background(cx);
 
-        let settings_overlay = self.settings.is_some().then(|| {
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                // Opaque on purpose: the settings panel must never let the
-                // workspace translucency (window opacity / backdrop material)
-                // show through, even at window edges during a resize. The
-                // preset's gradient fill is preserved, just with alpha 1;
-                // `render_settings` repaints the theme image over it.
-                .bg(settings_bg)
-                .child(self.render_settings(window, cx))
-        });
+        let settings_overlay =
+            (self.settings.is_some() && self.settings_window.is_none()).then(|| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    // Opaque on purpose: the settings panel must never let the
+                    // workspace translucency (window opacity / backdrop material)
+                    // show through, even at window edges during a resize. The
+                    // preset's gradient fill is preserved, just with alpha 1;
+                    // `render_settings` repaints the theme image over it.
+                    .bg(settings_bg)
+                    .child(self.render_settings(window, cx))
+            });
 
         let root =
             div()

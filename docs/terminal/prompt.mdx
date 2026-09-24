@@ -98,6 +98,13 @@ A command that wraps, or one you deliberately break across lines, edits in
 place. The grid shifts to keep the caret visible instead of scrolling the whole
 screen away.
 
+When the prompt itself takes up most of the row — a deep working directory, a
+busy theme — the line you type starts on the row below it instead, with the
+full width of the pane. That happens once the prompt leaves fewer than a third
+of the columns (never fewer than 20); an ordinary prompt keeps the input beside
+it. To keep the prompt short instead, trim it in the shell: `%2~` in a zsh
+`PROMPT`, fish's `prompt_pwd`, or starship's `truncation_length`.
+
 | | |
 |---|---|
 | <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> | Insert a newline instead of submitting |

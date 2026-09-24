@@ -260,6 +260,21 @@ fn endpoint_label(user: &str, host: &str, port: u16) -> String {
 }
 
 pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String> {
+    spec_from(target, cx, &crate::core::keychain::OsCredentialStore)
+}
+
+/// [`spec_for`] with no secrets in it, built without asking the keychain for
+/// any: for callers that only describe the route, which run on the UI thread
+/// and would strip the password again the moment they had it.
+pub fn public_spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String> {
+    spec_from(target, cx, &crate::core::keychain::NoCredentials)
+}
+
+fn spec_from(
+    target: &RemoteTarget,
+    cx: &App,
+    store: &dyn crate::core::keychain::CredentialStore,
+) -> Result<NativeSshSpec, String> {
     let cfg = cx.global::<Config>();
     match target {
         RemoteTarget::Profile { id } => {
@@ -271,7 +286,7 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
             Ok(crate::ui::ssh_connect::build_native_ssh_spec(
                 profile,
                 &cfg.ssh_profiles,
-                &crate::core::keychain::OsCredentialStore,
+                store,
                 cfg.verify_host_keys,
             ))
         }
@@ -281,7 +296,7 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
             Ok(crate::ui::ssh_connect::native_spec_from_transient_profile(
                 &resolved.profile,
                 resolved.proxy_jump,
-                &crate::core::keychain::OsCredentialStore,
+                store,
                 cfg.verify_host_keys,
                 &crate::ui::ssh_connect::config_alias_resolver,
             ))
@@ -294,7 +309,7 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
             Ok(crate::ui::ssh_connect::build_native_ssh_spec(
                 &profile,
                 &cfg.ssh_profiles,
-                &crate::core::keychain::OsCredentialStore,
+                store,
                 cfg.verify_host_keys,
             ))
         }

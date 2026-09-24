@@ -15,6 +15,7 @@ description: "The bundled default, fallback chains, ligatures, and why CJK needs
 | **Line height** | 1.4 | A multiple of the font size |
 | **Bold font** / **Italic font** | — | Distinct faces, when you want them |
 | **Font ligatures** | off | `calt`, `liga` and `clig` all stay off unless you ask |
+| **Thicken strokes** | on | macOS only — see [Stroke weight on macOS](#stroke-weight-on-macos) |
 
 ## Hack is bundled
 
@@ -70,6 +71,35 @@ on. Name them explicitly if you want both:
   "font_features": { "zero": 1, "calt": 0, "liga": 0, "clig": 0 }
 }
 ```
+
+## Stroke weight on macOS
+
+macOS font smoothing thickens glyph strokes, and by how much depends on the
+text colour: the lighter the text, the bolder it draws. That is why light text
+on a dark theme can look heavier in tty7 than in a terminal that turns the
+effect off, and why a thinner weight of the same family does not fully make up
+for it.
+
+**Settings → Appearance → Terminal text → Thicken strokes** (`font_thicken`)
+turns it off, so glyphs draw at the face's own weight whatever their colour:
+
+```json
+{
+  "font_thicken": false
+}
+```
+
+<Note>
+  The change applies the next time tty7 starts: the preference is read once,
+  when text is first drawn. It covers tty7 alone — no other app, and not the
+  system-wide setting.
+</Note>
+
+Leaving it on changes nothing, so an existing
+`defaults write com.github.tty7 AppleFontSmoothing -int 0` keeps working. This
+is the same switch as Ghostty's `font-thicken` and iTerm2's thin strokes, with
+tty7 defaulting to the macOS look. Windows and Linux do not thicken strokes, so
+the key does nothing there.
 
 ## CJK and the two-column grid
 

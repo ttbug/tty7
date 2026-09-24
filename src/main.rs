@@ -441,6 +441,41 @@ fn set_dock_icon_for_bare_binary() {
     }
 }
 
+/// Turns CoreGraphics' stroke thickening off for this process when
+/// `font_thicken` is off; with it on there is nothing to do, and whatever the
+/// system (or a hand-written `defaults write`) says stands.
+///
+/// gpui decides whether to dilate a glyph from `AppleFontSmoothing`, read with
+/// `CFPreferencesCopyAppValue` the first time it rasterizes text and cached for
+/// the life of the process. So this has to land before the application exists,
+/// and a change waits for the next launch.
+///
+/// The value goes into the argument domain — the volatile one that
+/// `-AppleFontSmoothing 0` on the command line would fill. It outranks both this
+/// app's persisted defaults and the global domain, and it lives only in this
+/// process's memory: nothing reaches disk, so no other app sees it and a later
+/// launch with the key back on does not inherit it.
+#[cfg(target_os = "macos")]
+fn apply_font_thicken(thicken: bool) {
+    use objc2_foundation::{
+        NSArgumentDomain, NSMutableCopying, NSNumber, NSUserDefaults, ns_string,
+    };
+
+    if thicken {
+        return;
+    }
+    let defaults = NSUserDefaults::standardUserDefaults();
+    // SAFETY: a Foundation constant, initialized before `main` runs.
+    let domain = unsafe { NSArgumentDomain };
+    // Merged into, not replaced: the domain already holds any `-Key value`
+    // pairs the process was launched with.
+    let arguments = defaults.volatileDomainForName(domain).mutableCopy();
+    arguments.insert(ns_string!("AppleFontSmoothing"), &*NSNumber::new_i32(0));
+    // SAFETY: keys are `NSString` and values property-list objects, which is
+    // the shape a defaults domain requires.
+    unsafe { defaults.setVolatileDomain_forName(&arguments, domain) };
+}
+
 /// Delivers Finder document opens and LaunchServices URL opens after gpui has
 /// created the application. The native callback queues requests; UI state is
 /// then changed on gpui's application loop.
@@ -593,6 +628,8 @@ fn main() {
 
     let (config, config_outcome) = crate::core::config::Config::load_with_outcome();
     let gui_language = config.gui_language.clone();
+    #[cfg(target_os = "macos")]
+    apply_font_thicken(config.font_thicken);
 
     // After the PATH enrichment above, which is what makes the candidate scan
     // see the user's real PATH rather than the stub a Finder launch inherits —

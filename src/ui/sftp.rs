@@ -150,6 +150,10 @@ pub(crate) struct SftpPanelState {
     pub(crate) open_workspace: Option<crate::terminal::PaneWorkspace>,
     pub(crate) cwd: String,
     pub(crate) cwds: std::collections::HashMap<u64, String>,
+    /// The side panel has been closed since the browser last opened, so the
+    /// next open is the user asking to look at files again rather than the
+    /// browser following a pane switch. See [`sftp_start_dir`].
+    pub(crate) panel_was_closed: bool,
     pub(crate) entries: Vec<SftpEntry>,
     pub(crate) filter_input: gpui::Entity<InputState>,
     pub(crate) error: Option<String>,
@@ -201,6 +205,7 @@ impl SftpPanelState {
             open_workspace: None,
             cwd: "/".to_string(),
             cwds: std::collections::HashMap::new(),
+            panel_was_closed: true,
             entries: Vec::new(),
             filter_input,
             error: None,
@@ -331,7 +336,7 @@ fn local_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn local_download_dir() -> PathBuf {
+pub(crate) fn local_download_dir() -> PathBuf {
     local_home().join("Downloads")
 }
 
@@ -342,7 +347,11 @@ fn local_download_dir() -> PathBuf {
 /// yet, so the filesystem alone would hand the same name out twice. `None`
 /// means every name in range is spoken for — better to say so than to return
 /// one of them and quietly overwrite it.
-fn free_local_path(dir: &Path, name: &str, claimed: &HashSet<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn free_local_path(
+    dir: &Path,
+    name: &str,
+    claimed: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
     let taken = |p: &PathBuf| p.exists() || claimed.contains(p);
     let first = dir.join(name);
     if !taken(&first) {
@@ -444,13 +453,10 @@ impl Tty7App {
         self.sftp_poll_jobs(cx);
         self.sftp_start_polling(cx);
 
-        if let Some(start) = self
-            .sftp_panel
-            .cwds
-            .get(&pane_id)
-            .cloned()
-            .or_else(|| self.pane_shell_cwd(pane_id, window, cx))
-        {
+        let fresh_open = std::mem::take(&mut self.sftp_panel.panel_was_closed);
+        let remembered = self.sftp_panel.cwds.get(&pane_id).cloned();
+        let shell = self.pane_shell_cwd(pane_id, window, cx);
+        if let Some(start) = sftp_start_dir(fresh_open, shell, remembered) {
             self.sftp_navigate(start, cx);
             return;
         }
@@ -1141,6 +1147,7 @@ impl Tty7App {
                             return None;
                         }
                         if !this.right_panel_open(cx) {
+                            this.sftp_panel.panel_was_closed = true;
                             this.sftp_close_browser(cx);
                             return None;
                         }
@@ -1976,9 +1983,60 @@ impl Tty7App {
     }
 }
 
+/// Where the browser starts when it opens on a pane.
+///
+/// Opening the panel afresh is a request to see where the shell is now, so the
+/// shell's directory wins over wherever the browser was left last time. When
+/// the browser instead follows a pane switch with the panel still open, the
+/// user never left it, so the directory they were browsing there comes back.
+/// Either falls back to the other; `None` means neither is known and the
+/// caller goes to the login directory.
+fn sftp_start_dir(
+    fresh_open: bool,
+    shell_cwd: Option<String>,
+    remembered: Option<String>,
+) -> Option<String> {
+    if fresh_open {
+        shell_cwd.or(remembered)
+    } else {
+        remembered.or(shell_cwd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_open_starts_at_the_shell_directory() {
+        let shell = Some("/srv/app".to_string());
+        let last = Some("/var/log".to_string());
+        assert_eq!(
+            sftp_start_dir(true, shell.clone(), last.clone()).as_deref(),
+            Some("/srv/app")
+        );
+        assert_eq!(
+            sftp_start_dir(true, None, last.clone()).as_deref(),
+            Some("/var/log"),
+            "no shell cwd (no shell integration) falls back to the last browsed"
+        );
+        assert_eq!(sftp_start_dir(true, None, None), None);
+    }
+
+    #[test]
+    fn a_pane_switch_returns_to_the_directory_browsed_there() {
+        let shell = Some("/srv/app".to_string());
+        let last = Some("/var/log".to_string());
+        assert_eq!(
+            sftp_start_dir(false, shell.clone(), last).as_deref(),
+            Some("/var/log")
+        );
+        assert_eq!(
+            sftp_start_dir(false, shell, None).as_deref(),
+            Some("/srv/app"),
+            "a pane never browsed starts at its shell directory"
+        );
+    }
 
     fn upload(job_id: u64, state: SftpJobState) -> SftpJobProgress {
         SftpJobProgress {
@@ -2243,6 +2301,7 @@ mod gpui_tests {
     use gpui_component::input::InputState;
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
