@@ -18,6 +18,12 @@ use crate::ui::scrollbar::with_vertical_scrollbar;
 
 pub(crate) const MIN_WIDTH: f32 = 216.;
 
+/// How tall the tab row is where it sits below the title bar (Windows and
+/// Linux): the tab's 26px hover pill plus 2px either side. A full title-bar
+/// height here stacked a second 40px band under the first and left the labels
+/// sitting well down from the window's top edge.
+const TAB_ROW_HEIGHT: f32 = TILE_SIZE_SM + 6.;
+
 /// How wide a panel edge is to grab. Both edges a window can drag — the tab
 /// sidebar's and this panel's — are the same target, so they are one number.
 pub(crate) const RESIZE_HANDLE_WIDTH: f32 = 8.;
