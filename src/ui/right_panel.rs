@@ -602,11 +602,7 @@ impl Tty7App {
             cx,
         );
         row.flex_none()
-            .h(px(if tabs.is_some() {
-                crate::ui::app::TITLE_BAR_HEIGHT
-            } else {
-                32.
-            }))
+            .h(px(if tabs.is_some() { TAB_ROW_HEIGHT } else { 32. }))
             .items_center()
             .pl(px(CONTENT_INSET))
             .pr(px(match (&tabs, has_trailing) {

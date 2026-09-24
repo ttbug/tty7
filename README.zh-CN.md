@@ -20,7 +20,9 @@
 
 <br />
 
-<img src="assets/hero.webp" alt="tty7 侧边栏列出多个仓库的 agent 会话，右侧运行 Claude Code" width="900" />
+<a href="assets/tour.mp4"><img src="assets/tour.webp" alt="tty7 一分钟演示：多仓库 agent、一个 agent 通过 CLI 驱动另一个、提示符编辑器、diff、拖动 pane、退出应用后会话仍在运行" width="900" /></a>
+
+<sub>▶ <a href="assets/tour.mp4">观看高清版</a></sub>
 
 </div>
 
