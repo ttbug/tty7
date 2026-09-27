@@ -13,7 +13,7 @@
 - 侧边栏改动已通过 `cargo fmt --check` 和 `git diff --check`。
 - 侧边栏改动已通过 `cargo build` 完整编译验证。
 - workspace 创建与切换入口已从侧边栏顶部移到底部固定区域，任务树保持独立滚动，并继续复用现有切换面板及其新建入口。
-- Agent 会话行已将 Agent avatar、Agent 身份和会话标题拆为明确的两层布局，并在两层之间绘制 L 形连接线。
+- 当前 v4 侧边栏在分组标题与会话行之间加入 L 型树连接线；会话继续保持当前单行／双行 Git 信息布局，不恢复旧的 Agent 双层结构。
 - 侧边栏品牌区标题文字已从 tty7 改为 xview，仅改品牌区渲染文案，未动测试 fixture 与注释。
 - 侧边栏分组标题（当前任务、Repo、Scratch 共用）文字与文件夹图标从 12px 调大到 13px，向 Agent 名称的 14px 靠近一档。
 - 侧边栏分组标题文字颜色从 muted 灰改为 Git Diff 新增色 added_ink（青色），文件夹图标与 hover 变色行为保持不变。
@@ -37,7 +37,7 @@
 - 认证弹窗回归：旧交付包曾因构建与打包并行而包含旧版主程序；现已重新构建并确认 `authfix` 包内主程序 UUID 为 `A20FA225-3EBA-3491-B266-63EDD990355C`，与最新 release 产物一致。真实密码／短信验证码服务器端到端显示仍待确认。
 - MiniMax Hook 三项补充修复已通过代码级验证：识别 `tty7-server-c{control}p{protocol}` 远程宿主；祖先进程解析保留带空格的路径；首次临时写入为空或标记未完整时按预期内容的字节前缀恢复，且不据此认领其他文件。真实 `mcode` 运行时端到端验证仍待完成。
 
-- 已实现品牌区、任务分区、仓库分组、两层 Agent 会话树和底部 workspace 入口，等待启动应用进行视觉检查。
+- 已实现品牌区、任务分区、仓库分组、分组到会话的 L 型树连接线和底部 workspace 入口，等待启动应用进行视觉检查。
 - 已保留搜索、折叠、拖拽排序、关闭、右键菜单、Git Diff 和缩放行为。
 
 ## 待办
@@ -50,6 +50,8 @@
 
 ## 最近验证
 
+- 2026-09-27 分组到会话 L 型连接线版 26.9.3 Apple Silicon DMG：重新执行 `cargo build --release --locked --target aarch64-apple-darwin`（3m19s）、updater 构建（5.79s）和 `bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`；生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28468163 bytes，SHA-256 `f40e957adf4a1415ec829a173876ed2659161e056e7c22b816ea4ea8df4d7cde`）与 updater ZIP（24370372 bytes，SHA-256 `56df33f5cf74e96f281dfb5f40ec6abc9dba27f8b314151c5834a2b56837f0f4`）。DMG CRC、只读挂载、`CFBundleShortVersionString=26.9.3`、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件和 `codesign --verify --deep --strict` 均通过；采用 ad-hoc 签名。
+- 2026-09-27 分组到会话连接线：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
 - 2026-09-27 26.9.3 Apple Silicon DMG：`cargo build --release --locked --target aarch64-apple-darwin`（5m04s）与 updater 构建（6.47s）通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28467755 bytes，SHA-256 `73557ca99f26f564e050f711d9b6625bc9a85ea825a5df517b712690e9296a8d`）与 updater ZIP（24368365 bytes，SHA-256 `01da8263980cf814f88843cc4c53aadf7618972d631d788fad4549440b71c757`）。DMG CRC VALID，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.3`，包内三个可执行文件均为 thin arm64，`codesign --verify --deep --strict` 通过；采用 ad-hoc 签名，旧 dist 已备份至 `/private/tmp/tty7-dist-backup-dmg-20260927`。
 - 2026-09-27 合并 `main`（`d0e42fa`）：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7-core --lib cli_agent` 45 项、`cargo test -p tty7-core --lib agent_hooks` 54 项、`cargo test -p tty7 'ui::settings::' --no-fail-fast` 53 项、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 50 项、`cargo test -p tty7 'ui::right_panel::' --no-fail-fast` 6 项全部通过。编译仅有项目既有 warning。
 - 2026-09-24 10:01 DMG 重新交付（合并 `main` 二次合并后）：修复 `facc22c` 合并冲突丢失的 `src/ui/right_panel.rs` 中 `TAB_ROW_HEIGHT` 常量定义（main 侧 9032786 引入，使用处保留但常量被删，导致 release 构建失败），补回常量并跑 `cargo test -p tty7 ui::right_panel --no-fail-fast`（5 passed）与 `cargo fmt --check`。`cargo build --release --locked --target aarch64-apple-darwin`（4m03s，既有警告）与 updater 构建通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`（hdiutil 沙箱外执行）生成 `dist/tty7-26.9.3-macos-arm64.dmg`（28217184 bytes，SHA-256 `e90ccd05c2d94c609b819f17f19e6e5c30f9fcfd778cb2082b680272f7009948`）与 `dist/tty7-26.9.3-macos-arm64.zip`（24117125 bytes，SHA-256 `36199a98559a1dabce59359a6f192882f56f5ed3cf3f647e418326e1a9b46888`）。DMG CRC 全段验证通过，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.3`，包内 `tty7-app`（`E2DF137A-E1AB-3A88-8C2B-3C4D267FEA34`）、`tty7`（`6E3474E9-D444-3F6F-991F-E1A9E5A74900`）、`tty7-updater`（`EB75E05E-58C7-3A15-AD6C-C5B89B4D64AC`）均为 thin arm64 且 UUID 与本次 release 产物逐一比对一致，`codesign --verify` 通过。打包前旧 dist 已备份至 `/private/tmp/tty7-dist-backup-rebuild-20260924`。

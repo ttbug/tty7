@@ -89,6 +89,8 @@ mod row_metrics {
     pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar_plain`.
     pub(super) const AVATAR: f32 = 16.;
+    /// The tree connector between a group heading and its session rows.
+    pub(super) const TREE: f32 = 14.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
     /// The trailing status mark, when the row has one.
@@ -107,7 +109,7 @@ mod row_metrics {
 
     /// What a row can spend on text, before the badge is taken out.
     pub(super) const fn text_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
+        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - TREE - AVATAR - 2. * GAP
     }
 
     /// What a group header can spend on its name and the branch beside it.
@@ -833,6 +835,8 @@ impl Tty7App {
                     true => ROW_HEIGHT_TWO_LINE,
                     false => ROW_HEIGHT,
                 };
+                let has_group_header = section.name.is_some();
+                let is_last_in_group = slot + 1 == visible_tabs.len();
                 let label_region = match rename_input {
                     Some(input) => div()
                         .id(("sidebar-rename", i))
@@ -1051,6 +1055,34 @@ impl Tty7App {
                         cx.stop_propagation();
                         this.activate(i, window, cx);
                     }))
+                    .when(has_group_header, |row| {
+                        row.child(
+                            div()
+                                .relative()
+                                .flex_shrink_0()
+                                .w(px(row_metrics::TREE))
+                                .h(px(row_h))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(5.))
+                                        .top(px(-ROW_GAP))
+                                        .w(px(1.))
+                                        .when(is_last_in_group, |line| line.bottom(px(row_h / 2.)))
+                                        .when(!is_last_in_group, |line| line.bottom_0())
+                                        .bg(cx.theme().sidebar_border),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(5.))
+                                        .top(px(row_h / 2. - 0.5))
+                                        .w(px(9.))
+                                        .h(px(1.))
+                                        .bg(cx.theme().sidebar_border),
+                                ),
+                        )
+                    })
                     .child(self.tab_avatar_plain(
                         ("sidebar-avatar", i),
                         agent,
