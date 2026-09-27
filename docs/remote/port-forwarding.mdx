@@ -56,8 +56,8 @@ later `8080 → 3000` explains nothing.
 
 ## Adding one mid-session
 
-The **+** on the Ports section — or *SSH: Port Forwarding* in the command
-palette — opens a form asking for one thing: the port the remote is serving on.
+The **+** on the Ports section — or *SSH: Port Forwarding* in Search
+Everywhere — opens a form asking for one thing: the port the remote is serving on.
 It comes out here under the same number, and the form says so before you commit
 to it.
 
@@ -66,6 +66,24 @@ host other than loopback, a target on some third machine, a description. You
 need it about as often as you need `ssh -R`.
 
 These live only as long as the session unless you save them into the profile.
+
+## Switching a rule off
+
+Every forward in the Ports section has a switch. Off, the forward lets go of
+its port but keeps its whole rule — kind, ports, target, description — so it
+can be switched back on without retyping anything. That is how one local port
+is pointed at different places: keep one rule per target on the same port, and
+switch on the one you want.
+
+Only one of them can hold the port at a time. Switching one on while another
+still has its port is refused, and the notice names the forward to switch off
+first.
+
+Rules from a profile carry their switch into it, so the next connection opens
+the same set. The same switch sits beside each rule under **Settings → SSH →**
+a profile **→ Port forwarding**; a rule saved switched off is listed but not
+opened. Rules added mid-session are still gone when the session ends, on or
+off.
 
 <Frame caption="The Ports section with a local forward and a dynamic (SOCKS) rule">
   <img src="/images/ports.webp" alt="The ports section" />

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use gpui::{App, Global};
+use tty7_core::core::group_key::AutoKey;
 use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Workspace};
 use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::group_key::GroupKey;
 use crate::core::session::WorkspaceId;
 use crate::ui::i18n::{L10nKey, t};
 
@@ -300,11 +300,20 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             t.name = name.clone();
             true
         }
-        LayoutDelta::TabRegrouped { tab, group } => {
+        LayoutDelta::TabRegrouped {
+            tab,
+            group,
+            last_auto,
+        } => {
             let Some(t) = ws.tabs.iter_mut().find(|t| t.id == *tab) else {
                 return false;
             };
-            t.sidebar_group = group.clone();
+            t.group = *group;
+            t.last_auto = last_auto.clone();
+            true
+        }
+        LayoutDelta::GroupsChanged { groups } => {
+            ws.groups = groups.clone();
             true
         }
         LayoutDelta::TabMoved { tab, to } => {
@@ -375,23 +384,31 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
 }
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    // Repo groups only. This answers with a *path*, and its callers treat it
-    // as one — `display_name_of` names the window after its last component.
-    // A custom group is a name the user typed, so putting one here would
-    // title a window `custom:work`, or chop `work/urgent` down to `urgent`.
-    // A workspace grouped entirely by hand falls through to a pane's cwd,
-    // which is a real path and is what the window showed before any of this.
-    for group in ws.tabs.iter().filter_map(|t| {
-        let key = GroupKey::decode(t.sidebar_group.as_deref()?)?;
-        Some(key.repo_root()?.to_string_lossy().into_owned())
-    }) {
-        match counts.iter_mut().find(|(g, _)| *g == group) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((group, 1)),
+    // Paths only. This answers with a *path*, and its callers treat it as one
+    // — `display_name_of` names the window after its last component. A label
+    // group is a name the user typed, so putting one here would chop
+    // `work/urgent` down to `urgent`.
+    //
+    // A pinned folder is the strongest statement of what a workspace is
+    // about, so the most common one wins. Failing that, the repo most of the
+    // auto-grouped tabs were last filed under — a worktree counts toward the
+    // repo it belongs to, since the hint is the repo home — which is what the
+    // title read before groups could be pinned. A tab kept in a pinned group
+    // casts no repo vote: it was put there by hand, as a hand-made group's tab
+    // was before. Failing both, a pane's cwd.
+    let folders = ws.tabs.iter().filter_map(|t| {
+        let group = ws.groups.get(t.group?)?;
+        group.folder.clone()
+    });
+    let repos = ws.tabs.iter().filter_map(|t| {
+        if t.group.is_some_and(|g| ws.groups.contains(g)) {
+            return None;
         }
-    }
-    let dominant = counts.into_iter().max_by_key(|(_, n)| *n).map(|(g, _)| g);
+        match t.last_auto.as_ref()? {
+            AutoKey::Repo(home) => Some(home.to_string_lossy().into_owned()),
+            AutoKey::SshHost(_) => None,
+        }
+    });
     let first_cwd = ws
         .tabs
         .iter()
@@ -402,7 +419,22 @@ pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
                 .find(|p| p.id == id)
                 .and_then(|p| p.cwd.as_deref())
         });
-    dominant.or_else(|| first_cwd.map(str::to_string))
+    most_common(folders)
+        .or_else(|| most_common(repos))
+        .or_else(|| first_cwd.map(str::to_string))
+}
+
+/// The value seen most often, ties going to the one that reached the count
+/// last — the rule `max_by_key` has always settled titles by here.
+fn most_common(values: impl Iterator<Item = String>) -> Option<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for value in values {
+        match counts.iter_mut().find(|(v, _)| *v == value) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((value, 1)),
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v)
 }
 
 pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
@@ -506,6 +538,7 @@ pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use tty7_core::core::group_key::PinnedGroup;
     use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
@@ -928,13 +961,15 @@ mod tests {
         let restructured = Tab {
             id: tab_id,
             name: None,
-            sidebar_group: None,
+            group: None,
+            last_auto: None,
             root: PaneNode::Split {
                 axis: Axis::Vertical,
                 ratio: 0.5,
                 a: Box::new(PaneNode::Leaf { pane: 1 }),
                 b: Box::new(PaneNode::Leaf { pane: 2 }),
             },
+            hibernated: false,
         };
         assert!(apply(
             &mut machine,
@@ -1033,11 +1068,13 @@ mod tests {
             "a pane's process title must not rename its workspace"
         );
 
-        ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
+        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
+        ws.tabs[0].group = Some(tty7.id);
+        ws.groups.pinned.push(tty7);
         assert_eq!(
             display_name_of(&ws, &panes),
             "tty7",
-            "the repo group wins over the raw cwd"
+            "a pinned folder group wins over the raw cwd"
         );
 
         ws.name = Some("  Release prep  ".into());
@@ -1046,12 +1083,11 @@ mod tests {
         assert_eq!(display_name_of(&Workspace::default(), &[]), "Untitled");
     }
 
-    /// A custom group is a name, not a path, and this answers with a path —
+    /// A label group is a name, not a path, and this answers with a path —
     /// its caller names the window after the last component. Left in, a
-    /// workspace grouped by hand would be titled `custom:work`, and one
-    /// grouped as `work/urgent` would be titled `urgent`.
+    /// workspace grouped as `work/urgent` would be titled `urgent`.
     #[test]
-    fn a_custom_group_is_not_a_subject_path() {
+    fn a_label_group_is_not_a_subject_path() {
         let mut ws = Workspace::default();
         let panes = vec![PaneRecord {
             cwd: Some("/home/me/scratch".into()),
@@ -1059,18 +1095,69 @@ mod tests {
         }];
         ws.tabs = vec![leaf_tab(1)];
 
-        ws.tabs[0].sidebar_group = Some("custom:work/urgent".into());
+        let work = PinnedGroup::label("work/urgent");
+        ws.tabs[0].group = Some(work.id);
+        ws.groups.pinned.push(work);
         assert_eq!(
             display_name_of(&ws, &panes),
             "scratch",
             "the cwd answers instead, the way it did before groups existed"
         );
 
-        ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
+        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
+        ws.tabs[0].group = Some(tty7.id);
+        ws.groups.pinned.push(tty7);
         assert_eq!(
             display_name_of(&ws, &panes),
             "tty7",
-            "and a repo group still outranks the cwd"
+            "and a folder group still outranks the cwd"
         );
+    }
+
+    /// With nothing pinned the title falls back the way it did before groups
+    /// could be pinned: to the repo most tabs are in — a worktree counting
+    /// toward its repo home, which is what the hint holds — and only then to
+    /// a pane's cwd.
+    #[test]
+    fn with_nothing_pinned_the_most_common_repo_names_the_workspace() {
+        let mut ws = Workspace::default();
+        let panes = vec![PaneRecord {
+            cwd: Some("/home/me/scratch".into()),
+            ..PaneRecord::new(1)
+        }];
+        ws.tabs = vec![leaf_tab(1), leaf_tab(2), leaf_tab(3)];
+        assert_eq!(display_name_of(&ws, &panes), "scratch", "no hints: the cwd");
+
+        // Two tabs in tty7 (one of them a worktree, filed under its home) and
+        // one in api: tty7 wins.
+        ws.tabs[0].last_auto = Some(AutoKey::Repo("/repo/api".into()));
+        ws.tabs[1].last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
+        ws.tabs[2].last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
+        assert_eq!(display_name_of(&ws, &panes), "tty7");
+
+        // A tab kept in a label group casts no repo vote.
+        let work = PinnedGroup::label("work");
+        ws.tabs[2].group = Some(work.id);
+        ws.groups.pinned.push(work);
+        ws.tabs[0].last_auto = Some(AutoKey::Repo("/repo/api".into()));
+        ws.tabs.push(leaf_tab(4));
+        ws.tabs[3].last_auto = Some(AutoKey::Repo("/repo/api".into()));
+        assert_eq!(display_name_of(&ws, &panes), "api");
+    }
+
+    /// A pinned folder outranks any number of repo hints.
+    #[test]
+    fn a_pinned_folder_outranks_the_repo_majority() {
+        let mut ws = Workspace {
+            tabs: vec![leaf_tab(1), leaf_tab(2), leaf_tab(3)],
+            ..Default::default()
+        };
+        for t in &mut ws.tabs {
+            t.last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
+        }
+        let site = PinnedGroup::folder(std::path::Path::new("/w/site"));
+        ws.tabs[0].group = Some(site.id);
+        ws.groups.pinned.push(site);
+        assert_eq!(display_name_of(&ws, &[]), "site");
     }
 }

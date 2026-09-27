@@ -10,13 +10,47 @@ use std::path::PathBuf;
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_SM, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, Tty7App,
-    tile_trailing_inset, tile_trailing_inset_sm,
+    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, Tty7App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
-pub(crate) const MIN_WIDTH: f32 = 216.;
+/// Wide enough for the three word tabs, bare, beside the two chrome tiles at
+/// the default interface size — the Changes count is dropped before a label is
+/// ever cut. A larger UI font raises the floor past this; see
+/// [`right_panel_tabs_floor`].
+pub(crate) const MIN_WIDTH: f32 = 240.;
+
+/// What the tab row needs with the count dropped: the labels, the row's lead,
+/// its 2px gaps, and the chrome tiles at the trailing end.
+fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
+    let chrome = match cfg!(target_os = "macos") {
+        true => PANEL_CHROME_W,
+        false => tile_trailing_inset(),
+    };
+    (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
+}
+
+/// The tab row's leading inset: the first label lands 22px in, and each tab's
+/// click target already reaches `TAB_OUTER_PAD` past its label.
+///
+/// The tabs sit flush against each other — no row gap — so two labels are
+/// exactly `2 × TAB_OUTER_PAD` = 18px apart, which is the whole spacing rule.
+const TAB_ROW_LEAD: f32 = 22. - crate::ui::tab_strip::TAB_OUTER_PAD;
+
+/// The panel toggle and the app menu where they sit in this panel's own tab
+/// row (macOS): 26px tiles, 4px apart, the last one 12px from the panel's
+/// right edge — the edge every row below keeps too.
+///
+/// Smaller than the title bar's 32px `TILE_SIZE` on purpose. The row they
+/// share here is a word-tab row, and a 32px square beside 12.5px labels read
+/// as a toolbar dropped into a list. The toggle's centre stays 55px from the
+/// right edge either way, so it does not jump when the panel opens.
+pub(crate) const PANEL_CHROME_TILE: f32 = 26.;
+pub(crate) const PANEL_CHROME_GAP: f32 = 4.;
+pub(crate) const PANEL_CHROME_TRAIL: f32 = CONTENT_INSET;
+/// Everything those two tiles take, trailing inset included.
+const PANEL_CHROME_W: f32 = PANEL_CHROME_TRAIL + 2. * PANEL_CHROME_TILE + PANEL_CHROME_GAP;
 
 /// How tall the tab row is where it sits below the title bar (Windows and
 /// Linux): the tab's 26px hover pill plus 2px either side. A full title-bar
@@ -48,9 +82,34 @@ pub(crate) const TEXT_MONO: f32 = TEXT - STEP;
 pub(crate) const META: f32 = 12. * STEP;
 pub(crate) const META_MONO: f32 = META - STEP;
 
-/// Uppercase section headings. Deliberately below `META` — it matches the tab
-/// sidebar's group headings, which are the same thing one panel over.
-pub(crate) const HEADING: f32 = 11. * STEP;
+/// Compact section headings: a half step under the caption size, set apart by
+/// weight and ink rather than by size.
+pub(crate) const HEADING: f32 = 11.5 * STEP;
+
+/// The word tabs at the top of the panel, a half step under body text.
+pub(crate) const TAB_TEXT: f32 = 12.5 * STEP;
+
+/// How tall a Session, section-heading or search row is.
+const INFO_ROW_H: f32 = 28.;
+
+/// How tall a process row is — a notch tighter than the Session rows, since
+/// the list is read as one block rather than line by line.
+const PROC_ROW_H: f32 = 26.;
+
+/// How far a child process sits in from its parent, the width of the `└`
+/// elbow that marks it.
+const PROC_INDENT: f32 = 14.;
+
+/// The space between two sections of the Info tab.
+pub(crate) const SECTION_GAP: f32 = 16.;
+
+/// Where the Session value column starts, measured from `CONTENT_INSET` —
+/// the label cell, its `ROW_INSET` of leading padding and the gap after it —
+/// at the default 16px rem. The values land at `12 + 76 = 88`.
+const INFO_LABEL_MIN: f32 = 76.;
+
+/// The space between a Session label and its value.
+const INFO_LABEL_GAP: f32 = 9.;
 
 /// The leading glyph on a panel row — the file tree's folder and file marks.
 ///
@@ -78,24 +137,48 @@ pub(crate) const ROW_GLYPH: f32 = crate::ui::app::TILE_GLYPH;
 // number: a size written as `px(12.)` anywhere in this panel is either a
 // mistake or something that is not type.
 
-/// Rows are laid out inside this inset and then pad themselves back out, so a
-/// hovered row's background is wider than its text on both sides.
+/// A row's own padding: lists sit `CONTENT_INSET` in from the panel's edges,
+/// which is where a hovered row's fill starts, and each row pads its content
+/// this much further in. The text column is therefore [`TEXT_INSET`] — 20px —
+/// and the fill bleeds 8px past it on both sides.
 ///
-/// The text lands on `CONTENT_INSET` whatever this is — a list subtracts it
-/// outside the row and the row adds it back inside — so all this number sets
-/// is how far the hover fill bleeds past the text. It lives here rather than
-/// in one tab because every tab of this panel is the same list of rows seen
-/// from a different angle, and a fill that bleeds 4px under Source Control and
-/// 6px under Info is a panel whose rows visibly do not belong to each other.
-pub(crate) const ROW_INSET: f32 = 4.;
+/// It lives here rather than in one tab because every tab of this panel is the
+/// same list of rows seen from a different angle, and a fill that bleeds 4px
+/// under Source Control and 6px under Info is a panel whose rows visibly do
+/// not belong to each other. Anything in the panel that is text but not a row
+/// — a section heading, an empty-state line — sits at `TEXT_INSET` directly,
+/// so it lines up with the rows under it.
+pub(crate) const ROW_INSET: f32 = 8.;
+
+/// Where the panel's text column starts, from either edge: the list inset
+/// plus the row's own padding.
+pub(crate) const TEXT_INSET: f32 = CONTENT_INSET + ROW_INSET;
+
+/// The corner of a row's hover and selection fill, in every tab.
+pub(crate) const ROW_FILL_RADIUS: gpui::Pixels = px(6.);
+
+/// The space between the Files tab's search well and the tree under it.
+const FILES_SEARCH_GAP: f32 = 10.;
+
+/// How far a heading's trailing tile hangs past the text column, so its glyph
+/// — not its hit box — lines up with the values under it: the Ports `+` sits
+/// `TEXT_INSET - 5` = 15px from the right edge.
+const HEADING_TILE_OUTDENT: f32 = 5.;
+
+/// The Ports heading's add tile, and the mark in it.
+const HEADING_TILE: f32 = 22.;
+const HEADING_TILE_GLYPH: f32 = 12.;
 
 /// Whether this forward is the one that reaches `port` on the far side.
 ///
 /// Local forwards only, and only those aimed at the far host's own loopback:
 /// a forward to some third machine happens to carry the same number, and
 /// pairing it with the port row would claim it leads somewhere it does not.
+/// Nor does a switched-off forward: it leads nowhere until it is switched back
+/// on, and its own row is where that switch is.
 pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
-    m.kind == crate::daemon::protocol::SshForwardKind::Local
+    m.enabled
+        && m.kind == crate::daemon::protocol::SshForwardKind::Local
         && m.target_port == port
         && crate::daemon::protocol::PortEntry::reaches_loopback(&m.target_host)
 }
@@ -137,7 +220,8 @@ pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div 
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
-/// Height of the search strip.
+/// Height of a bare inline input row — Source Control's new-branch and
+/// checkout rows.
 ///
 /// gpui-component sizes an `Input` border-box, and `.xsmall()` is
 /// `input_h(Size::XSmall)` = `h_5()` = 20px: one `LINE_HEIGHT` of `Rems(1.25)`
@@ -145,10 +229,16 @@ pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div 
 /// only drops the background, border and radius; the padding and the height
 /// stay.) Thirty leaves that field 5px of slack top and bottom.
 ///
-/// Load-bearing beyond this file: `scm/panel.rs` pins its commit box to the
-/// same height with a `const _: () = assert!(…)`, so the two tabs' top strips
-/// line up.
+/// The filled search well of [`Tty7App::panel_search`] is not this: it is its
+/// own 28px shape, and the strip around it is exactly that tall so the well
+/// sits on the panel's 8px top inset rather than a pixel under it.
 pub(crate) const SEARCH_H: f32 = 30.;
+
+/// The search well's glyph, and the space between it and the field. The
+/// `.xsmall()` field adds 4px of leading padding of its own, so the text lands
+/// 11 + 3 + 4 = 18px past the glyph's left edge — on `TEXT_INSET + 18`.
+const SEARCH_GLYPH: f32 = 11.;
+const SEARCH_GLYPH_GAP: f32 = 3.;
 
 #[derive(Default)]
 pub(crate) struct RightPanelState {
@@ -342,8 +432,12 @@ fn info_label_column(rows: &[InfoRow], window: &mut Window, cx: &gpui::App) -> g
     // they are carried as multiples of it rather than as pixels — otherwise
     // raising `ui_font_size` grows the labels into a clamp fitted to a
     // smaller face, and every one of them wraps.
-    let label_px = TEXT * window.rem_size().as_f32();
-    let min = 46. / 12. * label_px;
+    let rem = window.rem_size().as_f32();
+    let label_px = TEXT * rem;
+    // The label cell is 76 − 9 − 8 = 59px at the default rem — room for
+    // "changes", with the row's padding and the gap after it making up the
+    // rest of the 76 — and grows with the interface size.
+    let min = INFO_LABEL_MIN / 16. * rem - INFO_LABEL_GAP - ROW_INSET;
     let max = 108. / 12. * label_px;
     let font = gpui::Font {
         family: cx.theme().font_family.clone(),
@@ -392,18 +486,25 @@ impl Tty7App {
         }
     }
 
+    /// The narrowest the panel may be drawn: `MIN_WIDTH`, or wider when the
+    /// interface font or language makes the tab labels and chrome need it.
+    pub(crate) fn right_panel_min_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        MIN_WIDTH.max(right_panel_tabs_floor(window, cx))
+    }
+
     pub(crate) fn right_panel_max_px(&self, window: &Window, cx: &gpui::App) -> f32 {
         crate::ui::app::side_panel_max(
             window.viewport_size().width.as_f32(),
-            MIN_WIDTH,
+            self.right_panel_min_px(window, cx),
             self.sidebar_floor(cx) + self.document_floor(cx),
         )
     }
 
     pub(crate) fn right_panel_px(&self, window: &Window, cx: &gpui::App) -> f32 {
-        self.right_panel_width
-            .get()
-            .clamp(MIN_WIDTH, self.right_panel_max_px(window, cx))
+        self.right_panel_width.get().clamp(
+            self.right_panel_min_px(window, cx),
+            self.right_panel_max_px(window, cx),
+        )
     }
 
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
@@ -471,17 +572,33 @@ impl Tty7App {
                     )
                     .on_double_click(|_, window, _| window.titlebar_double_click())
                     .items_center()
-                    .gap(px(2.))
-                    .pl(px(tile_trailing_inset()))
+                    .pl(px(TAB_ROW_LEAD))
                     .relative()
-                    .children(self.right_panel_tabs(cx))
+                    .children(self.right_panel_tabs(
+                        width - TAB_ROW_LEAD - PANEL_CHROME_W,
+                        window,
+                        cx,
+                    ))
                     .child(div().flex_1())
-                    // Navigation controls stay visible on both sidebars.
-                    .child(self.window_chrome(window, cx))
+                    // Navigation controls stay visible on both sidebars —
+                    // here at the panel row's smaller size.
+                    .child(self.window_chrome_sized(
+                        PANEL_CHROME_TILE,
+                        PANEL_CHROME_GAP,
+                        PANEL_CHROME_TRAIL,
+                        cx,
+                    ))
                 }))
-                // Separate navigation from content with space, matching the
-                // left sidebar's continuous surface.
-                .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(8.))))
+                // Only the Files tab steps down 8px. Its first row is a filled
+                // search well whose top edge is the first thing you see, so it
+                // wants air under the tab row. Info and Source Control open on
+                // bare text centred in a 28px row, which already sits ~7px
+                // under the row's top; adding 8 more put their first line a
+                // visible step lower than the Files well beside them.
+                .children(
+                    (cfg!(target_os = "macos") && tab == RightPanelTab::Files)
+                        .then(|| div().flex_none().h(px(8.))),
+                )
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
                 .child(handle)
@@ -596,8 +713,16 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tabs = (!cfg!(target_os = "macos")).then(|| self.right_panel_tabs(cx));
         let has_trailing = trailing.is_some();
+        let tabs = (!cfg!(target_os = "macos")).then(|| {
+            let width = self.right_panel_px(window, cx);
+            let trailing_w = match has_trailing {
+                true => 2. * TILE_SIZE_SM + 6.,
+                false => 0.,
+            };
+            let avail = width - TAB_ROW_LEAD - tile_trailing_inset() - trailing_w;
+            self.right_panel_tabs(avail, window, cx)
+        });
         if tabs.is_none() && !has_trailing {
             return div().flex_none().into_any_element();
         }
@@ -610,57 +735,62 @@ impl Tty7App {
         row.flex_none()
             .h(px(if tabs.is_some() { TAB_ROW_HEIGHT } else { 32. }))
             .items_center()
-            .pl(px(CONTENT_INSET))
+            // A bare heading is text, so it starts on the text column; a
+            // trailing tile lines its glyph up with that column's far edge.
+            .pl(px(TEXT_INSET))
             .pr(px(match (&tabs, has_trailing) {
                 (Some(_), _) => tile_trailing_inset(),
-                (None, true) => tile_trailing_inset_sm(),
-                (None, false) => CONTENT_INSET,
+                (None, true) => TEXT_INSET - crate::ui::app::TILE_PAD_SM,
+                (None, false) => TEXT_INSET,
             }))
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .items_baseline()
-                    .gap(px(7.))
-                    .child(
-                        // The title step of the panel ramp, SEMIBOLD and
-                        // uppercased. It reads as a label rather than as
-                        // content because of the weight and the caps.
-                        div()
-                            .text_size(rems(META))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().secondary_foreground)
-                            .child(text.to_uppercase()),
-                    )
-                    .when_some(count, |this, c| {
-                        this.child(
-                            // A count is a token hanging off the heading, not
-                            // part of it: one step down, mono, regular weight.
+            // Where the tabs live in this row, they are the heading: the
+            // current one already names the panel, and the Changes tab carries
+            // the count. No rule under it — the body's own inset is the break.
+            .when(tabs.is_some(), |row| row.pl(px(TAB_ROW_LEAD)))
+            .when(tabs.is_none(), |row| {
+                row.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .items_baseline()
+                        .gap(px(7.))
+                        .child(
+                            // The title step of the panel ramp, SEMIBOLD and
+                            // uppercased. It reads as a label rather than as
+                            // content because of the weight and the caps.
                             div()
-                                .text_size(rems(META_MONO))
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_color(cx.theme().muted_foreground.opacity(0.75))
-                                .child(c),
+                                .text_size(rems(META))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(text.to_string()),
                         )
-                    }),
-            )
-            .child(div().flex_1().min_w_0())
-            .when_some(trailing, |this, t| this.child(t))
+                        .when_some(count, |this, c| {
+                            this.child(
+                                // A count is a token hanging off the heading, not
+                                // part of it: one step down, mono, regular weight.
+                                div()
+                                    .text_size(rems(META_MONO))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(c),
+                            )
+                        }),
+                )
+            })
+            // Leading, as on macOS: the tabs open the row and whatever the
+            // panel adds trails at the far end.
             .when_some(tabs, |this, tiles| {
                 this.child(
                     h_flex()
                         .flex_shrink_0()
-                        // Full height, so the current tile's underline — pinned
-                        // to the bottom of its own box — lands on the rule that
-                        // closes this row, the way it does on macOS. Without it
-                        // the tiles are only as tall as a glyph and the bar
-                        // floats a few pixels above the line.
+                        // Full height, so each tab's click target is the
+                        // whole row, not a glyph-tall strip in its middle.
                         .h_full()
                         .items_center()
-                        .gap(px(2.))
-                        .when(has_trailing, |this| this.ml(px(6.)))
                         .children(tiles),
                 )
             })
+            .child(div().flex_1().min_w_0())
+            .when_some(trailing, |this, t| this.child(t))
             .into_any_element()
     }
 
@@ -669,30 +799,57 @@ impl Tty7App {
         input: &gpui::Entity<gpui_component::input::InputState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.panel_search_with(input, None, cx)
+    }
+
+    /// [`Self::panel_search`] with a tile at its far end. The tile sits
+    /// inside the same `CONTENT_INSET` as the well, so its edge lines up with
+    /// the commit row's above it.
+    pub(crate) fn panel_search_with(
+        &self,
+        input: &gpui::Entity<gpui_component::input::InputState>,
+        trailing: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_trailing = trailing.is_some();
+        // A 28px well on the faint fill, the same shape as the sidebar's
+        // search. It is a list-width box — `CONTENT_INSET` from both edges,
+        // like a row's hover fill — with its glyph on the text column.
         h_flex()
             .flex_none()
             .items_center()
-            // 8 here plus the `.xsmall()` field's own 4px of leading padding
-            // is 12px of daylight between the glyph and the first character.
-            .gap(px(8.))
-            .h(px(SEARCH_H))
+            .h(px(INFO_ROW_H))
             .px(px(CONTENT_INSET))
             .child(
-                Icon::new(IconName::Search)
-                    .small()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    // A filter with no way out of it but selecting the text
-                    // and deleting it is a filter people leave on and then
-                    // wonder where their files went. The button only exists
-                    // while there is something to clear, so an empty field
-                    // still reads as one line of chrome.
-                    .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
+                    .items_center()
+                    .gap(px(SEARCH_GLYPH_GAP))
+                    .h(px(INFO_ROW_H))
+                    .px(px(ROW_INSET))
+                    .rounded(px(7.))
+                    .bg(cx.theme().muted)
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(px(SEARCH_GLYPH))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // A filter with no way out of it but selecting the
+                            // text and deleting it is a filter people leave on
+                            // and then wonder where their files went. The
+                            // button only exists while there is something to
+                            // clear, so an empty field still reads as one line
+                            // of chrome.
+                            .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
+                    ),
             )
+            .when(has_trailing, |row| row.gap(px(6.)))
+            .children(trailing)
             .into_any_element()
     }
 
@@ -724,7 +881,7 @@ impl Tty7App {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .py(px(4.))
             .gap(px(3.))
             .text_size(rems(TEXT))
@@ -847,17 +1004,22 @@ impl Tty7App {
         }
 
         let label_w = info_label_column(&rows, window, cx);
-        // Rows pad themselves back out to `CONTENT_INSET`, so their hover fill
-        // bleeds past the text on both sides — the geometry the Source Control
-        // tab's rows are on, one tab over.
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
+        // Rows pad themselves in to `TEXT_INSET`, so their hover fill bleeds
+        // past the text on both sides — the geometry the Source Control tab's
+        // rows are on, one tab over.
+        let mut list = v_flex().px(px(CONTENT_INSET));
         for (i, row) in rows.into_iter().enumerate() {
             list = list.child(self.info_row(i, row, label_w, cx));
         }
 
         let inner = v_flex()
-            .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), false, None, cx))
-            .child(list)
+            .pb(px(SECTION_GAP))
+            .gap(px(SECTION_GAP))
+            .child(
+                v_flex()
+                    .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), None, cx))
+                    .child(list),
+            )
             .children(self.procs_section(pane_id, cx))
             .children(self.ports_section(ctx.as_ref(), cx))
             .into_any_element();
@@ -903,7 +1065,7 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .text_size(rems(TEXT))
-                    .text_color(cx.theme().sidebar_foreground)
+                    .text_color(cx.theme().foreground)
                     .child(
                         div()
                             .min_w_0()
@@ -912,14 +1074,7 @@ impl Tty7App {
                             .text_color(cx.theme().muted_foreground)
                             .child(head),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_shrink(1.)
-                            .truncate()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(leaf),
-                    )
+                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
                     .into_any_element()
             }
             InfoValue::Text(v) => div()
@@ -927,7 +1082,7 @@ impl Tty7App {
                 .min_w_0()
                 .truncate()
                 .text_size(rems(TEXT))
-                .text_color(cx.theme().sidebar_foreground)
+                .text_color(cx.theme().foreground)
                 .child(v)
                 .into_any_element(),
             InfoValue::Diff {
@@ -1040,11 +1195,11 @@ impl Tty7App {
             .id(id.clone())
             .group(id)
             .relative()
-            .items_baseline()
-            .gap(px(9.))
+            .items_center()
+            .gap(px(INFO_LABEL_GAP))
+            .h(px(INFO_ROW_H))
             .px(px(ROW_INSET))
-            .py(px(2.))
-            .rounded(px(5.))
+            .rounded(ROW_FILL_RADIUS)
             .text_size(rems(TEXT))
             // Only rows that can do something light up, so the fill is never a
             // promise the row cannot keep.
@@ -1086,39 +1241,33 @@ impl Tty7App {
         .tooltip(tooltip)
     }
 
+    /// A section heading of the Info tab: a 28px row, the label a half step
+    /// under captions, medium and muted. Sections are told apart by the space
+    /// between them, not by rules, so there is no divider to ask for.
     pub(crate) fn panel_subtitle(
         &self,
         text: &str,
-        divider: bool,
         trailing: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .when(divider, |d| {
-                d.mt(px(6.)).border_t_1().border_color(cx.theme().border)
-            })
+            .flex_none()
+            .h(px(INFO_ROW_H))
             .items_center()
             .justify_between()
-            .pl(px(CONTENT_INSET))
+            .pl(px(TEXT_INSET))
             .pr(px(if trailing.is_some() {
-                CONTENT_INSET - crate::ui::app::TILE_PAD
+                TEXT_INSET - HEADING_TILE_OUTDENT
             } else {
-                CONTENT_INSET
+                TEXT_INSET
             }))
-            .pt(px(match (divider, trailing.is_some()) {
-                (true, false) => 12.,
-                (true, true) => 8.,
-                (false, false) => 10.,
-                (false, true) => 6.,
-            }))
-            .pb(px(if trailing.is_some() { 0. } else { 4. }))
             .child(
                 // A group header sits below the panel's own title in the
                 // hierarchy, so it sits below it in the ramp too: the smallest
                 // step, carried by weight and caps rather than by size.
                 div()
                     .text_size(rems(HEADING))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
                     .child(text.to_uppercase()),
             )
@@ -1132,30 +1281,46 @@ impl Tty7App {
             return None;
         }
         let mono = cx.theme().mono_font_family.clone();
-        let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.)).gap(px(2.));
+        let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
+        let mut list = v_flex().px(px(CONTENT_INSET));
         for p in procs {
+            let depth = f32::from(p.depth);
             list = list.child(
                 h_flex()
+                    .h(px(PROC_ROW_H))
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(6.))
+                    .px(px(ROW_INSET))
+                    .rounded(ROW_FILL_RADIUS)
+                    .hover(move |s| s.bg(hover))
+                    // A child hangs off its parent by an elbow in the last
+                    // column of its indent; the root has neither.
+                    .when(p.depth > 0, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .w(px(depth * PROC_INDENT))
+                                .flex()
+                                .justify_end()
+                                .pr(px(2.))
+                                .text_size(rems(META))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("└"),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .pl(px(f32::from(p.depth) * 10.))
-                            .text_size(rems(TEXT_MONO))
-                            .font_family(mono.clone())
+                            .text_size(rems(TEXT))
                             // Which of these has the terminal is the one thing
                             // the list is read for, and a hue apart from its
                             // neighbours was carrying it alone — a difference
                             // a light theme flattens and colour vision can
                             // miss. Weight says it a second way.
-                            .when(p.foreground, |d| {
-                                d.font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(cx.theme().foreground)
-                            })
-                            .when(!p.foreground, |d| d.text_color(cx.theme().muted_foreground))
+                            .text_color(cx.theme().foreground)
+                            .when(p.foreground, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                             .child(p.name.clone()),
                     )
                     .child(info_chip(
@@ -1168,7 +1333,7 @@ impl Tty7App {
         }
         Some(
             v_flex()
-                .child(self.panel_subtitle(t(L10nKey::PanelProcessesSubtitle), true, None, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelProcessesSubtitle), None, cx))
                 .child(list)
                 .into_any_element(),
         )
@@ -1219,7 +1384,7 @@ impl Tty7App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
         let openable = ctx.port_route != crate::terminal::view::PortRoute::Blocked;
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(1.));
+        let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.));
         // Which forwards a port row has already accounted for; whatever is
         // left over gets a row of its own below.
         let mut paired: Vec<u64> = Vec::new();
@@ -1277,8 +1442,26 @@ impl Tty7App {
                 }),
             );
             if let Some(f) = forward {
-                tiles_wide += 1;
+                tiles_wide += 2;
                 let forward_id = f.id;
+                // Switched off, the forward stops speaking for this row and
+                // comes out as a row of its own with the switch to turn it
+                // back on.
+                actions = actions.child(
+                    crate::ui::tab_strip::chrome_tile_sized(
+                        Button::new(("panel-port-switch-off", i))
+                            .icon(Icon::empty().path("icons/power.svg")),
+                        TILE_SIZE_XS,
+                        TILE_GLYPH_XS,
+                        false,
+                        cx,
+                    )
+                    .rounded(px(4.))
+                    .tooltip(t(L10nKey::ForwardTooltipTurnOff))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_managed_forward_enabled(pane_id, forward_id, false, window, cx)
+                    })),
+                );
                 actions = actions.child(
                     self.info_tile(
                         ("panel-port-unforward", i),
@@ -1298,9 +1481,9 @@ impl Tty7App {
                     .relative()
                     .items_center()
                     .gap(px(8.))
+                    .h(px(PROC_ROW_H))
                     .px(px(ROW_INSET))
-                    .py(px(1.))
-                    .rounded(px(5.))
+                    .rounded(ROW_FILL_RADIUS)
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     .child(info_chip(
                         &p.port.to_string(),
@@ -1348,12 +1531,12 @@ impl Tty7App {
             crate::ui::tab_strip::chrome_tile_sized(
                 Button::new(("ssh-forward-add-toggle", pane_id))
                     .icon(Icon::empty().path("icons/plus.svg")),
-                TILE_SIZE_SM,
-                TILE_GLYPH_SM,
+                HEADING_TILE,
+                HEADING_TILE_GLYPH,
                 form_open,
                 cx,
             )
-            .rounded_md()
+            .rounded(px(5.))
             .tooltip(if form_open {
                 t(L10nKey::Cancel)
             } else {
@@ -1367,7 +1550,7 @@ impl Tty7App {
 
         Some(
             v_flex()
-                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), true, add, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), add, cx))
                 .when(
                     ports.is_empty() && forwards.is_empty() && !form_open,
                     |this| {
@@ -1384,12 +1567,14 @@ impl Tty7App {
                             (true, _) => L10nKey::PanelPortsUnsupported,
                             (false, PortProbe::Unavailable(_)) => L10nKey::PanelPortsProbeFailed,
                             (false, PortProbe::Restricted) => L10nKey::PanelPortsRestricted,
-                            (false, PortProbe::Ok) => L10nKey::None,
+                            (false, PortProbe::Ok) => L10nKey::PanelPortsEmpty,
                         };
                         this.child(
                             div()
-                                .px(px(CONTENT_INSET))
-                                .py(px(2.))
+                                .px(px(TEXT_INSET))
+                                .min_h(px(PROC_ROW_H))
+                                .flex()
+                                .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(t(key)),
@@ -1775,7 +1960,10 @@ impl Tty7App {
             .flex_1()
             .min_h_0()
             .child(title)
-            .child(search)
+            // The well and the tree are two blocks, not a field glued to its
+            // list: a pause between them, the same 10px the Changes tab keeps
+            // between its pinned parts.
+            .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
             .child(rows)
             .into_any_element()
     }
@@ -1808,14 +1996,16 @@ impl Tty7App {
     }
 }
 
-/// Width of the fixed cell a git status letter is centred in.
+/// Width of the fixed cell a git status letter is centred in: the widest
+/// letter at `META_MONO`, and nothing more, so the name after it starts
+/// `ROW_INSET + 10 + 8` = 18px past the row's fill edge.
 ///
-/// Load-bearing beyond this function: `scm/panel.rs` gives its group-header
-/// chevron box exactly this width so the group arrows and the status letters
-/// stack into one vertical line down the right edge of the panel, and it keeps
-/// its own `BADGE_W` in step. Changing it here without changing it there
-/// breaks that column.
-pub(crate) const BADGE_W: f32 = 14.;
+/// Load-bearing beyond this function: `scm/panel.rs` sets its group-header
+/// chevron in a box no wider than this, flush with the cell's leading edge, so
+/// the group arrows sit over the status letters, and it keeps its own
+/// `BADGE_W` in step. Changing it here without changing it there breaks that
+/// column.
+pub(crate) const BADGE_W: f32 = 10.;
 
 /// A single-letter git status marker in a fixed-width cell.
 ///
@@ -1894,6 +2084,7 @@ mod tests {
             target_port,
             description: None,
             status: ForwardStatus::Listening,
+            enabled: true,
         }
     }
 
@@ -1923,6 +2114,15 @@ mod tests {
             "a remote forward listens on the far side, so it is not how this \
              port is reached from here"
         );
+    }
+
+    /// A switched-off forward reaches nothing, so it must not take over the
+    /// port row — its own row is the only place its switch is.
+    #[test]
+    fn a_switched_off_forward_is_not_the_way_to_a_port() {
+        let mut off = forward(SshForwardKind::Local, "localhost", 3000);
+        off.enabled = false;
+        assert!(!forwards_port(&off, 3000));
     }
 
     fn diff(added: u32, removed: u32, open: bool) -> InfoRow {

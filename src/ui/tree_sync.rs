@@ -11,7 +11,7 @@ use tty7_core::core::machine::{
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::group_key::GroupKey;
+use crate::core::group_key::{AutoKey, GroupId, WorkspaceGroups};
 use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, WorkspaceStore};
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
@@ -51,6 +51,18 @@ fn classify_tree_link(client: Option<Arc<ControlClient>>) -> TreeLink {
     }
 }
 
+/// Whether the machine holding `client_ws` can put one of its tabs to sleep.
+/// A machine that cannot would take the mark and leave the shells running, or
+/// refuse it outright, so a window never offers to on its behalf.
+pub(crate) fn can_hibernate_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::TAB_HIBERNATE;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
 fn tree_workspace_id(cx: &App, client_ws: WorkspaceId) -> WorkspaceId {
     WorkspaceStore::all(cx)
         .get(client_ws)
@@ -63,8 +75,12 @@ fn tree_workspace_id(cx: &App, client_ws: WorkspaceId) -> WorkspaceId {
 pub(crate) struct DesiredTab {
     pub id: TabId,
     pub name: Option<String>,
-    pub group: Option<String>,
+    pub group: Option<GroupId>,
+    pub last_auto: Option<AutoKey>,
     pub root: DesiredNode,
+    /// The tab is asleep, and `root` is the layout it will wake into — the
+    /// same pane ids the machine already holds, none of them running.
+    pub hibernated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +136,15 @@ pub(crate) fn desired_tabs(
     let mut active = None;
     let mut held = Vec::new();
     for (index, tab) in app.tabs.iter().enumerate() {
-        let Some(root) = desired_node(&tab.pane, remote, cx) else {
+        // A sleeping tab has nothing on screen to read its layout off, so it
+        // is read off what it will wake into: the same panes, by the same ids,
+        // which is what keeps the diff below from taking it for a tab that
+        // lost them all.
+        let root = match tab.asleep_layout() {
+            Some(layout) => desired_node_from_session(layout, remote),
+            None => desired_node(&tab.pane, remote, cx),
+        };
+        let Some(root) = root else {
             if !(remote && every_leaf_is_native_ssh(&tab.pane, cx)) {
                 held.push(tab.tree_id.get());
             }
@@ -133,11 +157,71 @@ pub(crate) fn desired_tabs(
         out.push(DesiredTab {
             id,
             name: tab.name.clone(),
-            group: tab.sidebar_group.borrow().as_ref().map(GroupKey::encode),
+            // As the tab has it, even when this window does not know the
+            // group: a window whose copy of the groups has not landed yet
+            // would otherwise send every tab it holds back to auto grouping.
+            // A group that really is gone was already cleared by the machine.
+            group: tab.group.get(),
+            last_auto: tab.auto_group.borrow().clone(),
             root,
+            hibernated: tab.asleep_layout().is_some(),
         });
     }
     (out, active, held)
+}
+
+/// [`desired_node`] for a layout that is only a record — a sleeping tab's.
+/// A leaf with no id is one the machine never had, and a native SSH leaf in a
+/// remote window lives on this client rather than on the window's machine;
+/// neither is the machine's to hold, exactly as for a live tab.
+fn desired_node_from_session(layout: &SessionPane, remote_window: bool) -> Option<DesiredNode> {
+    match layout {
+        SessionPane::Leaf {
+            cwd,
+            pane_id,
+            shell,
+            ssh_spec,
+            agent,
+            agent_session_id,
+            agent_launch_argv,
+        } => {
+            let pane = (*pane_id)?;
+            if remote_window && ssh_spec.is_some() {
+                return None;
+            }
+            Some(DesiredNode::Leaf {
+                pane,
+                seed: PaneSeed {
+                    pane,
+                    cwd: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    ssh_spec: ssh_spec.clone(),
+                    agent: agent.map(|agent| AgentFacts {
+                        agent,
+                        session_id: agent_session_id.clone(),
+                        launch_argv: agent_launch_argv.clone(),
+                        status: None,
+                    }),
+                    shell: shell.clone(),
+                },
+            })
+        }
+        SessionPane::Split { axis, ratio, a, b } => {
+            let left = desired_node_from_session(a, remote_window);
+            let right = desired_node_from_session(b, remote_window);
+            match (left, right) {
+                (Some(a), Some(b)) => Some(DesiredNode::Split {
+                    axis: match axis {
+                        crate::core::session::SessionAxis::Horizontal => TreeAxis::Horizontal,
+                        crate::core::session::SessionAxis::Vertical => TreeAxis::Vertical,
+                    },
+                    ratio: *ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }),
+                (one, other) => one.or(other),
+            }
+        }
+    }
 }
 
 fn every_leaf_is_native_ssh(pane: &Pane, cx: &App) -> bool {
@@ -255,6 +339,7 @@ fn seeded_records(desired: &[DesiredTab], live: impl Fn(u64) -> bool) -> Vec<Pan
 pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
     pub active: Option<TabId>,
+    pub groups: WorkspaceGroups,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -497,11 +582,19 @@ fn create_tab(
             name: want.name.clone(),
         });
     }
-    if want.group.is_some() {
+    if want.group.is_some() || want.last_auto.is_some() {
         ops.push(ControlRequest::TabSetGroup {
             workspace,
             tab: want.id,
-            group: want.group.clone(),
+            group: want.group,
+            last_auto: want.last_auto.clone(),
+        });
+    }
+    if want.hibernated {
+        ops.push(ControlRequest::TabSetHibernated {
+            workspace,
+            tab: want.id,
+            hibernated: true,
         });
     }
     mirror.tabs.insert(
@@ -509,8 +602,10 @@ fn create_tab(
         TreeTab {
             id: want.id,
             name: want.name.clone(),
-            sidebar_group: want.group.clone(),
+            group: want.group,
+            last_auto: want.last_auto.clone(),
             root,
+            hibernated: want.hibernated,
         },
     );
     mirror.active = Some(want.id);
@@ -557,12 +652,29 @@ fn reconcile_tab(
                 name: want.name.clone(),
             });
         }
-        if tab.sidebar_group != want.group {
-            tab.sidebar_group = want.group.clone();
+        // One op for both: the hint rides with the membership, so a tab
+        // whose repo changed costs one message, and the machine never holds
+        // a hint and a group that came from two different moments.
+        if tab.group != want.group || tab.last_auto != want.last_auto {
+            tab.group = want.group;
+            tab.last_auto = want.last_auto.clone();
             ops.push(ControlRequest::TabSetGroup {
                 workspace,
                 tab: want.id,
-                group: want.group.clone(),
+                group: want.group,
+                last_auto: want.last_auto.clone(),
+            });
+        }
+        // Ahead of anything structural. Going to sleep changes nothing else
+        // about the tab; waking swaps every pane for its successor, which may
+        // take a close-and-recreate below — and the mark has to come off the
+        // tab that exists now, before that one is gone.
+        if tab.hibernated != want.hibernated {
+            tab.hibernated = want.hibernated;
+            ops.push(ControlRequest::TabSetHibernated {
+                workspace,
+                tab: want.id,
+                hibernated: want.hibernated,
             });
         }
     }
@@ -950,6 +1062,9 @@ struct WsState {
     /// `start_prime`, which spends it instead of the generated name, and
     /// cleared by `finish_prime` once the machine has confirmed a name.
     chosen_name: Option<ChosenName>,
+    /// An edit to the workspace's sidebar groups made before this window's
+    /// pull landed, sent on when it does — see [`push_groups`].
+    unsent_groups: Option<WorkspaceGroups>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -977,6 +1092,7 @@ impl Default for WsState {
             rehydrate_attempts: 0,
             then_open: Vec::new(),
             chosen_name: None,
+            unsent_groups: None,
             said_why_empty: false,
         }
     }
@@ -1454,6 +1570,7 @@ fn primed(ws: Workspace, arrival: Arrival) -> (WsMirror, Option<String>, Arrival
         WsMirror {
             tabs: ws.tabs,
             active: ws.active_tab,
+            groups: ws.groups,
         },
         ws.name,
         arrival,
@@ -1493,6 +1610,7 @@ fn finish_prime(
             return;
         }
     };
+    adopt_groups(cx, client_ws);
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
@@ -1511,6 +1629,87 @@ fn finish_prime(
         return;
     };
     app.update(cx, |app, cx| sync_window(app, cx));
+}
+
+/// Sends a window's edit to its workspace's sidebar groups up to the machine.
+///
+/// Not part of the diff [`sync_window`] runs, on purpose. Groups have nothing
+/// a window can know better than the machine: a fresh window holds none at
+/// all, and diffing that emptiness against the tree would unpin every group
+/// the workspace had. So they only ever go up as what they are — an edit
+/// someone just made — and come down from every pull and every
+/// `GroupsChanged`.
+///
+/// Queued with the tab ops rather than fired beside them, and ahead of the
+/// ones the same edit raises (the caller pushes this before it saves): a tab
+/// filed into a group that was just made must not reach the machine before
+/// the group does, or `workspace_set_groups`, which hands tabs naming unknown
+/// groups back to auto grouping, would see a tab pointing at nothing.
+///
+/// A window whose pull has not landed parks the edit, and the pull sends it
+/// on instead of overwriting it — otherwise a pin made in the first moments
+/// of a window's life would be undone by the tree that arrives after it.
+pub(crate) fn push_groups(cx: &mut App, client_ws: WorkspaceId, groups: WorkspaceGroups) {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() {
+        return;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    match &mut state.sync {
+        SyncPhase::Primed(mirror) => {
+            if mirror.groups == groups {
+                return;
+            }
+            mirror.groups = groups.clone();
+            state.queue.push_back(ControlRequest::WorkspaceSetGroups {
+                workspace: machine_ws,
+                groups,
+            });
+            pump(cx, client_ws);
+        }
+        SyncPhase::Unprimed { .. } => state.unsent_groups = Some(groups),
+    }
+}
+
+/// Hands the window the sidebar groups a pull just brought in — or, when the
+/// window edited them before the pull landed, sends that edit up instead.
+///
+/// Deferred: a pull can land while the window is itself mid-update (its own
+/// `sync_window` started it), and the window is only updated once that is
+/// over. Nothing in between can push the window's stale copy, because groups
+/// only ever go up from an edit — see [`push_groups`].
+fn adopt_groups(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+        return;
+    };
+    if let Some(unsent) = state.unsent_groups.take() {
+        push_groups(cx, client_ws, unsent);
+        return;
+    }
+    cx.defer(move |cx| {
+        let groups = match cx
+            .default_global::<TreeSync>()
+            .windows
+            .get(&client_ws)
+            .map(|s| &s.sync)
+        {
+            Some(SyncPhase::Primed(mirror)) => mirror.groups.clone(),
+            _ => return,
+        };
+        if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+            return;
+        }
+        let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+        else {
+            return;
+        };
+        app.update(cx, |app, cx| app.adopt_sidebar_groups(groups, cx));
+    });
 }
 
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
@@ -1584,14 +1783,19 @@ pub(crate) fn session_from_tree(
     ws: &tty7_core::core::machine::Workspace,
     panes: &[PaneRecord],
 ) -> Session {
+    let views = tty7_core::core::tab_view::tab_views_of(ws, panes);
     let tabs: Vec<SessionTab> = ws
         .tabs
         .iter()
-        .map(|tab| SessionTab {
+        .zip(views)
+        .map(|(tab, view)| SessionTab {
             name: tab.name.clone(),
             tree_id: Some(tab.id),
-            sidebar_group: tab.sidebar_group.as_deref().and_then(GroupKey::decode),
+            group: tab.group,
+            last_auto: tab.last_auto.clone(),
             pane: session_pane_from_node(&tab.root, panes),
+            hibernated: tab.hibernated,
+            asleep_view: tab.hibernated.then_some(view),
         })
         .collect();
     let active = ws
@@ -2174,6 +2378,7 @@ fn layout_of(
     let mirror = WsMirror {
         tabs: ws.tabs.clone(),
         active: ws.active_tab,
+        groups: ws.groups.clone(),
     };
     let session = session_from_tree(ws, &machine.panes);
     Ok((machine, mirror, session))
@@ -2254,6 +2459,7 @@ fn settle_hydration(
         state.said_why_empty = false;
         dirty
     };
+    adopt_groups(cx, client_ws);
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
     else {
@@ -2519,11 +2725,20 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             t.name = name.clone();
             true
         }
-        LayoutDelta::TabRegrouped { tab, group } => {
+        LayoutDelta::TabRegrouped {
+            tab,
+            group,
+            last_auto,
+        } => {
             let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
                 return false;
             };
-            t.sidebar_group = group.clone();
+            t.group = *group;
+            t.last_auto = last_auto.clone();
+            true
+        }
+        LayoutDelta::GroupsChanged { groups } => {
+            mirror.groups = groups.clone();
             true
         }
         LayoutDelta::TabMoved { tab, to } => {
@@ -2648,6 +2863,13 @@ impl Tty7App {
                 }
                 true
             }
+            // A tab arriving asleep, or one that someone else put to sleep or
+            // woke, is not a shape to graft onto this window: building it here
+            // would spawn what is meant to stay stopped, or leave running what
+            // was just stopped. Saying the delta did not apply re-pulls the
+            // tree, and the restore that follows is the one path that already
+            // knows what a sleeping tab is.
+            LayoutDelta::TabCreated { tab, .. } if tab.hibernated => false,
             LayoutDelta::TabCreated { at, tab } => {
                 self.insert_tab_from_tree((*at).min(self.tabs.len()), tab, window, cx)
             }
@@ -2659,6 +2881,7 @@ impl Tty7App {
                         .and_then(|id| index_of(&self.tabs, id))
                         .unwrap_or_else(|| index.min(self.tabs.len().saturating_sub(1)));
                     self.maximized = None;
+                    self.wake_active_if_asleep(window, cx);
                     self.focus_active(window, cx);
                 }
                 true
@@ -2669,11 +2892,27 @@ impl Tty7App {
                 }
                 true
             }
-            LayoutDelta::TabRegrouped { tab, group } => {
+            LayoutDelta::TabRegrouped {
+                tab,
+                group,
+                last_auto,
+            } => {
                 if let Some(index) = index_of(&self.tabs, *tab) {
-                    *self.tabs[index].sidebar_group.borrow_mut() =
-                        group.as_deref().and_then(GroupKey::decode);
+                    let gui = &self.tabs[index];
+                    gui.group.set(*group);
+                    // Another window's hint only fills a gap. Where this
+                    // window has an answer of its own it keeps it: the two
+                    // probe the same cwd and agree, and letting each
+                    // overwrite the other would bounce a disagreement between
+                    // them for as long as it lasted.
+                    if gui.auto_group.borrow().is_none() {
+                        *gui.auto_group.borrow_mut() = last_auto.clone();
+                    }
                 }
+                true
+            }
+            LayoutDelta::GroupsChanged { groups } => {
+                self.adopt_sidebar_groups(groups.clone(), cx);
                 true
             }
             LayoutDelta::TabMoved { tab, to } => {
@@ -2690,6 +2929,7 @@ impl Tty7App {
                 true
             }
             LayoutDelta::TabRestructured { tab, .. } => match index_of(&self.tabs, tab.id) {
+                Some(index) if tab.hibernated || self.tabs[index].is_asleep() => false,
                 Some(index) => self.rebuild_tab_from_tree(index, tab, window, cx),
                 None => false,
             },
@@ -2716,6 +2956,7 @@ impl Tty7App {
         }
         self.maximized = None;
         self.active = index;
+        self.wake_active_if_asleep(window, cx);
         self.focus_active(window, cx);
     }
 
@@ -2775,7 +3016,10 @@ impl Tty7App {
         let gui = &mut self.tabs[index];
         gui.pane = pane;
         gui.name = tab.name.clone();
-        *gui.sidebar_group.borrow_mut() = tab.sidebar_group.as_deref().and_then(GroupKey::decode);
+        gui.group.set(tab.group);
+        if gui.auto_group.borrow().is_none() {
+            *gui.auto_group.borrow_mut() = tab.last_auto.clone();
+        }
         self.maximized = None;
         true
     }
@@ -3434,13 +3678,19 @@ mod tests {
                 dirty: false,
                 priming: false,
             };
-            let primed_with =
-                |tabs: Vec<TreeTab>| SyncPhase::Primed(WsMirror { tabs, active: None });
+            let primed_with = |tabs: Vec<TreeTab>| {
+                SyncPhase::Primed(WsMirror {
+                    tabs,
+                    ..Default::default()
+                })
+            };
             let a_tab = || TreeTab {
                 id: TabId::new(),
                 name: None,
-                sidebar_group: None,
+                group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
+                hibernated: false,
             };
 
             assert!(
@@ -3508,10 +3758,7 @@ mod tests {
                 // The mirror the emptied window would have been diffed against,
                 // already drained the way `save_session` drains it on the way
                 // out of a window that has no tabs left.
-                state.sync = SyncPhase::Primed(WsMirror {
-                    tabs: vec![],
-                    active: None,
-                });
+                state.sync = SyncPhase::Primed(WsMirror::default());
                 state
                     .queue
                     .push_back(ControlRequest::TabClose { workspace: ws, tab });
@@ -3948,7 +4195,7 @@ mod tests {
                 state.rehydrate = None;
                 state.sync = SyncPhase::Primed(WsMirror {
                     tabs: vec![TreeTab::leaf(1), TreeTab::leaf(2)],
-                    active: None,
+                    ..Default::default()
                 });
             }
             assert!(
@@ -4077,17 +4324,22 @@ mod tests {
                         TreeTab {
                             id: put_up,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 1 },
+                            hibernated: false,
                         },
                         TreeTab {
                             id: failed,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 2 },
+                            hibernated: false,
                         },
                     ],
                     active: Some(put_up),
+                    ..Default::default()
                 });
                 // Keeps whatever the sync queues where the test can read it:
                 // with no link, `pump` would otherwise clear the queue and drop
@@ -4167,17 +4419,22 @@ mod tests {
                         TreeTab {
                             id: theirs.0,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 11 },
+                            hibernated: false,
                         },
                         TreeTab {
                             id: theirs.1,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 12 },
+                            hibernated: false,
                         },
                     ],
                     active: Some(theirs.0),
+                    ..Default::default()
                 });
                 state.informed = true;
                 // Keeps whatever the switch queues where the test can read it.
@@ -4248,7 +4505,7 @@ mod tests {
             };
             let advanced = WsMirror {
                 tabs: vec![TreeTab::leaf(7)],
-                active: None,
+                ..Default::default()
             };
             {
                 let state = cx
@@ -4308,7 +4565,9 @@ mod tests {
             id,
             name: None,
             group: None,
+            last_auto: None,
             root,
+            hibernated: false,
         }
     }
 
@@ -4337,7 +4596,7 @@ mod tests {
         for (m, d) in mirror.tabs.iter().zip(desired) {
             assert_eq!(m.id, d.id);
             assert_eq!(m.name, d.name);
-            assert_eq!(m.sidebar_group, d.group);
+            assert_eq!(m.group, d.group);
             assert_eq!(m.root, d.root.to_pane_node());
         }
     }
@@ -4801,7 +5060,8 @@ mod tests {
 
         let mut named = tab(id, leaf(1));
         named.name = Some("build".into());
-        named.group = Some("/repo".into());
+        let group = GroupId::new();
+        named.group = Some(group);
         let want = vec![named];
         let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
         assert_eq!(
@@ -4815,7 +5075,8 @@ mod tests {
                 ControlRequest::TabSetGroup {
                     workspace: ws,
                     tab: id,
-                    group: Some("/repo".into()),
+                    group: Some(group),
+                    last_auto: None,
                 },
             ]
         );
@@ -4971,8 +5232,10 @@ mod tests {
         let tree_tab = TreeTab {
             id,
             name: None,
-            sidebar_group: None,
+            group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane: 1 },
+            hibernated: false,
         };
         assert!(apply_to_mirror(
             &mut watcher,
@@ -4991,13 +5254,15 @@ mod tests {
                 tab: TreeTab {
                     id,
                     name: None,
-                    sidebar_group: None,
+                    group: None,
+                    last_auto: None,
                     root: PaneNode::Split {
                         axis: TreeAxis::Vertical,
                         ratio: 0.5,
                         a: Box::new(PaneNode::Leaf { pane: 1 }),
                         b: Box::new(PaneNode::Leaf { pane: 2 }),
                     },
+                    hibernated: false,
                 },
                 pane: None,
             },
@@ -5060,13 +5325,15 @@ mod tests {
             tabs: vec![TreeTab {
                 id: tab_id,
                 name: Some("build".into()),
-                sidebar_group: Some("/repo".into()),
+                group: Some(GroupId::new()),
+                last_auto: Some(AutoKey::Repo("/work".into())),
                 root: PaneNode::Split {
                     axis: TreeAxis::Vertical,
                     ratio: 0.3,
                     a: Box::new(PaneNode::Leaf { pane: 1 }),
                     b: Box::new(PaneNode::Leaf { pane: 2 }),
                 },
+                hibernated: false,
             }],
             active_tab: Some(tab_id),
             ..Default::default()
@@ -5102,6 +5369,11 @@ mod tests {
             "the daemon tab's identity rides along"
         );
         assert_eq!(tab.name.as_deref(), Some("build"));
+        assert_eq!(
+            tab.last_auto,
+            Some(AutoKey::Repo("/work".into())),
+            "the auto-group hint rides along, so the tab is drawn in its group at once"
+        );
         let SessionPane::Split { ratio, a, b, .. } = &tab.pane else {
             panic!("the split survives the lowering");
         };
@@ -5155,8 +5427,10 @@ mod tests {
             tabs: vec![TreeTab {
                 id: tab_id,
                 name: None,
-                sidebar_group: None,
+                group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 7 },
+                hibernated: false,
             }],
             active_tab: Some(tab_id),
             ..Default::default()
@@ -5184,8 +5458,10 @@ mod tests {
             tabs: vec![TreeTab {
                 id: TabId::new(),
                 name: None,
-                sidebar_group: None,
+                group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
+                hibernated: false,
             }],
             active_tab: Some(TabId::new()),
             ..Default::default()
@@ -5214,5 +5490,250 @@ mod tests {
                 .any(|op| matches!(op, ControlRequest::PaneReplace { .. })),
             "got {ops:?}"
         );
+    }
+
+    fn asleep(id: TabId, root: DesiredNode) -> DesiredTab {
+        DesiredTab {
+            hibernated: true,
+            ..tab(id, root)
+        }
+    }
+
+    /// Going to sleep changes nothing about the tab's shape — the same panes,
+    /// by the same ids — so the only thing the machine hears is the mark. A
+    /// tab that lost its panes would have been a close, and the close would
+    /// have taken every record the wake needs with it.
+    #[test]
+    fn a_tab_going_to_sleep_says_so_and_nothing_else() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        let root = || split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2));
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, root())],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[asleep(id, root())],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![ControlRequest::TabSetHibernated {
+                workspace: ws,
+                tab: id,
+                hibernated: true,
+            }]
+        );
+        assert!(mirror.tabs[0].hibernated);
+        assert!(
+            diff(
+                ws,
+                &mut mirror,
+                &[asleep(id, root())],
+                Some(id),
+                SyncScope::Full,
+                &[]
+            )
+            .is_empty(),
+            "a tab that stays asleep is not told again"
+        );
+    }
+
+    /// Waking swaps each stopped pane for its successor. The mark comes off
+    /// first, while the tab it belongs to is certainly still the one the
+    /// machine has.
+    #[test]
+    fn a_waking_tab_clears_its_mark_before_its_panes_are_replaced() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[asleep(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+
+        let want = vec![tab(id, leaf(9))];
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::TabSetHibernated {
+                    workspace: ws,
+                    tab: id,
+                    hibernated: false,
+                },
+                ControlRequest::PaneReplace {
+                    workspace: ws,
+                    old: 1,
+                    new: seed(9),
+                },
+            ]
+        );
+        assert!(!mirror.tabs[0].hibernated);
+        assert_converged(&mirror, &want);
+    }
+
+    /// A window writing a sleeping tab onto a machine that lost it — a store
+    /// wiped under a remote workspace — writes it back asleep, not as a tab
+    /// the next restore would spawn.
+    #[test]
+    fn a_tab_created_asleep_is_marked_as_it_is_created() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[asleep(id, leaf(4))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert!(
+            matches!(ops.first(), Some(ControlRequest::TabCreate { .. })),
+            "{ops:?}"
+        );
+        assert!(
+            ops.contains(&ControlRequest::TabSetHibernated {
+                workspace: ws,
+                tab: id,
+                hibernated: true,
+            }),
+            "{ops:?}"
+        );
+        assert!(mirror.tabs[0].hibernated);
+    }
+
+    /// The window reads a sleeping tab's layout off the record it kept, and
+    /// has to hand the machine the very tab the machine already holds: same
+    /// ids, same seeds, same shape.
+    #[test]
+    fn a_sleeping_layout_reads_back_as_the_tree_it_came_from() {
+        use crate::core::session::SessionAxis;
+        let leaf_of = |pane: u64, cwd: &str| SessionPane::Leaf {
+            cwd: Some(std::path::PathBuf::from(cwd)),
+            pane_id: Some(pane),
+            shell: None,
+            ssh_spec: None,
+            agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+            agent_session_id: Some(format!("sess-{pane}")),
+            agent_launch_argv: None,
+        };
+        let layout = SessionPane::Split {
+            axis: SessionAxis::Horizontal,
+            ratio: 0.3,
+            a: Box::new(leaf_of(3, "/a")),
+            b: Box::new(leaf_of(4, "/b")),
+        };
+        let node = desired_node_from_session(&layout, false).expect("both leaves have ids");
+        assert_eq!(
+            node.to_pane_node(),
+            PaneNode::Split {
+                axis: TreeAxis::Horizontal,
+                ratio: 0.3,
+                a: Box::new(PaneNode::Leaf { pane: 3 }),
+                b: Box::new(PaneNode::Leaf { pane: 4 }),
+            }
+        );
+        let seed = node.seed_of(4).expect("pane 4 is a leaf");
+        assert_eq!(seed.cwd.as_deref(), Some("/b"));
+        assert_eq!(
+            seed.agent.as_ref().and_then(|a| a.session_id.as_deref()),
+            Some("sess-4"),
+            "the session a wake resumes stays on the record"
+        );
+
+        // A leaf the machine never had is left out, as for a live tab.
+        let unknown = SessionPane::Split {
+            axis: SessionAxis::Vertical,
+            ratio: 0.5,
+            a: Box::new(leaf_of(3, "/a")),
+            b: Box::new(SessionPane::Leaf {
+                cwd: None,
+                pane_id: None,
+                shell: None,
+                ssh_spec: None,
+                agent: None,
+                agent_session_id: None,
+                agent_launch_argv: None,
+            }),
+        };
+        assert_eq!(
+            desired_node_from_session(&unknown, false).map(|n| n.to_pane_node()),
+            Some(PaneNode::Leaf { pane: 3 })
+        );
+    }
+
+    /// A restore reads the mark off the tree: the sleeping tab keeps its pane
+    /// ids — they are what the wake restores from — and comes with a name read
+    /// off the tree's records, since nothing in it will be running to say one.
+    #[test]
+    fn a_restore_brings_a_sleeping_tab_back_asleep_and_named() {
+        let (awake, sleeping) = (TabId::new(), TabId::new());
+        let ws = tty7_core::core::machine::Workspace {
+            tabs: vec![
+                TreeTab {
+                    id: awake,
+                    name: None,
+                    group: None,
+                    last_auto: None,
+                    root: PaneNode::Leaf { pane: 1 },
+                    hibernated: false,
+                },
+                TreeTab {
+                    id: sleeping,
+                    name: None,
+                    group: None,
+                    last_auto: None,
+                    root: PaneNode::Leaf { pane: 2 },
+                    hibernated: true,
+                },
+            ],
+            active_tab: Some(awake),
+            ..Default::default()
+        };
+        let panes = vec![
+            PaneRecord {
+                cwd: Some("/work".into()),
+                live: true,
+                ..PaneRecord::new(1)
+            },
+            PaneRecord {
+                cwd: Some("/work/api".into()),
+                osc_title: Some("fixing the switcher".into()),
+                live: false,
+                ..PaneRecord::new(2)
+            },
+        ];
+
+        let session = session_from_tree(&ws, &panes);
+        assert!(!session.tabs[0].hibernated);
+        assert!(session.tabs[0].asleep_view.is_none());
+        let tab = &session.tabs[1];
+        assert!(tab.hibernated);
+        match &tab.pane {
+            SessionPane::Leaf { pane_id, cwd, .. } => {
+                assert_eq!(*pane_id, Some(2));
+                assert_eq!(cwd.as_deref(), Some(std::path::Path::new("/work/api")));
+            }
+            _ => panic!("leaf"),
+        }
+        let view = tab.asleep_view.as_ref().expect("a sleeping tab is named");
+        assert_eq!(view.osc_title.as_deref(), Some("fixing the switcher"));
+        assert!(!view.live);
     }
 }

@@ -32,3 +32,9 @@ repomix-output.*
 # Lavish review artifacts (design surfaces rendered for a single review pass)
 /.lavish/
 .commandcode
+
+# Impeccable skill state and critique reports (local to one machine)
+/.impeccable/
+
+# Scratch design mockups (HTML previews made while designing, not shipped)
+/design/

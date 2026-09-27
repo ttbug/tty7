@@ -19,6 +19,7 @@ it shows what *your* copy is bound to. This is the shipped default.
 | New Workspace | <kbd>⌘ ⇧ N</kbd> | <kbd>Ctrl ⇧ N</kbd> |
 | Switch Workspace | <kbd>⌘ ⇧ O</kbd> | <kbd>Ctrl ⇧ O</kbd> |
 | New Window | <kbd>⌘ N</kbd> | — |
+| New Agent Tab | <kbd>⌘ ⇧ A</kbd> | — |
 
 ## Panes
 
@@ -35,7 +36,7 @@ it shows what *your* copy is bound to. This is the shipped default.
 
 | Action | macOS | Windows / Linux |
 |---|---|---|
-| Command Palette | <kbd>⌘ P</kbd> | <kbd>Ctrl ⇧ P</kbd> |
+| Search Everywhere | <kbd>⌘ P</kbd> | <kbd>Ctrl ⇧ P</kbd> |
 | Toggle Left Sidebar | <kbd>⌘ B</kbd> | <kbd>Ctrl ⇧ B</kbd> |
 | Toggle Right Panel | <kbd>⌘ J</kbd> | <kbd>Ctrl ⇧ J</kbd> |
 | Toggle Code Panel | <kbd>⌘ ⇧ E</kbd> | <kbd>Ctrl ⇧ E</kbd> |
@@ -102,15 +103,15 @@ the font size.
 
 ## Actions with no default key
 
-All of these are in the command palette, and all are bindable under **Settings →
+All of these are in Search Everywhere, and all are bindable under **Settings →
 Keybindings**:
 
 | Group | Actions |
 |---|---|
-| Tabs | `RenameTab` · `NewWorktreeTab` · `CloseOtherTabs` · `CloseTabsToTheRight` · `CopyWorkingDirectory` · `MarkTabUnread` · `ToggleTabSidebar` |
+| Tabs | `RenameTab` · `NewWorktreeTab` · `MoveTabLeft` · `MoveTabRight` · `CloseOtherTabs` · `CloseTabsToTheRight` · `CopyWorkingDirectory` · `MarkTabUnread` · `HibernateTab` · `ToggleTabSidebar` |
 | Panes | `ResizePaneLeft/Right/Up/Down` · `SwapPaneNext` · `SwapPanePrev` |
 | Workspaces | `SelectWorkspace1`…`SelectWorkspace9` · `RenameWorkspace` · `StopWorkspace` · `DeleteWorkspace` |
-| Agents | `ForkAgentSession` (+ `Right` / `Left` / `Down` / `Up`) · `CopyAgentSessionId` |
+| Agents | `ForkAgentSession` (+ `Right` / `Left` / `Down` / `Up`) · `CopyAgentSessionId` · `LaunchAgent:<slug>` (one per agent, e.g. `LaunchAgent:claude`) |
 | Git | `ScmStageAll` · `ScmUnstageAll` · `ScmDiscardAll` · `ScmCommitAmend` · `ScmRefresh` · `ScmSync` · `ScmPush` · `ScmPull` · `ScmFetch` · `ScmCheckoutBranch` · `ScmCreateBranch` · `ScmToggleGraph` · `ToggleDiffViewMode` |
 | Panels | `ShowRightPanelInfo` · `ShowRightPanelChanges` · `ShowRightPanelFiles` |
 | Documents | `ToggleDocumentFill` · `DocumentWidthThird` · `DocumentWidthHalf` · `DocumentWidthTwoThirds` · `ToggleDocumentPreview` · `ToggleDocumentWrap` |

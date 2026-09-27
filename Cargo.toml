@@ -402,6 +402,17 @@ codegen-units = 1
 #    settle exactly at the price of laying out the whole document on the first
 #    frame (see `ui::diff_overlay::DIFF_LINE_H`).
 #
+# 5. A text layout remembers the width it was truncated to, and a size measured
+#    under truncation no longer answers a later measure that asks for the whole
+#    text. A flex item is measured against a squeezed width first and for its
+#    content size after; answering the second from the first laid every
+#    truncating name out as just its ellipsis (see the switcher's
+#    `a_truncating_name_beside_its_number_takes_the_room_it_has`).
+#
+# 6. `enter` and `tab` map to their native key equivalents in macOS menus.
+#    Without them NSMenuItem got the literal string "enter" and took its first
+#    character, so a `secondary-enter` item (ToggleFullscreen) read as ⌘E.
+#
 # Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
 # deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and
 # a plain pin swap would put two incompatible copies of gpui in the tree. `[patch]`

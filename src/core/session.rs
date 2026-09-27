@@ -1,6 +1,6 @@
 pub use tty7_core::core::session::{
-    RemoteRef, RemoteTarget, RouteSnapshot, Session, SessionAxis, SessionPane, SessionTab,
-    WindowView, WindowViews, WorkspaceId,
+    RemoteRef, RemoteTarget, Session, SessionAxis, SessionPane, SessionTab, WindowView,
+    WindowViews, WorkspaceId,
 };
 pub use tty7_core::host::HostId;
 
@@ -159,6 +159,24 @@ impl WorkspaceStore {
             store.views.active = None;
         }
         store.views.save();
+    }
+
+    /// Note that `agent` ran in workspace `id` (see `WindowView::seen_agents`).
+    pub fn record_agent_seen(
+        cx: &mut gpui::App,
+        id: WorkspaceId,
+        agent: tty7_core::core::cli_agent::CLIAgent,
+    ) {
+        let Some(store) = Self::try_store(cx) else {
+            return;
+        };
+        if store
+            .views
+            .get_mut(id)
+            .is_some_and(|view| view.saw_agent(agent.slug()))
+        {
+            store.views.save();
+        }
     }
 
     pub fn host_of(cx: &gpui::App, id: WorkspaceId) -> HostId {

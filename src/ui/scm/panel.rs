@@ -32,25 +32,36 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    HEADING, META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
+    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
 };
-use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
+use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
+use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
 
 /// Shared compact pitch for working-tree and commit-detail file rows.
 pub(super) const ROW_H: f32 = 26.;
 
 /// The status letter's column, from `git_badge`. The group chevron sits in a
-/// box of exactly this width so the two line up in one column down the panel.
+/// box no wider than this, flush with its leading edge, so the arrow stands
+/// over the letters — its centre within a pixel of theirs.
 ///
 /// This is `right_panel::BADGE_W` spelled out where the header can read it,
 /// and the test below pins the two together. They are one column, and a column
 /// drawn from two numbers is a column that will eventually be drawn from two
 /// different numbers.
-const BADGE_W: f32 = 14.;
+const BADGE_W: f32 = 10.;
+
+/// The group header's disclosure chevron: an 8px mark in an 8px box, so the
+/// label after it lands `8 + 6` = 14px past the text column.
+pub(crate) const GROUP_CHEVRON: f32 = 8.;
+const _: () = assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
+
+/// One level of the tree view, the file tree's step: the Files panel and this
+/// one draw the same directories, and the same depth should read the same.
+const TREE_INDENT: f32 = 14.;
 
 /// The key context the message box installs, and the one `ScmCommit` is
 /// bound inside. The two are the same string on purpose: a binding whose
@@ -65,25 +76,21 @@ const BRANCHES_IN_MENU: usize = 12;
 /// changes the user came to look at.
 const UNTRACKED_AUTO_COLLAPSE: usize = 20;
 
-/// Message fields share the search field's 30px height and grow with content.
+/// The message box rests at 56px — room for a subject and the start of a body
+/// — and grows with content from there.
 const MSG_LINE: f32 = 20.;
-const MSG_PAD_X: f32 = 9.;
-const MSG_PAD_Y: f32 = 5.;
-const MSG_MIN_H: f32 = MSG_PAD_Y + MSG_LINE + MSG_PAD_Y;
+const MSG_PAD_X: f32 = 10.;
+const MSG_PAD_Y: f32 = 8.;
+const MSG_MIN_H: f32 = 56.;
 /// The ceiling, as `MSG_ROWS_MAX` bare lines. It is a rail, not a border-box
 /// sum: the wrapper's own hairline and padding are not in it, so at the very
 /// top of the box's growth the last row is clipped rather than framed.
 const MSG_MAX_H: f32 = MSG_ROWS_MAX as f32 * MSG_LINE;
 
-/// The invariant the comment above describes, made unbreakable: the resting
-/// message box and the panel's search strip are the same height, or this does
-/// not build.
-const _: () = assert!(MSG_MIN_H == SEARCH_H);
-
-/// One line at rest and it grows into the message. The box is one row in a
-/// column of rows, and a box that stands four lines tall before anything has
-/// been typed pushes the file list — the thing the panel is for — off the
-/// bottom of a 260px-wide sidebar.
+/// One line of input at rest inside the 56px box, growing into the message.
+/// The box's resting height is the wrapper's floor, not the row count: a box
+/// that stood six lines tall before anything was typed would push the file
+/// list — the thing the panel is for — off the bottom of the panel.
 const MSG_ROWS: usize = 1;
 const MSG_ROWS_MAX: usize = 6;
 
@@ -110,6 +117,40 @@ const MSG_ROWS_MAX: usize = 6;
 const COMMIT_H: f32 = ROW_H;
 const COMMIT_CHEVRON_W: f32 = COMMIT_H - 2.;
 const COMMIT_GLYPH: f32 = 11.;
+const COMMIT_RADIUS: gpui::Pixels = px(6.);
+
+/// The block pinned above the file list — branch, message, commit — reads as
+/// one unit: 8px under the tab row, 10px between its three parts and 14px
+/// before the first group.
+///
+/// On macOS the block starts flush under the tab row, the way Info does: the
+/// branch is text centred in a 28px row, so it already sits ~7px down, level
+/// with the top edge of the Files tab's search well (which does get an 8px
+/// step, see `render_right_panel`). Elsewhere the tab row is inside the body
+/// and the 8 is this block's.
+const PINNED_TOP: f32 = if cfg!(target_os = "macos") { 0. } else { 8. };
+const PINNED_GAP: f32 = 10.;
+const PINNED_BOTTOM: f32 = 14.;
+
+/// The pinned block's side inset: 2px further in than the lists' `CONTENT_INSET`, so
+/// the message box and the commit control read as a panel of their own rather
+/// than as rows of the list. The branch row pads a further `ROW_INSET`, which
+/// puts its glyph at 22 — under the first tab label.
+const PINNED_INSET: f32 = 14.;
+
+/// The branch row's trailing refresh/sync tile, and the mark in it.
+const BRANCH_TILE: f32 = 26.;
+const BRANCH_TILE_GLYPH: f32 = 12.;
+
+/// Space between two change groups, and the height of a group's header.
+const GROUP_GAP: f32 = 16.;
+const GROUP_HEADER_H: f32 = 22.;
+/// Group headers are band labels: a half step under `META`, medium weight,
+/// muted — the file names under them are what the panel is for.
+const GROUP_HEADING: f32 = 11.5 / 16.;
+/// A file row's name keeps at least this much before the directory beside it
+/// has given up all of its width.
+const NAME_FLOOR: f32 = 40.;
 
 /// How long to wait before asking git again about a directory that answered
 /// with nothing.
@@ -236,7 +277,12 @@ impl Tty7App {
                 Some(t(L10nKey::PanelNoChangesHint)),
                 cx,
             ),
-            None => self.scm_groups(&repo, &status, cx),
+            None => {
+                // Pinned with the rest, so the filter stays in reach however
+                // far down the list has been scrolled.
+                pinned.push(self.scm_filter_row(window, cx));
+                self.scm_groups(&repo, &status, cx)
+            }
         };
         let history = self.render_graph_section(&repo, window, cx);
         self.scm_shell_full(title, pinned, body, history)
@@ -316,8 +362,9 @@ impl Tty7App {
             // it is the same 24, so the row has one interior height and the
             // type sits inside it rather than setting it.
             .min_h(rems(28. / 16.))
-            .pl(px(CONTENT_INSET))
-            .pr(px(crate::ui::app::tile_trailing_inset_sm()))
+            .mt(px(PINNED_TOP))
+            .pl(px(PINNED_INSET + ROW_INSET))
+            .pr(px(PINNED_INSET))
             .child(
                 Icon::empty()
                     .path("icons/git-branch.svg")
@@ -349,7 +396,7 @@ impl Tty7App {
             // branch name is wider than the row, and what got pushed off the
             // end was the sync tile: gone entirely, with no way to reach it.
             .child(
-                div().flex_1().min_w(rems(3.)).child(
+                div().flex_1().min_w(rems(3.)).ml(px(-6.)).child(
                     Button::new("scm-branch")
                         .ghost()
                         .small()
@@ -367,10 +414,18 @@ impl Tty7App {
                                 .min_w(px(0.))
                                 .line_height(relative(1.))
                                 .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .child(head_label(&status.head)),
                         )
                         .w_full()
                         .h(rems(24. / 16.))
+                        // The glyph's gap is the row's 6px. A small button's own
+                        // padding stacked another 10 on it and set the name
+                        // off the text column the file names below keep. It
+                        // keeps 4 so the hover fill clears the text, and the
+                        // wrapper takes 6 back, which lands the name on the
+                        // file names' column.
+                        .pl(px(4.))
                         .rounded(px(5.))
                         .text_color(fg)
                         .when(detached, |s| s.font_family(mono.clone()))
@@ -409,12 +464,12 @@ impl Tty7App {
                     } else {
                         Icon::empty().path("icons/git-sync.svg")
                     }),
-                    crate::ui::app::TILE_SIZE_SM,
-                    crate::ui::app::TILE_GLYPH_SM,
+                    BRANCH_TILE,
+                    BRANCH_TILE_GLYPH,
                     false,
                     cx,
                 )
-                .rounded_md()
+                .rounded(px(6.))
                 // With no branch to move the tile could only ever lose (#545):
                 // upstream is None at a detached or unborn HEAD by definition,
                 // so sync degenerates into scm_push, which has nothing to
@@ -682,7 +737,7 @@ impl Tty7App {
                 // Every input row in the panel is 30px, and the field inside
                 // it is the `.xsmall()` one that height was derived from.
                 .h(px(SEARCH_H))
-                .px(px(CONTENT_INSET))
+                .px(px(PINNED_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
                     cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -733,7 +788,7 @@ impl Tty7App {
                 .flex_none()
                 .items_center()
                 .h(px(SEARCH_H))
-                .px(px(CONTENT_INSET))
+                .px(px(PINNED_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
                     cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -796,8 +851,8 @@ impl Tty7App {
         div()
             .key_context(COMMIT_KEY_CONTEXT)
             .flex_none()
-            .px(px(CONTENT_INSET))
-            .pt(px(6.))
+            .px(px(PINNED_INSET))
+            .pt(px(PINNED_GAP))
             .child(
                 div()
                     // `MSG_MIN_H` is `panel_search`'s height and the paddings
@@ -808,7 +863,7 @@ impl Tty7App {
                     // ever measures itself differently.
                     .min_h(px(MSG_MIN_H))
                     .max_h(px(MSG_MAX_H))
-                    .rounded(CARD_RADIUS)
+                    .rounded(ROW_RADIUS)
                     // Half a rung, not a whole one. The hover step is what a
                     // row wears when the pointer is on it — a transient state —
                     // and the message box wears its fill all the time, so at
@@ -928,16 +983,15 @@ impl Tty7App {
         let repo_for_button = repo.clone();
         let live = plan.enabled;
         let staged = status.staged().count();
-        let theme = cx.theme();
-        let (muted, fg) = (theme.muted_foreground, theme.primary_foreground);
-        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let muted = cx.theme().muted_foreground;
+        let paint = commit_paint(live, cx);
         h_flex()
             .flex_none()
             .items_center()
             .gap(px(8.))
-            .px(px(CONTENT_INSET))
-            .pt(px(6.))
-            .pb(px(8.))
+            .px(px(PINNED_INSET))
+            .pt(px(PINNED_GAP))
+            .pb(px(PINNED_BOTTOM))
             // The reading the button acts on, in the row it acts from. It
             // gives way first: a long count is still a count, and the control
             // beside it is the thing that has to keep its shape.
@@ -965,13 +1019,18 @@ impl Tty7App {
                 // `segment_corners` so their own hit shapes stay inside the
                 // frame's radius — `overflow_hidden` would do that too, and
                 // would take the chevron's popup menu with it.
+                //
+                // Committable, the whole frame inverts — ink fill, surface
+                // label — which is the one prominent shape on the panel. With
+                // nothing to commit it sinks back to the message box's faint
+                // fill, so it never advertises an action that cannot run.
                 h_flex()
                     .flex_none()
                     .items_center()
                     .h(px(COMMIT_H))
-                    .rounded(CARD_RADIUS)
-                    .bg(gpui::rgb(field_fill(sf)))
-                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                    .rounded(COMMIT_RADIUS)
+                    .bg(paint.fill)
+                    .hover(move |s| s.bg(paint.hover))
                     .child(
                         // `xsmall` is the token that sets a `Button`'s label to
                         // `META`, and a control's label is what `META` is for:
@@ -985,19 +1044,19 @@ impl Tty7App {
                             // ghost hovers to a colour close enough to it that
                             // the pointer would get no answer. This walks the
                             // same two rungs the file rows walk.
-                            .custom(commit_half(cx))
-                            .when(live, |button| button.primary())
+                            .custom(commit_half(paint.ink, cx))
                             .xsmall()
                             .label(t(plan.label))
                             .h_full()
-                            .px(px(10.))
-                            .rounded_corners(segment_corners(0, 2, CARD_RADIUS, HAIRLINE))
+                            .px(px(12.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .rounded_corners(segment_corners(0, 2, COMMIT_RADIUS, HAIRLINE))
                             // The ink is named here rather than left to the
                             // variant, so the disabled half greys out: it lands
                             // over the variant's own paint because
                             // `refine_style` runs after everything the variant
                             // does.
-                            .text_color(if live { fg } else { muted })
+                            .text_color(if live { paint.ink } else { muted })
                             .disabled(!live)
                             .when(!live, |b| b.tooltip(t(plan.reason)))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1010,20 +1069,20 @@ impl Tty7App {
                                 );
                             })),
                     )
-                    // The seam between the halves is the panel showing through
-                    // the fill, not a line drawn on top of it — a rule would be
-                    // the one stroke left on the panel. A div rather than
+                    // The seam is a short rule in the label's own ink, inset
+                    // from both edges so it reads as a divider inside one shape
+                    // rather than a cut through it. A div rather than
                     // `border_l_1` on the chevron, because a ghost `Button`
                     // repaints its border colour transparent in every state it
                     // has and the seam would vanish under the pointer.
                     .child(
                         div()
                             .flex_none()
-                            .w(HAIRLINE)
-                            .h_full()
-                            .bg(gpui::rgb(sf.base)),
+                            .w(px(0.5))
+                            .h(px(COMMIT_H - 12.))
+                            .bg(paint.seam),
                     )
-                    .child(self.scm_commit_menu(repo, cx)),
+                    .child(self.scm_commit_menu(repo, paint.ink, cx)),
             )
             .into_any_element()
     }
@@ -1033,10 +1092,15 @@ impl Tty7App {
     /// Never disabled, whatever the button beside it is doing: stash and amend
     /// still mean something with nothing staged, and this is the only way to
     /// reach them.
-    fn scm_commit_menu(&self, repo: &RepoKey, cx: &mut Context<Self>) -> AnyElement {
+    fn scm_commit_menu(
+        &self,
+        repo: &RepoKey,
+        ink: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let amend = self.scm.amend;
         Button::new("scm-commit-menu")
-            .custom(commit_half(cx))
+            .custom(commit_half(ink, cx))
             .icon(Icon::new(IconName::ChevronDown))
             // `Button` sizes an icon off its own `Size`, so the glyph is asked
             // for by way of the size that produces it — the same conversion
@@ -1044,7 +1108,7 @@ impl Tty7App {
             .with_size(px(COMMIT_GLYPH / crate::ui::tab_strip::BUTTON_ICON_SCALE))
             .w(px(COMMIT_CHEVRON_W))
             .h_full()
-            .rounded_corners(segment_corners(1, 2, CARD_RADIUS, HAIRLINE))
+            .rounded_corners(segment_corners(1, 2, COMMIT_RADIUS, HAIRLINE))
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, {
                 let app = cx.entity().downgrade();
                 let repo = repo.clone();
@@ -1291,31 +1355,82 @@ impl Tty7App {
         status: &Arc<WorkingTreeStatus>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
+        // Groups are told apart by the pause between them, not by a rule:
+        // 16px, and none above the first. Inside a group every row — header
+        // included — sits 1px from the next, so two hovered neighbours read
+        // as two fills rather than one long one.
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let mut matched = 0;
+        let mut list = v_flex()
+            .px(px(CONTENT_INSET))
+            .pb(px(12.))
+            .gap(px(GROUP_GAP));
         for group in ScmGroup::ORDER {
+            // Filtered before anything else reads it, so the header's count
+            // and its stage/discard-all act on what is on screen — a
+            // "discard all" that also reached the files the filter hid would
+            // be the one surprise this panel cannot take back.
             let entries: Vec<&StatusEntry> = status
                 .entries
                 .iter()
                 .filter(|e| in_group(e, group))
+                .filter(|e| {
+                    query
+                        .as_deref()
+                        .is_none_or(|q| path_matches(e.path.as_str(), q))
+                })
                 .collect();
             if entries.is_empty() {
                 continue;
             }
+            matched += entries.len();
             let collapsed = self.scm.group_collapsed(group, entries.len());
-            list = list.child(self.scm_group_header(repo, group, &entries, collapsed, cx));
-            if collapsed {
-                continue;
+            let mut block = v_flex()
+                .gap(px(1.))
+                .child(self.scm_group_header(repo, group, &entries, collapsed, cx));
+            if !collapsed {
+                let shown = entries.len().min(MAX_RENDERED_FILES);
+                if tree {
+                    // A filter opens every directory: a match folded away
+                    // under a closed row is a match the filter failed to show.
+                    let filtering = query.is_some();
+                    let folded = &self.scm.folded_dirs;
+                    let rows = tree_rows(entries[..shown].iter().map(|e| e.path.as_str()), |key| {
+                        !filtering && folded.contains(&(group, key.to_string()))
+                    });
+                    for row in rows {
+                        block = block.child(match row {
+                            TreeRow::Dir {
+                                key,
+                                label,
+                                depth,
+                                files,
+                                collapsed,
+                            } => self.scm_dir_row(
+                                group, key, label, depth, files, collapsed, !filtering, cx,
+                            ),
+                            TreeRow::File { index, depth } => {
+                                self.scm_file_row(repo, group, entries[index], Some(depth), cx)
+                            }
+                        });
+                    }
+                } else {
+                    for entry in entries.iter().take(shown) {
+                        block = block.child(self.scm_file_row(repo, group, entry, None, cx));
+                    }
+                }
+                if entries.len() > shown {
+                    block = block.child(self.scm_note(
+                        t_plural(L10nKey::PanelMoreChangedFiles, entries.len() - shown, &[]),
+                        cx,
+                    ));
+                }
             }
-            let shown = entries.len().min(MAX_RENDERED_FILES);
-            for entry in entries.iter().take(shown) {
-                list = list.child(self.scm_file_row(repo, group, entry, cx));
-            }
-            if entries.len() > shown {
-                list = list.child(self.scm_note(
-                    t_plural(L10nKey::PanelMoreChangedFiles, entries.len() - shown, &[]),
-                    cx,
-                ));
-            }
+            list = list.child(block);
+        }
+        if query.is_some() && matched == 0 {
+            list = list.child(self.scm_note(t(L10nKey::ScmNoMatchingChanges).to_string(), cx));
         }
         if status.truncated {
             list = list.child(self.scm_note(
@@ -1330,6 +1445,142 @@ impl Tty7App {
             ));
         }
         list.into_any_element()
+    }
+
+    /// The filter over the changed files, with the list/tree switch at its
+    /// end.
+    ///
+    /// A standing field, like the Files panel's, rather than one behind a
+    /// tile like the history's: the list is what this panel is for, and a
+    /// run that touched sixty files is exactly when nobody wants to go
+    /// looking for how to narrow it.
+    fn scm_filter_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let input = match self.scm.filter.clone() {
+            Some(input) => input,
+            None => {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(t(L10nKey::ScmFilterChanges))
+                });
+                // An `InputState` is its own entity; without this the list
+                // would never hear about the text typed into it.
+                self.scm.filter_sub =
+                    Some(
+                        cx.subscribe_in(&input, window, |_this, _input, ev, _window, cx| {
+                            if matches!(ev, gpui_component::input::InputEvent::Change) {
+                                cx.notify();
+                            }
+                        }),
+                    );
+                self.scm.filter = Some(input.clone());
+                input
+            }
+        };
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        // The tile shows where it goes, not where you are — the rows under it
+        // already say which view this is.
+        let (glyph, tip) = match tree {
+            true => ("icons/list-flat.svg", t(L10nKey::ScmViewAsList)),
+            false => ("icons/list-tree.svg", t(L10nKey::ScmViewAsTree)),
+        };
+        let toggle = crate::ui::tab_strip::chrome_tile_sized(
+            Button::new("scm-changes-view").icon(Icon::empty().path(glyph)),
+            crate::ui::app::TILE_SIZE_SM,
+            crate::ui::app::TILE_GLYPH_SM,
+            false,
+            cx,
+        )
+        .rounded_md()
+        .tooltip(tip)
+        .on_click(cx.listener(|this, _, _window, cx| this.scm_toggle_changes_tree(cx)))
+        .into_any_element();
+        self.panel_search_with(&input, Some(toggle), cx)
+    }
+
+    /// The filter box's text, if it has any.
+    fn scm_filter_query(&self, cx: &gpui::App) -> Option<String> {
+        normalize_query(&self.scm.filter.as_ref()?.read(cx).value())
+    }
+
+    /// A directory in the tree view: a chevron in the status letters'
+    /// column, the (possibly compacted) name, and how many changed files
+    /// are under it.
+    #[allow(clippy::too_many_arguments)]
+    fn scm_dir_row(
+        &self,
+        group: ScmGroup,
+        key: String,
+        label: String,
+        depth: usize,
+        files: usize,
+        collapsed: bool,
+        foldable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        let id = SharedString::from(format!("scm-dir-{group:?}-{key}"));
+        let selector = id.clone();
+        let toggle = cx.listener({
+            let key = key.clone();
+            move |this, _, _window, cx| {
+                this.scm.toggle_dir(group, key.clone());
+                cx.notify();
+            }
+        });
+        h_flex()
+            .id(id)
+            .debug_selector(move || selector.to_string())
+            .items_center()
+            .gap(px(8.))
+            .min_h(rems(ROW_H / 16.))
+            .w_full()
+            .min_w_0()
+            .px(px(ROW_INSET))
+            .pl(px(ROW_INSET + depth as f32 * TREE_INDENT))
+            .rounded(px(6.))
+            .when(foldable, |row| {
+                row.cursor_pointer()
+                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                    .on_click(toggle)
+            })
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(key.clone()).build(window, cx)
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(BADGE_W))
+                    .flex()
+                    .justify_center()
+                    .text_color(muted)
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(rems(crate::ui::right_panel::TEXT))
+                    .text_color(gpui::rgb(sf.text_resting))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(rems(META_MONO))
+                    .font_family(mono)
+                    .text_color(muted)
+                    .child(files.to_string()),
+            )
+            .into_any_element()
     }
 
     /// "…and 40 more", and the note about a status git had to truncate.
@@ -1356,7 +1607,6 @@ impl Tty7App {
     ) -> AnyElement {
         let count = entries.len();
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
-        let mono = cx.theme().mono_font_family.clone();
         let id = SharedString::from(format!("scm-group-{group:?}"));
         let actions = self.scm_group_actions(&id, repo, group, entries, sf.hover, cx);
         h_flex()
@@ -1364,21 +1614,23 @@ impl Tty7App {
             .group(id)
             .relative()
             .items_center()
-            .gap(px(8.))
-            .min_h(rems(ROW_H / 16.))
+            .gap(px(6.))
+            .min_h(rems(GROUP_HEADER_H / 16.))
             .px(px(ROW_INSET))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.scm_toggle_group(group, count, cx);
             }))
-            // The chevron's box is exactly the width of `git_badge`, so this
-            // column and the status letters below it are one straight line.
+            // The chevron starts on the text column like the status letters
+            // below it, in a box 2px narrower than their cell, so each arrow
+            // stands over the `M`s and `U`s with its centre a pixel short of
+            // theirs.
             .child(
                 div()
                     .flex_none()
-                    .w(px(BADGE_W))
+                    .w(px(GROUP_CHEVRON))
                     .flex()
                     .justify_center()
                     .text_color(cx.theme().muted_foreground)
@@ -1388,24 +1640,25 @@ impl Tty7App {
                         } else {
                             IconName::ChevronDown
                         })
-                        .xsmall(),
+                        .size(px(GROUP_CHEVRON)),
                     ),
             )
+            // Sentence case, medium, muted: a band label over the rows rather
+            // than a heading competing with them.
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(rems(HEADING))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(rems(GROUP_HEADING))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(group_label(group)).to_uppercase()),
+                    .child(t(group_label(group))),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_size(rems(META_MONO))
-                    .font_family(mono)
+                    .text_size(rems(GROUP_HEADING))
                     .text_color(cx.theme().muted_foreground)
                     .child(count.to_string()),
             )
@@ -1413,11 +1666,15 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// One changed file. `depth` is its level in the tree view, and `None` in
+    /// the flat list — where the row carries its directory beside the name,
+    /// since there is no directory row above it to say it.
     fn scm_file_row(
         &self,
         repo: &RepoKey,
         group: ScmGroup,
         entry: &StatusEntry,
+        depth: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1438,16 +1695,21 @@ impl Tty7App {
             cx,
         );
 
+        let selector = id.clone();
         h_flex()
             .id(id.clone())
+            .debug_selector(move || selector.to_string())
             .group(id)
             .relative()
             .items_center()
             .gap(px(8.))
             .h(px(ROW_H))
             .px(px(ROW_INSET))
+            .when_some(depth, |row, depth| {
+                row.pl(px(ROW_INSET + depth as f32 * TREE_INDENT))
+            })
             .py(px(3.))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .when(selected, |s| s.bg(gpui::rgb(sf.selected)))
@@ -1475,9 +1737,13 @@ impl Tty7App {
             })
             .child(git_badge(letter, status_color(deco, cx), &mono))
             // Names use the same resting/selected hierarchy as sidebar rows.
+            // The name takes its own width first and only then shrinks, down
+            // to a floor; the directory beside it gets whatever is left.
             .child(
                 div()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_w(px(NAME_FLOOR))
+                    .truncate()
                     .text_size(rems(crate::ui::right_panel::TEXT))
                     .text_color(if deco == DecoStatus::Conflict {
                         status_color(deco, cx)
@@ -1490,16 +1756,22 @@ impl Tty7App {
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
                     .child(name.to_string()),
             )
-            // The directory gives way first: which file it is matters more
-            // than where it lives, and the name is already the shorter half.
-            .when(!dir.is_empty(), |this| {
+            // The directory is flush right and gives way from its *start*:
+            // the folder nearest the file is the part that says where it is,
+            // and `src/ui/…` cut from the end keeps the part that says least.
+            // The row tooltip has the whole path either way. A tree row has
+            // its directory above it, so it carries none.
+            .when(depth.is_none(), |this| {
                 this.child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis_start()
+                        .text_right()
                         .text_size(rems(META))
-                        .text_color(cx.theme().muted_foreground.opacity(0.75))
+                        .text_color(cx.theme().muted_foreground)
                         .child(dir.to_string()),
                 )
             })
@@ -1942,13 +2214,52 @@ fn field_fill(sf: crate::ui::presets::Surface) -> u32 {
 ///   `active` slot, and a dropdown marks its trigger selected for as long as
 ///   the menu is open. Anything but transparent there parks a block on the
 ///   chevron for the whole time the user is reading the menu.
-fn commit_half(cx: &gpui::App) -> ButtonCustomVariant {
+fn commit_half(ink: gpui::Hsla, cx: &gpui::App) -> ButtonCustomVariant {
     let clear = gpui::transparent_black();
     ButtonCustomVariant::new(cx)
         .color(clear)
-        .foreground(cx.theme().foreground)
+        .foreground(ink)
         .hover(clear)
         .active(clear)
+}
+
+/// How the split commit control is painted.
+#[derive(Clone, Copy)]
+struct CommitPaint {
+    fill: gpui::Hsla,
+    hover: gpui::Hsla,
+    ink: gpui::Hsla,
+    seam: gpui::Hsla,
+}
+
+/// Committable: an inverted neutral — the panel's ink as the fill and its own
+/// surface as the label, so it is the one solid shape in a panel of rows, and
+/// it stays neutral rather than borrowing the accent the sidebar and focus
+/// rings already spend. Not committable: the message box's faint fill and the
+/// panel's ink, a control that is there but is not asking for anything.
+///
+/// The label ink is the opaque surface rather than `theme.background`, which
+/// carries the window's transparency when one is configured.
+fn commit_paint(live: bool, cx: &gpui::App) -> CommitPaint {
+    let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+    let fg = cx.theme().foreground;
+    match live {
+        true => {
+            let ink: gpui::Hsla = gpui::rgb(sf.base).into();
+            CommitPaint {
+                fill: fg,
+                hover: fg.blend(ink.opacity(0.14)),
+                ink,
+                seam: ink.opacity(0.24),
+            }
+        }
+        false => CommitPaint {
+            fill: gpui::rgb(field_fill(sf)).into(),
+            hover: gpui::rgb(sf.hover).into(),
+            ink: fg,
+            seam: fg.opacity(0.18),
+        },
+    }
 }
 
 fn branch_note(text: &str, ink: gpui::Hsla, mono: &SharedString) -> AnyElement {
@@ -2420,11 +2731,13 @@ mod tests {
     /// assembled: every group arrow sits directly above the `M`s and `A`s of
     /// the rows it heads. The two widths live in two files — `git_badge` owns
     /// the letter's cell, this module owns the chevron's box — so nothing but
-    /// this assertion stops one of them from moving on its own. They have to
-    /// keep moving together.
+    /// this assertion stops one of them from moving on its own. Both start on
+    /// the text column, so the centres agree to within a pixel as long as the
+    /// chevron's box is the cell's width or up to 2px narrower.
     #[test]
     fn the_group_chevron_stands_in_the_status_letters_column() {
         assert_eq!(BADGE_W, crate::ui::right_panel::BADGE_W);
+        assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
     }
 
     fn repo(root: &str) -> RepoKey {
@@ -2998,6 +3311,80 @@ mod render_idle_gpui_tests {
             "and no status was ever asked for"
         );
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The tree view and the filter, end to end over a real repository: the
+    /// rows that come out are the ones the pure helpers promise, drawn.
+    #[gpui::test]
+    fn the_changes_list_folds_into_a_tree_and_filters_by_path(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("tree");
+        git(&root, &["init", "--quiet"]);
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/ui/a.rs"), "a\n").unwrap();
+        std::fs::write(root.join("src/ui/b.rs"), "b\n").unwrap();
+        std::fs::write(root.join("docs/readme.md"), "r\n").unwrap();
+
+        // Keyed off the root the panel resolved, not off `root`: on Windows
+        // `scratch` hands back a `\\?\` verbatim path that never compares
+        // equal to git's spelling of the same directory — see the note on
+        // `a_settled_source_control_panel_reaches_render_idle`.
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 3)
+            })
+        });
+        let drawn = |vcx: &mut VisualTestContext, what: &'static str| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            vcx.debug_bounds(what).is_some()
+        };
+        let a = "scm-row-Untracked-src/ui/a.rs";
+        let readme = "scm-row-Untracked-docs/readme.md";
+        let src_ui = "scm-dir-Untracked-src/ui";
+
+        // The flat list is the default, and it has no directory rows.
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, src_ui));
+
+        // `src` holds nothing but `ui`, so the two share one row.
+        app.update(&mut vcx, |app, cx| app.scm_toggle_changes_tree(cx));
+        assert!(vcx.update(|_, cx| cx.global::<crate::core::config::Config>().scm_changes_tree));
+        assert!(drawn(&mut vcx, src_ui));
+        assert!(!drawn(&mut vcx, "scm-dir-Untracked-src"));
+        assert!(drawn(&mut vcx, "scm-dir-Untracked-docs"));
+        assert!(drawn(&mut vcx, a));
+
+        // Folding the directory keeps its row and hides what is under it.
+        app.update(&mut vcx, |app, cx| {
+            app.scm.toggle_dir(ScmGroup::Untracked, "src/ui".into());
+            cx.notify();
+        });
+        assert!(drawn(&mut vcx, src_ui));
+        assert!(!drawn(&mut vcx, a));
+        assert!(drawn(&mut vcx, readme));
+
+        // A filter drops what does not match — and opens the folded
+        // directory the match is in.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let input = app.scm.filter.clone().expect("the filter row was drawn");
+            input.update(cx, |state, cx| state.set_value("UI A", window, cx));
+        });
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, "scm-row-Untracked-src/ui/b.rs"));
+        assert!(!drawn(&mut vcx, readme));
+        assert!(!drawn(&mut vcx, "scm-dir-Untracked-docs"));
+
+        // The same filter narrows the flat list too.
+        app.update(&mut vcx, |app, cx| app.scm_toggle_changes_tree(cx));
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, readme));
+        assert!(!drawn(&mut vcx, src_ui));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

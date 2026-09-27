@@ -53,7 +53,12 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// half (#857) — would have stayed on this machine and never reached a remote
 /// one. A new filename is what gets them uploaded, at the price of one Update
 /// Server per host, which ends the sessions on it.
-pub const CONTROL_VERSION: u32 = 10;
+///
+/// v11 replaces the sidebar's hand-made groups. A tab now names a pinned group
+/// by id (`TabSetGroup` carries a `GroupId`, not a string), the groups
+/// themselves live on the workspace and move as `WorkspaceSetGroups` and
+/// `LayoutDelta::GroupsChanged`, and a v10 peer can decode none of that.
+pub const CONTROL_VERSION: u32 = 11;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -141,6 +146,10 @@ pub mod feature {
     /// simply unknown here: the pane lives in the peer's registry, and the
     /// local daemon this client would otherwise ask has never heard of it.
     pub const PANE_PROCS: &str = "pane-procs";
+    /// The peer can put a tab to sleep: mark it in the tree and stop its panes
+    /// while keeping their screens (#762). Needs both a tree and panes, so a
+    /// peer serving either alone does not say it.
+    pub const TAB_HIBERNATE: &str = "tab-hibernate";
 }
 
 pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
@@ -290,7 +299,25 @@ pub enum ControlRequest {
     TabSetGroup {
         workspace: WorkspaceId,
         tab: TabId,
-        group: Option<String>,
+        group: Option<crate::core::group_key::GroupId>,
+        /// The auto group the tab last resolved to — see `Tab::last_auto`.
+        #[serde(default)]
+        last_auto: Option<crate::core::group_key::AutoKey>,
+    },
+    /// The workspace's pinned sidebar groups and folds, replaced whole.
+    WorkspaceSetGroups {
+        workspace: WorkspaceId,
+        groups: crate::core::group_key::WorkspaceGroups,
+    },
+    /// Put a tab to sleep or mark it awake. Going to sleep, the peer also
+    /// stops every pane the tab holds, keeping each one's screen on disk for
+    /// the wake to restore; waking only clears the mark, because the panes a
+    /// wake brings up are spawned by the client like any restored pane.
+    /// Answers the tab's panes. Gated on [`feature::TAB_HIBERNATE`].
+    TabSetHibernated {
+        workspace: WorkspaceId,
+        tab: TabId,
+        hibernated: bool,
     },
     PaneSplit {
         workspace: WorkspaceId,
@@ -399,6 +426,8 @@ impl ControlRequest {
             | TabRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
+            | WorkspaceSetGroups { .. }
+            | TabSetHibernated { .. }
             | PaneSplit { .. }
             | PaneClose { .. }
             | PaneSetRatio { .. }

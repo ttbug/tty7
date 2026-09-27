@@ -10,23 +10,28 @@ pub fn two_workspace_machine() -> Machine {
             Tab {
                 id: TabId::new(),
                 name: Some("build".into()),
-                sidebar_group: None,
+                group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
+                hibernated: false,
             },
             Tab {
                 id: TabId::new(),
                 name: None,
-                sidebar_group: None,
+                group: None,
+                last_auto: None,
                 root: PaneNode::Split {
                     axis: Axis::Horizontal,
                     ratio: 0.5,
                     a: Box::new(PaneNode::Leaf { pane: 2 }),
                     b: Box::new(PaneNode::Leaf { pane: 3 }),
                 },
+                hibernated: false,
             },
         ],
         active_tab: None,
         attachment: None,
+        groups: Default::default(),
     };
     let web = Workspace {
         id: WorkspaceId::new(),
@@ -35,11 +40,14 @@ pub fn two_workspace_machine() -> Machine {
         tabs: vec![Tab {
             id: TabId::new(),
             name: None,
-            sidebar_group: None,
+            group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane: 5 },
+            hibernated: false,
         }],
         active_tab: None,
         attachment: None,
+        groups: Default::default(),
     };
     let record = |id: u64, cwd: &str| PaneRecord {
         id,

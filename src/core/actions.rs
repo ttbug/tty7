@@ -27,15 +27,19 @@ actions!(
         CloseTabsToTheRight,
         CopyWorkingDirectory,
         OpenLinkUnderPointer,
+        OpenLinkWithDefaultApp,
         RevealLinkUnderPointer,
         CopyLinkPathUnderPointer,
         MarkTabUnread,
+        HibernateTab,
         ForkAgentSession,
         ForkAgentSessionRight,
         ForkAgentSessionLeft,
         ForkAgentSessionDown,
         ForkAgentSessionUp,
         CopyAgentSessionId,
+        NewAgentTab,
+        SaveAgentLaunchArgs,
         SplitRight,
         SplitDown,
         FocusNextPane,
@@ -54,6 +58,8 @@ actions!(
         PrevTab,
         SelectNextTab,
         SelectPrevTab,
+        MoveTabLeft,
+        MoveTabRight,
         ActivateTab1,
         ActivateTab2,
         ActivateTab3,
@@ -122,6 +128,16 @@ actions!(
         SendBackTab,
         SwitcherAcross,
         SwitcherAcrossBack,
+        SearchNextTab,
+        SearchPrevTab,
         Quit
     ]
 );
+
+/// Open a new tab running one particular coding agent. The keymap names one of
+/// these per agent (`LaunchAgent:claude`, …); see `ui::agent_launch`.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct LaunchAgent {
+    pub agent: tty7_core::core::cli_agent::CLIAgent,
+}

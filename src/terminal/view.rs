@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, RevealLinkUnderPointer, SendBackTab, SendTab, SplitDown, SplitRight,
-    ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
+    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::core::shell_quote::quote_for_shell;
@@ -139,6 +139,12 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 pub struct AgentSessionChanged;
 
 impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
+/// A coding agent started running in this pane: its foreground went from no
+/// agent to this one. What quick launch counts as the agent being used.
+pub struct AgentDetected(pub crate::core::cli_agent::CLIAgent);
+
+impl gpui::EventEmitter<AgentDetected> for TerminalView {}
 
 /// A file link the user clicked, on its way to whoever can show it. The
 /// terminal resolves the path — it is the only thing that knows the pane's
@@ -261,23 +267,6 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
         false => host_is_local,
         true => !host_is_local,
     }
-}
-
-/// The cwd a native SSH pane's remote shell reported, for the few readers that
-/// only need a name for it and not a host to act on it.
-///
-/// Such a pane belongs to this machine's daemon, so [`cwd_is_on_host`] rightly
-/// turns its paths away from every `Host` call — there is no host to hand them
-/// to. But the shell on the far end states them itself (OSC 7), unlike a shell
-/// that ssh'd onward from a local prompt, whose directory is only ever a guess.
-/// Only an absolute POSIX path counts: that is what a remote sshd's shell
-/// reports, and anything else is not a directory worth naming.
-fn native_ssh_cwd(
-    remote: Option<&RemoteContext>,
-    cwd: Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    remote.filter(|r| r.kind == crate::daemon::protocol::RemoteKind::NativeSsh)?;
-    cwd.filter(|c| c.to_string_lossy().starts_with('/'))
 }
 
 /// Which path dialect a pane's output is written in.
@@ -436,6 +425,15 @@ pub struct TerminalView {
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// The foreground agent as of the last poll, so a new one is reported
+    /// once ([`AgentDetected`]) rather than on every frame it keeps running.
+    seen_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// Whether an agent appearing here is news. A pane this view spawned is
+    /// armed from the start; one it reattached to — an app restart, a
+    /// workspace switched back to — may already be running an agent that was
+    /// counted when it started, so it arms only once its shell is seen back
+    /// at the prompt with no agent in front.
+    agent_detection_armed: bool,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_turns: u64,
     last_agent_session: (Option<String>, Option<Vec<String>>),
@@ -461,7 +459,6 @@ pub struct TerminalView {
     history_counts: std::collections::HashMap<String, u32>,
     history_cwds: std::collections::HashMap<String, std::collections::HashSet<String>>,
     history_meta: std::collections::HashMap<String, super::history::EntryMeta>,
-    history_ranked: Vec<String>,
     history_frecency: Vec<f64>,
     history_scope: super::history::Scope,
     /// What each scope this pane has already loaded held when it was left, so
@@ -851,15 +848,7 @@ fn ring_system_bell() -> bool {
 }
 
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    if bracketed {
-        let text = text.replace("\r\n", "\n");
-        let mut bytes = b"\x1b[200~".to_vec();
-        bytes.extend(text.bytes().filter(|&b| b != 0x1b));
-        bytes.extend_from_slice(b"\x1b[201~");
-        bytes
-    } else {
-        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
-    }
+    tty7_core::core::paste::paste_bytes(text.as_bytes(), bracketed)
 }
 
 /// A line the shell can be handed byte for byte, as if it had been typed at its
@@ -1453,6 +1442,7 @@ impl TerminalView {
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
         let prompt_editor = config.prompt_editor;
+        let agent_detection_armed = !terminal.reattached();
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
         if let Some(features) = &font_features {
@@ -1589,12 +1579,6 @@ impl TerminalView {
         window.focus(&focus_handle, cx);
 
         let history = super::history::load(&super::history::Scope::Local);
-        let history_ranked = super::history::rank_by_frecency(
-            &history.entries,
-            &history.counts,
-            &history.cwds,
-            None,
-        );
         let history_frecency =
             super::history::frecency_scores(&history.entries, &history.counts, &history.cwds, None);
 
@@ -1667,6 +1651,8 @@ impl TerminalView {
             running_since: None,
             running_title: String::new(),
             running_agent: None,
+            seen_agent: None,
+            agent_detection_armed,
             last_agent_status: None,
             last_agent_turns: 0,
             last_agent_session: (None, None),
@@ -1685,7 +1671,6 @@ impl TerminalView {
             history_counts: history.counts,
             history_cwds: history.cwds,
             history_meta: history.meta,
-            history_ranked,
             history_frecency,
             history_scope: super::history::Scope::Local,
             history_cache: Vec::new(),
@@ -1774,6 +1759,35 @@ impl TerminalView {
     /// way.
     pub(crate) fn stated_title(&self) -> Option<&str> {
         stated_title(&self.title)
+    }
+
+    /// The title this pane gives its tab: [`Self::stated_title`], unless this
+    /// is an SSH pane and Settings pins its tab to the host's name instead
+    /// (#726). The pane's own title is untouched either way — OSC 0/2 keep
+    /// landing in it, and it is back on the tab the moment the setting is.
+    ///
+    /// A pane that has ended still says so: the pinned name takes the same
+    /// suffix the pane's own title would have.
+    pub(crate) fn tab_title(&self, cx: &App) -> Option<String> {
+        let pinned = self.ssh_spec.as_deref().and_then(|spec| {
+            let cfg = cx.try_global::<Config>()?;
+            crate::ui::ssh_connect::pinned_ssh_title(cfg.ssh_tab_title, spec, &cfg.ssh_profiles)
+        });
+        match pinned {
+            Some(name) if self.terminal.exited => Some(self.ended_title(&name)),
+            Some(name) => Some(name),
+            None => self.stated_title().map(str::to_string),
+        }
+    }
+
+    /// `name` with the suffix that says how this pane ended.
+    fn ended_title(&self, name: &str) -> String {
+        let key = if self.workspace().is_some() && !self.terminal.child_exited() {
+            L10nKey::PaneTitleDisconnected
+        } else {
+            L10nKey::PaneTitleProcessExited
+        };
+        t_fmt(key, &[("title", name)])
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -1996,12 +2010,6 @@ impl TerminalView {
 
     pub fn git_status_cwd(&self) -> Option<&std::path::Path> {
         self.git_status_cwd.as_deref()
-    }
-
-    /// See [`native_ssh_cwd`]. `None` for every pane that is not a native SSH
-    /// one — those either have a `git_status_cwd` or have no cwd to name.
-    pub fn native_ssh_cwd(&self) -> Option<std::path::PathBuf> {
-        native_ssh_cwd(self.remote_context().as_ref(), self.cwd())
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -2259,17 +2267,7 @@ impl TerminalView {
                 self.pending_title = None;
                 // The pane keeps answering to its own name (an SSH pane's
                 // host, #438) — only the state suffix is localized (#602).
-                self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
-                    t_fmt(
-                        L10nKey::PaneTitleDisconnected,
-                        &[("title", &self.default_title)],
-                    )
-                } else {
-                    t_fmt(
-                        L10nKey::PaneTitleProcessExited,
-                        &[("title", &self.default_title)],
-                    )
-                };
+                self.title = self.ended_title(&self.default_title);
                 if self.terminal.child_exited() {
                     cx.emit(ChildExited);
                 }
@@ -3776,6 +3774,8 @@ impl TerminalView {
             _ => {}
         }
 
+        self.poll_agent_detection(at_prompt, cx);
+
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 
         let session = self.terminal.agent_session();
@@ -3902,7 +3902,6 @@ impl TerminalView {
                 self.history_ready = false;
             }
         }
-        self.history_ranked.clear();
         self.history_frecency.clear();
         self.history_nav = None;
         self.reverse_search = None;
@@ -4034,6 +4033,24 @@ impl TerminalView {
                 }
             },
         );
+    }
+
+    /// Report an agent that has just started in this pane ([`AgentDetected`]),
+    /// once per start, and never one that was already running when this view
+    /// reattached to the pane.
+    fn poll_agent_detection(&mut self, at_prompt: bool, cx: &mut Context<Self>) {
+        let agent = self.terminal.foreground_agent();
+        if agent != self.seen_agent {
+            self.seen_agent = agent;
+            if let Some(agent) = agent
+                && self.agent_detection_armed
+            {
+                cx.emit(AgentDetected(agent));
+            }
+        }
+        if agent.is_none() && at_prompt {
+            self.agent_detection_armed = true;
+        }
     }
 
     fn poll_agent_status(
@@ -4657,9 +4674,11 @@ impl TerminalView {
                     exit: None,
                 },
             );
-            if self.history.last().map(String::as_str) != Some(line.as_str()) {
-                self.history.push(line.clone());
-            }
+            // One entry per command, at its latest run: the same global
+            // dedup `normalize` applies on load, so ↑ does not step onto a
+            // command twice and a restart does not reorder anything.
+            self.history.retain(|h| *h != line);
+            self.history.push(line.clone());
             self.flush_pending_history();
             self.pending_history = Some(PendingHistory {
                 line: line.clone(),
@@ -4669,7 +4688,10 @@ impl TerminalView {
             });
             self.rerank_history(cwd.as_deref());
         }
+        // The dedup above can shift entries down, so nothing may keep an
+        // index into `history` across a submit.
         self.history_nav = None;
+        self.last_word_nav = None;
         self.history_stash.clear();
         self.history_prefix.clear();
         self.close_completion();
@@ -4779,12 +4801,6 @@ impl TerminalView {
 
     fn rerank_history(&mut self, cwd: Option<&std::path::Path>) {
         let cwd_str = cwd.and_then(|p| p.to_str());
-        self.history_ranked = super::history::rank_by_frecency(
-            &self.history,
-            &self.history_counts,
-            &self.history_cwds,
-            cwd_str,
-        );
         self.history_frecency = super::history::frecency_scores(
             &self.history,
             &self.history_counts,
@@ -4809,15 +4825,42 @@ impl TerminalView {
         super::history::append(&self.history_scope, &p.line, p.cwd.as_deref(), p.ts, exit);
     }
 
+    /// The inline suggestion: the most recent entry that extends the line,
+    /// preferring one run in the current directory and falling back to the
+    /// most recent anywhere. Commands that last exited non-zero are never
+    /// offered. Pure recency, not frecency, so the ghost names what ↑ would
+    /// recall rather than an older command that merely ran more often; Ctrl+R
+    /// is where frecency ranks.
     fn ghost_suggestion(&self) -> Option<String> {
         if self.cmd.is_empty() || self.cmd.cursor() != self.cmd.len() {
             return None;
         }
         let line = self.cmd.text();
-        self.history_ranked
-            .iter()
-            .find(|h| h.len() > line.len() && h.starts_with(&line))
-            .cloned()
+        let cwd = self.ranked_cwd.as_deref().and_then(|p| p.to_str());
+        let mut elsewhere = None;
+        for h in self.history.iter().rev() {
+            if h.len() <= line.len() || !h.starts_with(&line) {
+                continue;
+            }
+            if self
+                .history_meta
+                .get(h)
+                .and_then(|m| m.exit)
+                .is_some_and(|code| code != 0)
+            {
+                continue;
+            }
+            let here = cwd.is_some_and(|dir| {
+                self.history_cwds
+                    .get(h)
+                    .is_some_and(|dirs| dirs.contains(dir))
+            });
+            if here || cwd.is_none() {
+                return Some(h.clone());
+            }
+            elsewhere.get_or_insert(h);
+        }
+        elsewhere.cloned()
     }
 
     fn note_integration_gap(&mut self, cx: &mut Context<Self>) {
@@ -5948,6 +5991,22 @@ impl TerminalView {
         self.open_file_link(path, line, column, is_dir, window, cx);
     }
 
+    /// "Open with Default App": the file link under the menu, handed to the
+    /// OS association whatever `link_file_open` says "Open" does.
+    fn open_menu_link_with_default_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The menu only offers this for a local pane; a key binding could
+        // still fire it on a remote one, where the path means nothing here.
+        if !self.host_id.is_local() {
+            return;
+        }
+        let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if let Err(e) = open_file_path(&path) {
+            self.warn_file_open_failed(&path, &e, window, cx);
+        }
+    }
+
     fn reveal_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
             return;
@@ -6539,7 +6598,11 @@ impl TerminalView {
             }
         }
 
-        let cursor_style = cx.global::<Config>().cursor_style;
+        // This caret only exists at a prompt, so the prompt's own shape wins.
+        let cursor_style = {
+            let cfg = cx.global::<Config>();
+            cfg.prompt_cursor_style.shape().unwrap_or(cfg.cursor_style)
+        };
         let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
         let cursor_on = cursor_paint.is_some();
         let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
@@ -7226,6 +7289,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
                 this.open_menu_link(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenLinkWithDefaultApp, window, cx| {
+                this.open_menu_link_with_default_app(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RevealLinkUnderPointer, window, cx| {
                 this.reveal_menu_link(window, cx);
             }))
@@ -7273,10 +7339,18 @@ impl Render for TerminalView {
                             false => L10nKey::AppMenuRevealInFolder,
                         };
                         let label = link_menu_label(path);
+                        let default_app =
+                            offers_default_app_open(local, cx.global::<Config>().file_open_mode());
                         menu.min_w(px(220.))
                             .action_context(menu_focus.clone())
                             .label(label)
                             .menu(t(L10nKey::AppMenuOpenLink), Box::new(OpenLinkUnderPointer))
+                            .when(default_app, |menu| {
+                                menu.menu(
+                                    t(L10nKey::AppMenuOpenLinkWithDefaultApp),
+                                    Box::new(OpenLinkWithDefaultApp),
+                                )
+                            })
                             // A file on another machine has no folder here to
                             // show it in, and naming this one's would show
                             // whatever it happens to keep at that path.
@@ -7327,6 +7401,12 @@ impl Render for TerminalView {
                 let fork_ready = can_fork
                     && view.remote_context().is_none()
                     && view.agent_session().is_some_and(|s| s.session_id.is_some());
+                // `None` over a pane with no agent; otherwise whether it knows
+                // the command line it was started with.
+                let launch_argv_known = view.agent().map(|_| {
+                    view.agent_session()
+                        .is_some_and(|s| s.launch_argv.is_some())
+                });
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -7358,6 +7438,21 @@ impl Render for TerminalView {
                         .separator()
                         .item(PopupMenuItem::new(t(L10nKey::AppMenuForkSession)).disabled(true)),
                     (false, _) => menu,
+                };
+
+                // Only over a running agent, and only live when the pane knows
+                // the command line it was started with — there is nothing to
+                // save otherwise. Beside Fork when both are there.
+                let menu = match launch_argv_known {
+                    Some(known) => {
+                        let menu = if can_fork { menu } else { menu.separator() };
+                        menu.menu_with_disabled(
+                            t(L10nKey::AppMenuSaveAgentLaunchArgs),
+                            Box::new(SaveAgentLaunchArgs),
+                            !known,
+                        )
+                    }
+                    None => menu,
                 };
 
                 menu.separator()
@@ -7601,9 +7696,23 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
     }
 }
 
+/// Whether a file link's menu offers "Open with Default App" beside "Open".
+///
+/// Only for a file on this machine: the OS opener is handed a local path, and
+/// a remote pane's path names nothing here — or worse, this machine's copy.
+/// And not when "Open" already goes to the OS association, where the two rows
+/// would do the same thing.
+fn offers_default_app_open(host_is_local: bool, open_mode: LinkFileOpen) -> bool {
+    host_is_local && open_mode != LinkFileOpen::System
+}
+
 /// Hands a path to whatever the OS has it associated with. Also the fallback
 /// for a directory the file tree cannot reach.
+///
+/// The path is spelled this OS's way first: Explorer takes `c:/a.png` as a
+/// request to show Documents.
 pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
+    let path = &super::search::spelled_for(super::search::PathStyle::NATIVE, path);
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -7621,6 +7730,7 @@ pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
 /// no desktop-neutral Linux equivalent exists, so there the folder is opened
 /// and the file is left for the eye to find.
 pub(crate) fn reveal_file_path(path: &std::path::Path) -> std::io::Result<()> {
+    let path = &super::search::spelled_for(super::search::PathStyle::NATIVE, path);
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut c = std::process::Command::new("open");
@@ -10009,6 +10119,30 @@ mod tests {
         assert!(highlight_runs("", &[]).is_empty());
     }
 
+    /// "Open with Default App" sits beside "Open" only where it adds
+    /// something: on a local file, and when "Open" is not already the OS
+    /// association.
+    #[test]
+    fn the_default_app_row_is_offered_only_where_it_differs_from_open() {
+        use super::{LinkFileOpen, offers_default_app_open};
+        assert!(offers_default_app_open(true, LinkFileOpen::Internal));
+        assert!(offers_default_app_open(true, LinkFileOpen::Command));
+        assert!(
+            !offers_default_app_open(true, LinkFileOpen::System),
+            "it would repeat Open"
+        );
+        for mode in [
+            LinkFileOpen::Internal,
+            LinkFileOpen::System,
+            LinkFileOpen::Command,
+        ] {
+            assert!(
+                !offers_default_app_open(false, mode),
+                "a remote file has nothing here for the OS to open ({mode:?})"
+            );
+        }
+    }
+
     #[test]
     fn only_a_matching_host_may_answer_for_a_panes_paths() {
         assert!(cwd_is_on_host(false, true));
@@ -10016,37 +10150,6 @@ mod tests {
 
         assert!(!cwd_is_on_host(true, true));
         assert!(!cwd_is_on_host(false, false));
-    }
-
-    #[test]
-    fn only_a_native_ssh_pane_names_its_remote_cwd() {
-        use super::{RemoteContext, native_ssh_cwd};
-        use std::path::PathBuf;
-        let native = RemoteContext {
-            kind: RemoteKind::NativeSsh,
-            argv: Vec::new(),
-            target: "ubuntu@box".into(),
-        };
-        let home = || Some(PathBuf::from("/home/ubuntu"));
-        assert_eq!(native_ssh_cwd(Some(&native), home()), home());
-
-        // `ssh` typed at a local prompt: the directory is a guess, not a
-        // report from the far end.
-        let typed = RemoteContext {
-            kind: RemoteKind::Ssh,
-            ..native.clone()
-        };
-        assert_eq!(native_ssh_cwd(Some(&typed), home()), None);
-        assert_eq!(native_ssh_cwd(Some(&wsl_context("Ubuntu")), home()), None);
-        // A local pane has its own path through `git_status_cwd`.
-        assert_eq!(native_ssh_cwd(None, home()), None);
-
-        assert_eq!(native_ssh_cwd(Some(&native), None), None);
-        assert_eq!(
-            native_ssh_cwd(Some(&native), Some(PathBuf::from("~"))),
-            None,
-            "only an absolute path names a directory"
-        );
     }
 
     /// Which machine's spelling a pane's paths are read in. Ungated on
@@ -13611,6 +13714,7 @@ mod gpui_tests {
     #[gpui::test]
     fn the_zoom_modifier_takes_the_wheel_off_the_scrollback(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
+        cx.update(|cx| cx.global_mut::<Config>().mouse_zoom_modifier = MouseZoomModifier::Platform);
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
@@ -13702,6 +13806,7 @@ mod gpui_tests {
     #[gpui::test]
     fn a_zoom_gesture_keeps_zooming_after_the_modifier_is_released(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
+        cx.update(|cx| cx.global_mut::<Config>().mouse_zoom_modifier = MouseZoomModifier::Platform);
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
@@ -13721,6 +13826,7 @@ mod gpui_tests {
     #[gpui::test]
     fn a_new_gesture_is_not_bound_by_what_the_last_one_answered(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
+        cx.update(|cx| cx.global_mut::<Config>().mouse_zoom_modifier = MouseZoomModifier::Platform);
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
@@ -14048,7 +14154,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 assert!(view.input_active(), "the local editor owns a fresh prompt");
-                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.history = vec!["git log --oneline".to_string()];
                 view.cmd.set("git l");
 
                 view.handle_editor_key(&key("ctrl-e"), cx);
@@ -14072,7 +14178,7 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.history = vec!["git log --oneline".to_string()];
                 view.cmd.set_with_cursor("git l", 2);
 
                 view.handle_editor_key(&key("ctrl-e"), cx);
@@ -16285,6 +16391,339 @@ mod gpui_tests {
                     view.selecting,
                     "with no menu over it the same press is the grid's to take"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Quick launch counts an agent each time one starts. Reattaching to a pane
+    /// whose agent was already running — every agent tab after an app restart
+    /// — is not a start, and counting it bumped every agent once per launch of
+    /// the app. Once that pane's agent exits, the next one is a start again.
+    #[gpui::test]
+    fn only_an_agent_that_starts_under_this_view_counts_as_detected(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let detected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let pane = |reattached: bool, cx: &mut TestAppContext| {
+            let (pane, daemon) = window
+                .update(cx, |_, window, cx| {
+                    if reattached {
+                        super::quiet_reattached_test_pane(2, window, cx)
+                    } else {
+                        super::quiet_test_pane(3, window, cx)
+                    }
+                })
+                .unwrap();
+            let seen = detected.clone();
+            cx.update(|cx| {
+                cx.subscribe(&pane, move |_, ev: &AgentDetected, _| {
+                    seen.borrow_mut().push(ev.0)
+                })
+                .detach()
+            });
+            (pane, daemon)
+        };
+        let report = |agent: Option<CLIAgent>,
+                      at_prompt: bool,
+                      pane: &Entity<TerminalView>,
+                      daemon: &mut Stream,
+                      cx: &mut TestAppContext| {
+            DaemonMsg::Agent(agent).encode(daemon).unwrap();
+            for _ in 0..200 {
+                if pane.read_with(cx, |p, _| p.terminal.foreground_agent()) == agent {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            pane.update(cx, |p, cx| p.poll_agent_detection(at_prompt, cx));
+            cx.run_until_parked();
+        };
+
+        let (restored, mut restored_daemon) = pane(true, cx);
+        report(
+            Some(CLIAgent::Claude),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        report(
+            Some(CLIAgent::Claude),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        assert_eq!(
+            *detected.borrow(),
+            vec![],
+            "already running when reattached"
+        );
+        report(None, true, &restored, &mut restored_daemon, cx);
+        report(
+            Some(CLIAgent::Codex),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        assert_eq!(
+            *detected.borrow(),
+            vec![CLIAgent::Codex],
+            "started after the reattach"
+        );
+
+        let (fresh, mut fresh_daemon) = pane(false, cx);
+        report(Some(CLIAgent::Claude), false, &fresh, &mut fresh_daemon, cx);
+        report(Some(CLIAgent::Claude), false, &fresh, &mut fresh_daemon, cx);
+        assert_eq!(
+            *detected.borrow(),
+            vec![CLIAgent::Codex, CLIAgent::Claude],
+            "a spawned pane counts its first agent, once"
+        );
+    }
+
+    /// #958: `prompt_cursor_style` shapes the shell's own caret at a prompt,
+    /// leaves the running program's cursor alone, and steps aside for a vi-mode
+    /// prompt, whose insert/normal shapes are the shell's to set.
+    #[gpui::test]
+    fn prompt_cursor_style_shapes_only_the_prompt(cx: &mut TestAppContext) {
+        use crate::core::config::{CursorStyle, PromptCursorStyle};
+
+        let (window, mut daemon) = harness(cx);
+        let shape = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let view = window.entity(cx).unwrap();
+                TerminalElement::new(view).prompt_cursor_shape(cx)
+            })
+        };
+        let wait_for = |cx: &mut TestAppContext, want: &dyn Fn(&TerminalView) -> bool| {
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if window.update(cx, |view, _, _| want(view)).unwrap() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the pane never reached the expected prompt state");
+        };
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Bar);
+
+        assert_eq!(
+            shape(cx),
+            None,
+            "no prompt reported yet: a program owns the cursor"
+        );
+
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|view| view.terminal.at_prompt());
+        assert_eq!(shape(cx), Some(CursorStyle::Bar));
+
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Follow);
+        assert_eq!(shape(cx), None, "follow leaves the prompt on cursor_style");
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Bar);
+
+        DaemonMsg::Output(b"\x1b]133;V;1\x07\x1b]133;B\x07".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        wait_for(cx, &|view| view.terminal.shell_vi_mode());
+        assert_eq!(
+            shape(cx),
+            None,
+            "a vi-mode prompt keeps the shell's own shapes"
+        );
+
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|view| !view.terminal.at_prompt());
+        assert_eq!(shape(cx), None, "a running command gets cursor_style back");
+    }
+
+    /// Seeds a pane's history for the ghost tests: `(command, dirs, exit)`,
+    /// oldest first, with `cwd` as the directory the pane is in.
+    fn seed_ghost_history(
+        view: &mut TerminalView,
+        entries: &[(&str, &[&str], Option<i32>)],
+        cwd: Option<&str>,
+    ) {
+        view.history = entries.iter().map(|(cmd, _, _)| cmd.to_string()).collect();
+        view.history_cwds.clear();
+        view.history_meta.clear();
+        for (cmd, dirs, exit) in entries {
+            view.history_cwds.insert(
+                cmd.to_string(),
+                dirs.iter().map(|d| d.to_string()).collect(),
+            );
+            view.history_meta.insert(
+                cmd.to_string(),
+                crate::terminal::history::EntryMeta {
+                    ts: None,
+                    exit: *exit,
+                },
+            );
+        }
+        view.rerank_history(cwd.map(std::path::Path::new));
+    }
+
+    #[gpui::test]
+    fn ghost_suggests_the_command_just_run_over_a_frequent_one(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("git checkout main", &["/work/proj"], Some(0)),
+                        ("git commit -m x", &["/work/proj"], Some(0)),
+                    ],
+                    Some("/work/proj"),
+                );
+                view.history_counts
+                    .insert("git checkout main".to_string(), 20);
+                view.rerank_history(Some(std::path::Path::new("/work/proj")));
+                view.cmd.set("git c");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("git commit -m x"),
+                    "recency decides the ghost, however often the older one ran"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ghost_prefers_this_directory_then_falls_back_to_anywhere(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("cargo build", &["/work/proj"], None),
+                        ("cargo test --all", &["/elsewhere"], None),
+                        ("npm run dev", &["/elsewhere"], None),
+                    ],
+                    Some("/work/proj"),
+                );
+                view.cmd.set("cargo ");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("cargo build"),
+                    "an older match run here beats a newer one run elsewhere"
+                );
+                view.cmd.set("npm ");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("npm run dev"),
+                    "with nothing run here, the newest match anywhere is offered"
+                );
+                view.cmd.set("python ");
+                assert_eq!(view.ghost_suggestion(), None);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ghost_skips_commands_that_failed(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("make test", &["/work/proj"], Some(0)),
+                        ("make tset", &["/work/proj"], Some(2)),
+                        ("make lint", &["/work/proj"], Some(1)),
+                    ],
+                    Some("/work/proj"),
+                );
+                view.cmd.set("make t");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("make test"),
+                    "the newer typo exited 2, so the older success is offered"
+                );
+                view.cmd.set("make l");
+                assert_eq!(
+                    view.ghost_suggestion(),
+                    None,
+                    "a command whose only run failed is never offered"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ghost_names_what_up_arrow_recalls(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("git status", &[], None),
+                        ("git log --oneline", &[], None),
+                        ("ls", &[], None),
+                        ("git push", &[], None),
+                        ("echo hi", &[], None),
+                    ],
+                    None,
+                );
+                view.history_counts.insert("git status".to_string(), 50);
+                view.rerank_history(None);
+                for typed in ["git", "git l", "e", "l"] {
+                    view.history_nav = None;
+                    view.cmd.set(typed);
+                    let ghost = view.ghost_suggestion();
+                    view.handle_editor_key(&key("up"), cx);
+                    assert_eq!(
+                        ghost.as_deref(),
+                        Some(view.cmd.text().as_str()),
+                        "ghost and ↑ disagree on {typed:?}"
+                    );
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn submitting_a_command_again_moves_it_to_the_newest_entry(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        prompt_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "ls", "make"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.cmd.set("git status");
+                view.submit_command(cx);
+                assert_eq!(
+                    view.history,
+                    ["ls", "make", "git status"],
+                    "one entry per command, at its latest run, as a reload leaves it"
+                );
+
+                view.cmd.set("");
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "git status");
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "make", "↑ never lands on a command twice");
             })
             .unwrap();
     }

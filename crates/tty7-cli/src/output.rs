@@ -47,6 +47,17 @@ fn clamp(s: &str, max: usize) -> String {
 /// The last segment of a path, for columns that have room for a word and not
 /// for a path. Both separators: the same server answers a Windows client, and
 /// `C:\proj` has to lose its head too.
+/// What the sidebar's header for a pinned group reads: the name the user gave
+/// it, or the last segment of its folder — the full path would be the widest
+/// column in the table for no gain.
+pub fn pinned_group_label(group: &tty7_core::core::group_key::PinnedGroup) -> String {
+    group
+        .given_name()
+        .map(str::to_string)
+        .or_else(|| group.folder.as_deref().map(|f| path_leaf(f).to_string()))
+        .unwrap_or_else(|| "-".to_string())
+}
+
 pub fn path_leaf(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['/', '\\']);
     match trimmed.rsplit(['/', '\\']).next() {
@@ -140,9 +151,14 @@ pub fn pane_table(machine: &Machine, only: Option<WorkspaceId>) -> String {
                     record
                         .and_then(|r| r.cwd.clone())
                         .unwrap_or_else(|| "-".to_string()),
-                    record
-                        .map(|r| if r.live { "yes" } else { "no" }.to_string())
-                        .unwrap_or_else(|| "?".to_string()),
+                    // Not running, and meant not to be: a sleeping tab's panes
+                    // are waiting for their tab to be woken, not dead.
+                    match record {
+                        _ if tab.hibernated => "asleep".to_string(),
+                        Some(r) if r.live => "yes".to_string(),
+                        Some(_) => "no".to_string(),
+                        None => "?".to_string(),
+                    },
                 ]);
             }
         }
@@ -647,5 +663,30 @@ mod tests {
             "{}",
             procs_tables(&empty)
         );
+    }
+
+    /// A sleeping tab's panes are not running and not dead either: the table
+    /// says which, so nobody reads a tab put to sleep as one that crashed.
+    #[test]
+    fn the_pane_table_calls_a_sleeping_tabs_panes_asleep() {
+        let mut m = two_workspace_machine();
+        m.workspaces[0].tabs[1].hibernated = true;
+        for pane in &mut m.panes {
+            if pane.id == 2 || pane.id == 3 {
+                pane.live = false;
+            }
+        }
+        let rendered = pane_table(&m, None);
+        let row = |pane: &str| {
+            rendered
+                .lines()
+                .find(|l| l.starts_with(pane))
+                .unwrap_or_else(|| panic!("no row for {pane}: {rendered}"))
+                .to_string()
+        };
+        assert!(row("%1 ").ends_with("yes"), "{rendered}");
+        assert!(row("%2 ").ends_with("asleep"), "{rendered}");
+        assert!(row("%3 ").ends_with("asleep"), "{rendered}");
+        assert!(row("%5 ").ends_with("yes"), "{rendered}");
     }
 }

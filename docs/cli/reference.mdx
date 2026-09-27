@@ -295,7 +295,7 @@ candidates.
 | Command | Effect | JSON |
 |---|---|---|
 | `ws ls` | Every workspace | `{"workspaces":[...]}` |
-| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","tabs":[{"id","name","sidebar_group","root",…}]}` |
+| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","groups":{"pinned":[…]},"tabs":[{"id","name","group","last_auto","root",…}]}` |
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
 | `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
@@ -324,7 +324,7 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…]}]}` |
+| `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…],"hibernated"}]}` |
 | `tab new [WORKSPACE] [--cwd DIR]` | Add a tab with a fresh shell | `{"tab","pane"}` |
 | `tab new [WORKSPACE] --pane %PANE` | Add a tab around a pane already running | `{"tab","pane"}` |
 | `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
@@ -342,9 +342,11 @@ tree drops a pane's record when the tab holding it closes, and the registry is
 what is left. That only matters if the shell later dies, since a restore would
 then have nothing to restore from.
 
-`GROUP` is the heading the GUI's sidebar files the tab under, shown by its last
-segment. Read-only from here: with the default repo grouping the GUI recomputes
-it from the tab's working directory.
+`GROUP` is the pinned sidebar group the tab is kept in — its name, or the last
+segment of its folder — and `-` for a tab the GUI groups automatically. The JSON
+carries the group's `id`, `name` and `folder` (or `null`). Auto groups are not
+listed: the GUI works them out from each tab's working directory and stores
+nothing about them.
 
 `label` falls back through the best evidence available — the name if someone set
 one, else the agent running there, else the last segment of the cwd, else the
@@ -355,7 +357,7 @@ a stand-in.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag | `{"panes":[…]}` |
+| `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag (`asleep` for a hibernated tab's panes) | `{"panes":[…]}` |
 | `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
 | `pane split …` | Identical to top-level `split` | `{"pane"}` |
 | `pane close [%PANE…]` | Close panes; their shells are hung up | `{"closed":[…]}` |

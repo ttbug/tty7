@@ -30,25 +30,43 @@ const FORM_W: f32 = 480.0;
 /// The host dropdown shows about eight rows before it scrolls.
 const FORM_LIST_H: f32 = 8.5 * (ROW_H + 8.0);
 
-const LEFT_W: f32 = 320.0;
+const LEFT_W: f32 = 340.0;
 
-pub(crate) const CARD_TOP: f32 = 120.0;
+pub(crate) const CARD_TOP: f32 = 112.0;
 
 /// Breathing room the card keeps from the window edge, and the height its own
 /// search row and footer take on top of the body.
 const CARD_MARGIN: f32 = 24.0;
-const SEARCH_H: f32 = 52.0;
-const FOOTER_H: f32 = 42.0;
+const SEARCH_H: f32 = 48.0;
+const FOOTER_H: f32 = 40.0;
 const CARD_CHROME_H: f32 = SEARCH_H + FOOTER_H + 2.0;
 
-const BODY_H: f32 = 360.0;
+const BODY_H: f32 = 420.0;
 
-const ROW_AVATAR: f32 = 24.0;
+/// The card's corner — a notch rounder than an ordinary popover: it is the
+/// one overlay that fills most of the window.
+const CARD_RADIUS: f32 = 12.0;
 
+/// Padding around each column's list.
+const COLUMN_PAD: f32 = 8.0;
+
+/// A workspace on the left: a name line over a machine · path · time line,
+/// beside a disc carrying the machine's link state.
+const WS_ROW_H: f32 = 52.0;
+const WS_AVATAR: f32 = 26.0;
+const WS_DOT: f32 = 8.0;
+
+/// A tab in the preview column, with the same brand disc the sidebar uses.
+const TAB_ROW_H: f32 = 44.0;
+const TAB_AVATAR: f32 = 18.0;
+const RUN_DOT: f32 = 5.0;
+
+/// The list rows' corner.
+const LIST_RADIUS: f32 = 8.0;
+
+/// The create form's rows and the rename field keep the compact height.
 const ROW_H: f32 = 34.0;
-const HOST_H: f32 = 32.0;
-
-const GUTTER: f32 = 26.0;
+const HOST_H: f32 = 28.0;
 
 const ICON: f32 = 14.0;
 
@@ -155,26 +173,27 @@ struct Row {
 
 /// One tab in the right-hand column. Built once per frame for every workspace
 /// on the left, so the search can match tab names and the column can render
-/// without a second pass over the machine tree.
+/// without a second pass over the machine tree. Search Everywhere's Terminals
+/// tab is built from the same rows.
 #[derive(Clone)]
-struct TabRow {
-    id: TabId,
+pub(crate) struct TabRow {
+    pub(crate) id: TabId,
     /// Position in the owning workspace's tab order — what `activate` wants.
-    index: usize,
-    label: String,
-    path: String,
+    pub(crate) index: usize,
+    pub(crate) label: String,
+    pub(crate) path: String,
     /// Whether `label` is a name someone gave the tab. When it is not, the
     /// label is already derived from the working directory and showing `path`
     /// next to it just prints the same place twice.
-    named: bool,
-    agent: Option<crate::core::cli_agent::CLIAgent>,
-    status: Option<crate::core::cli_agent::AgentStatus>,
-    unread: usize,
-    ssh: Option<u32>,
-    active: bool,
+    pub(crate) named: bool,
+    pub(crate) agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub(crate) status: Option<crate::core::cli_agent::AgentStatus>,
+    pub(crate) unread: usize,
+    pub(crate) ssh: Option<u32>,
+    pub(crate) active: bool,
     /// Branch and diff counts, the same line the tab sidebar shows. Only this
     /// window's own tabs have it — the machine tree carries no git state.
-    git: Option<tty7_core::core::git::GitStatus>,
+    pub(crate) git: Option<tty7_core::core::git::GitStatus>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -420,7 +439,7 @@ fn default_workspace_name(chosen: Option<&HostChoice>, cx: &App) -> String {
 fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<HostItem> {
     let query = query.trim();
     let mut items: Vec<HostItem> = Vec::new();
-    if query.is_empty() || crate::ui::palette::fuzzy_score(query, local_label).is_some() {
+    if query.is_empty() || crate::ui::search::fuzzy_score(query, local_label).is_some() {
         items.push(HostItem::Local);
     }
     items.extend(
@@ -755,7 +774,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: w.host.as_ref().map(|r| r.workspace),
                     slot: slot_of(w.id),
-                    tabs: self.tab_rows_for(w.id, app),
+                    tabs: self.tab_rows_for(w.id, self.switcher_mru(), app),
                 });
             }
         }
@@ -834,7 +853,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: None,
                     slot: slot_of(current),
-                    tabs: self.tab_rows_for(current, app),
+                    tabs: self.tab_rows_for(current, self.switcher_mru(), app),
                 },
             );
         }
@@ -883,7 +902,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: None,
                     slot: None,
-                    tabs: self.tab_rows_for(ws.id, app),
+                    tabs: self.tab_rows_for(ws.id, self.switcher_mru(), app),
                 })
                 .collect();
             groups[slot].rows.extend(rows);
@@ -956,13 +975,22 @@ impl Tty7App {
         groups
     }
 
+    /// Whether the open switcher lists this window's tabs most recently used
+    /// first — the Ctrl-Tab gesture — rather than in strip order.
+    fn switcher_mru(&self) -> bool {
+        self.switcher.as_ref().is_some_and(|sw| sw.mru)
+    }
+
     /// The tab column's rows for one workspace. This window's own workspace has
     /// live in-memory tabs (agent status, unread counts, MRU order); every other
     /// workspace comes out of the machine mirror, which is the only view this
     /// process has of windows it does not own.
-    fn tab_rows_for(&self, id: WorkspaceId, cx: &App) -> Vec<TabRow> {
+    ///
+    /// `mru` orders this window's own tabs most recently used first instead of
+    /// in strip order; other workspaces' tabs come in the order they have.
+    pub(crate) fn tab_rows_for(&self, id: WorkspaceId, mru: bool, cx: &App) -> Vec<TabRow> {
         if id == self.workspace {
-            let order = match self.switcher.as_ref().is_some_and(|sw| sw.mru) {
+            let order = match mru {
                 true => self.tabs_by_mru(),
                 false => (0..self.tabs.len()).collect(),
             };
@@ -1625,8 +1653,8 @@ impl Tty7App {
             else {
                 return;
             };
-            let (ws, id, index) = (row.id, tab.id, tab.index);
-            self.switcher_open_tab(ws, id, index, new_window, window, cx);
+            let (ws, id) = (row.id, tab.id);
+            self.switcher_open_tab(ws, id, new_window, window, cx);
             return;
         }
         if let Some(&(g, r)) = layout.nav.get(sel) {
@@ -1636,23 +1664,33 @@ impl Tty7App {
         }
     }
 
-    /// Activates one tab of `ws`, wherever that workspace happens to live.
     fn switcher_open_tab(
         &mut self,
         ws: WorkspaceId,
         tab: TabId,
-        index: usize,
         new_window: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_switcher(window, cx);
+        self.go_to_tab(ws, tab, new_window, window, cx);
+    }
+
+    /// Activates one tab of `ws`, wherever that workspace happens to live.
+    pub(crate) fn go_to_tab(
+        &mut self,
+        ws: WorkspaceId,
+        tab: TabId,
+        new_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if new_window {
             crate::ui::windows::open_at_tab(cx, ws, tab);
             return;
         }
         if ws == self.workspace {
-            self.activate(index, window, cx);
+            self.activate_tree_tab(tab, window, cx);
             return;
         }
         // A workspace that already has a window belongs to that window; anything
@@ -1792,7 +1830,7 @@ impl Tty7App {
                             .track_scroll(&left_scroll)
                             .size_full()
                             .overflow_y_scroll()
-                            .p(px(6.))
+                            .p(px(COLUMN_PAD))
                             .child(list),
                         &left_scroll,
                     )),
@@ -1814,7 +1852,7 @@ impl Tty7App {
                             .track_scroll(&right_scroll)
                             .size_full()
                             .overflow_y_scroll()
-                            .p(px(6.))
+                            .p(px(COLUMN_PAD))
                             .child(self.render_tabs(&layout, sel, column, cx)),
                         &right_scroll,
                     )),
@@ -1823,6 +1861,7 @@ impl Tty7App {
         v_flex()
             .w(px(card_w))
             .map(|panel| crate::ui::theme::floating_surface(panel, cx))
+            .rounded(px(CARD_RADIUS))
             .overflow_hidden()
             .child(self.render_search(cx))
             .child(body)
@@ -1836,26 +1875,26 @@ impl Tty7App {
         let (muted, border) = (theme.muted_foreground, theme.border);
         h_flex()
             .items_center()
-            .gap(px(8.))
-            .pl(px(6. + ROW_PAD))
-            .pr(px(12.))
+            .gap(px(10.))
+            .pl(px(18.))
+            .pr(px(14.))
             .h(px(SEARCH_H))
             .border_b_1()
             .border_color(border)
-            .child(glyph_col(
-                GUTTER,
-                Icon::new(IconName::Search).size(px(ICON)).text_color(muted),
-            ))
-            .children(
-                self.switcher
-                    .as_ref()
-                    .map(|sw| Input::new(&sw.query).appearance(false).small().pl_0()),
+            .child(Icon::new(IconName::Search).size(px(12.)).text_color(muted))
+            .child(
+                div().flex_1().min_w_0().children(
+                    self.switcher
+                        .as_ref()
+                        .map(|sw| Input::new(&sw.query).appearance(false).pl_0()),
+                ),
             )
+            .child(keycap("esc", cx))
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
         let hover = hover_fill(cx);
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
         // With a query in the box, ← and → belong to the caret and Tab becomes
@@ -1865,29 +1904,71 @@ impl Tty7App {
             .switcher
             .as_ref()
             .is_some_and(|sw| !sw.text(cx).trim().is_empty());
+        let hint = |keys: Vec<AnyElement>, label: String| {
+            h_flex()
+                .items_center()
+                .gap(px(6.))
+                .children(keys)
+                .child(label)
+                .into_any_element()
+        };
+        let mut hints: Vec<AnyElement> = Vec::new();
+        if holding {
+            hints.push(
+                div()
+                    .child(t(L10nKey::SwitcherHoldToSwitch))
+                    .into_any_element(),
+            );
+        } else {
+            if filtering {
+                hints.push(
+                    div()
+                        .child(t(L10nKey::SwitcherTabToCrossColumns))
+                        .into_any_element(),
+                );
+            }
+            hints.push(hint(
+                vec![keycap("↑", cx), keycap("↓", cx)],
+                t(L10nKey::SwitcherHintNavigate).to_string(),
+            ));
+            hints.push(hint(
+                vec![keycap("↵", cx)],
+                t(L10nKey::SwitcherHintOpen).to_string(),
+            ));
+            hints.push(hint(
+                vec![keycap(
+                    match cfg!(target_os = "macos") {
+                        true => format!("{}↵", crate::ui::keymap::secondary_glyph()),
+                        false => format!("{} ↵", crate::ui::keymap::secondary_glyph()),
+                    },
+                    cx,
+                )],
+                t(L10nKey::SwitcherHintNewWindow).to_string(),
+            ));
+        }
         h_flex()
             .items_center()
             .justify_between()
+            .gap(px(16.))
             .border_t_1()
             .border_color(border)
             .h(px(FOOTER_H))
-            .px(px(6.))
+            .pl(px(8.))
+            .pr(px(10.))
             .child(
                 h_flex()
                     .id("switcher-new-workspace")
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(8.))
-                    .h(px(ROW_H))
-                    .px(px(ROW_PAD))
-                    .rounded(crate::ui::rounding::ROW_RADIUS)
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded(px(6.))
                     .cursor_pointer()
                     .hover(move |r| r.bg(hover))
-                    .text_size(gpui::rems(13. / 16.))
-                    .text_color(muted)
-                    .child(glyph_col(
-                        GUTTER,
-                        Icon::new(IconName::Plus).size(px(ICON)).text_color(muted),
-                    ))
+                    .text_size(gpui::rems(12.5 / 16.))
+                    .text_color(fg)
+                    .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
                     .child(t(L10nKey::AppMenuNewWorkspace))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.switcher_to_form(None, window, cx);
@@ -1895,27 +1976,13 @@ impl Tty7App {
             )
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .items_center()
-                    .gap(px(6.))
-                    .pr(px(ROW_PAD))
-                    .text_size(gpui::rems(11. / 16.))
+                    .gap(px(16.))
+                    .text_size(gpui::rems(11.5 / 16.))
                     .text_color(muted)
-                    .when(!holding && filtering, |hint| {
-                        hint.child(t(L10nKey::SwitcherTabToCrossColumns))
-                    })
-                    .when(!holding && !filtering, |hint| {
-                        hint.child(
-                            div()
-                                .px(px(5.))
-                                .py(px(1.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(border)
-                                .child(crate::ui::keymap::secondary_glyph()),
-                        )
-                        .child(t(L10nKey::ClickForNewWindow))
-                    })
-                    .when(holding, |hint| hint.child(t(L10nKey::SwitcherHoldToSwitch))),
+                    .children(hints),
             )
     }
 
@@ -2303,9 +2370,9 @@ impl Tty7App {
             return h_flex()
                 .id(("switcher-rename", row.id.element_key() as usize))
                 .items_center()
-                .h(px(ROW_H))
+                .h(px(WS_ROW_H))
                 .px(px(ROW_PAD))
-                .rounded(crate::ui::rounding::ROW_RADIUS)
+                .rounded(px(LIST_RADIUS))
                 .bg(hover_fill(cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(Input::new(input).appearance(false).xsmall())
@@ -2351,119 +2418,168 @@ impl Tty7App {
         // workspace name plus path plus badge plus timestamp on one row pushes
         // the trailing pieces straight out over the divider. The second line
         // leads with the machine the workspace lives on — the flat list's only
-        // grouping — with its link state as the dot's color.
-        let host_dot: Option<gpui::Hsla> = match group.link {
-            Link::Local => None,
-            Link::Connected if group.preempted => Some(warn),
-            Link::Connected => Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()),
-            Link::Connecting | Link::Reconnecting { .. } => Some(warn),
-            Link::Failed => Some(theme.danger),
-            Link::Offline => Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
+        // grouping. Its link state rides on the disc as a dot: green while the
+        // workspace is reachable, faint while it is not, and the warning or
+        // danger ink while a connect is in flight or has failed.
+        let faint = fg.opacity(0.22);
+        let live: gpui::Hsla = gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into();
+        let state_dot = match group.link {
+            Link::Local => match row.live {
+                Liveness::Alive => live,
+                Liveness::Unknown | Liveness::Stopped => faint,
+            },
+            Link::Connected if group.preempted => warn,
+            Link::Connected => live,
+            Link::Connecting | Link::Reconnecting { .. } => warn,
+            Link::Failed => theme.danger,
+            Link::Offline => faint,
         };
         let host_label = match group.target.is_some() {
             true => group.label.clone(),
             false => t(L10nKey::SwitcherLocalHost).to_string(),
         };
+        let mut meta = vec![host_label];
+        if !row.path.is_empty() {
+            meta.push(row.path.clone());
+        }
+        let row_fill = if picked {
+            picked_bg
+        } else {
+            gpui::rgb(sf.base)
+        };
+        let initial: String = row
+            .name
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "~".to_string());
+        let avatar = div()
+            .relative()
+            .flex_shrink_0()
+            .size(px(WS_AVATAR))
+            .child(
+                div()
+                    .size(px(WS_AVATAR))
+                    .rounded_full()
+                    .bg(theme.secondary)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(gpui::rems(11. / 16.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(fg.opacity(0.6))
+                    .child(initial),
+            )
+            .child(
+                // The ring is the row's own fill, so the dot reads as cut
+                // out of the disc whichever state the row is in.
+                div()
+                    .absolute()
+                    .right(px(-3.))
+                    .bottom(px(-3.))
+                    .size(px(WS_DOT + 4.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(row_fill)
+                    .when(!picked, |d| {
+                        d.group_hover("switcher-row", move |d| d.border_color(hover))
+                    })
+                    .bg(state_dot),
+            );
 
         let line = h_flex()
             .id(("switcher-row", key))
             .group("switcher-row")
             .items_center()
-            .gap(px(8.))
-            .min_h(px(ROW_H))
-            .py(px(4.))
+            .gap(px(10.))
+            .h(px(WS_ROW_H))
+            .flex_shrink_0()
             .px(px(ROW_PAD))
-            .rounded(crate::ui::rounding::ROW_RADIUS)
+            .rounded(px(LIST_RADIUS))
             .overflow_hidden()
             .cursor_pointer()
             .when(picked, |r| r.bg(picked_bg))
             .anchor_scroll(self.switcher_anchor(Column::Left, picked))
             .hover(move |r| r.bg(if picked { picked_bg } else { hover }))
-            .child(crate::ui::tab_strip::workspace_avatar(
-                &row.name, row.live, ROW_AVATAR, cx,
-            ))
+            .child(avatar)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(1.))
+                    .gap(px(2.))
                     .child(
-                        div()
-                            .truncate()
-                            .text_size(gpui::rems(13. / 16.))
-                            .when(row.current, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                            .text_color(match unlit {
-                                true => muted,
-                                false => fg,
-                            })
-                            .child(row.name.clone()),
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(gpui::rems(13. / 16.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(match unlit {
+                                        true => muted,
+                                        false => fg,
+                                    })
+                                    .child(row.name.clone()),
+                            )
+                            // The workspace's number — what Go to Workspace N
+                            // and the Workspaces menu call it — so the slot a
+                            // shortcut reaches can be read off the list that
+                            // does not sort by it (#760).
+                            .children(row.slot.map(|slot| {
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(gpui::rems(11. / 16.))
+                                    .text_color(muted)
+                                    .child((slot + 1).to_string())
+                            })),
                     )
                     .child(
                         h_flex()
                             .items_center()
-                            .gap(px(5.))
                             .min_w_0()
-                            .text_size(gpui::rems(11. / 16.))
+                            .text_size(gpui::rems(11.5 / 16.))
                             .text_color(muted)
-                            .child(match host_dot {
-                                Some(color) => div()
-                                    .flex_shrink_0()
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(color)
-                                    .into_any_element(),
-                                None => gpui::svg()
-                                    .path("icons/machine-local.svg")
-                                    .flex_shrink_0()
-                                    .size(px(10.))
-                                    .text_color(muted)
-                                    .into_any_element(),
-                            })
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .max_w(px(120.))
-                                    .truncate()
-                                    .text_color(muted)
-                                    .child(host_label),
-                            )
                             // The path gives way first and the timestamp
                             // never does: with both in one truncating string
                             // the row ended in `~/repo/025/tty7 · …` every
                             // time, a dangling dot where the time had been.
-                            .when(!row.path.is_empty(), |line| {
-                                line.child(div().flex_shrink_0().child("·"))
-                                    .child(div().min_w_0().truncate().child(row.path.clone()))
-                            })
+                            .child(div().min_w_0().truncate().child(meta.join("  ·  ")))
                             .when(!row.when.is_empty(), |line| {
-                                line.child(div().flex_shrink_0().child("·"))
-                                    .child(div().flex_shrink_0().child(row.when.clone()))
+                                line.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .whitespace_nowrap()
+                                        .child(format!("  ·  {}", row.when)),
+                                )
                             }),
                     ),
             )
-            // The workspace's number — what Go to Workspace N and the
-            // Workspaces menu call it — so the slot a shortcut reaches can be
-            // read off the list that does not sort by it (#760).
-            .children(row.slot.map(|slot| {
-                div()
+            // Tab count over state, both words rather than chips: a filled
+            // pill reads as a button, and these are states. Only "taken over"
+            // keeps a colour — it is the one that warns.
+            .child(
+                v_flex()
                     .flex_shrink_0()
-                    .text_xs()
+                    .items_end()
+                    .gap(px(2.))
+                    .text_size(gpui::rems(11.5 / 16.))
                     .text_color(muted)
-                    .child((slot + 1).to_string())
-            }))
-            // A word, not a chip: a filled pill reads as a button, and these
-            // are states. Only "taken over" keeps a colour — it is the one
-            // that warns.
-            .children(badge.map(|(label, _here)| {
-                div()
-                    .flex_shrink_0()
-                    .text_size(gpui::rems(11. / 16.))
-                    .text_color(match row.preempted {
-                        true => warn,
-                        false => muted,
+                    .when(!row.tabs.is_empty(), |c| {
+                        c.child(row.tabs.len().to_string())
                     })
-                    .child(label)
-            }))
+                    .children(badge.map(|(label, _here)| {
+                        div()
+                            .text_size(gpui::rems(11. / 16.))
+                            .text_color(match row.preempted {
+                                true => warn,
+                                false => muted,
+                            })
+                            .child(label)
+                    })),
+            )
             .child(
                 div()
                     .invisible()
@@ -2800,10 +2916,6 @@ impl Tty7App {
     ) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted) = (theme.foreground, theme.muted_foreground);
-        let added_ink =
-            crate::ui::presets::resting_ink(theme.success, theme.muted_foreground, theme.popover);
-        let removed_ink =
-            crate::ui::presets::resting_ink(theme.danger, theme.muted_foreground, theme.popover);
         let note = |text: String| {
             div()
                 .px(px(ROW_PAD))
@@ -2843,31 +2955,28 @@ impl Tty7App {
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
         let ws = row.id;
 
+        let live: gpui::Hsla = gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into();
         let mut list = v_flex().gap(px(1.)).child(
             h_flex()
                 .items_center()
                 .gap(px(6.))
                 .h(px(HOST_H))
+                .flex_shrink_0()
                 .px(px(ROW_PAD))
+                .text_size(gpui::rems(11.5 / 16.))
+                .text_color(muted)
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(gpui::rems(11. / 16.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(muted)
                         .child(row.name.clone()),
                 )
-                .child(
-                    div()
-                        .text_size(gpui::rems(11. / 16.))
-                        .text_color(muted)
-                        .child(match row.tabs.len() {
-                            1 => t(L10nKey::SwitcherTabCountOne).to_string(),
-                            n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
-                        }),
-                ),
+                .child(div().flex_shrink_0().child(match row.tabs.len() {
+                    1 => t(L10nKey::SwitcherTabCountOne).to_string(),
+                    n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
+                })),
         );
 
         for (nth, i) in hits.iter().enumerate() {
@@ -2875,60 +2984,38 @@ impl Tty7App {
             let picked = nth == right_sel && column == Column::Right;
             let (id, index) = (tab.id, tab.index);
             // The second line is what tells two tabs on the same repo apart —
-            // the branch, then the diff counts, mirroring the tab sidebar.
-            let under = tab.git.as_ref().map(|g| {
-                h_flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .text_size(gpui::rems(11. / 16.))
-                    .text_color(muted)
-                    .child(
-                        gpui::svg()
-                            .path("icons/git-branch.svg")
-                            .flex_shrink_0()
-                            .size(px(11.))
-                            .text_color(muted),
-                    )
-                    .child(div().min_w_0().truncate().child(g.branch.clone()))
-                    .when(g.added > 0, |c| {
-                        c.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(added_ink)
-                                .child(format!("+{}", g.added)),
-                        )
-                    })
-                    .when(g.removed > 0, |c| {
-                        c.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(removed_ink)
-                                .child(format!("−{}", g.removed)),
-                        )
-                    })
-            });
-            let subtitle = match under {
-                Some(line) => Some(line.into_any_element()),
-                None if tab.named && !tab.path.is_empty() => Some(
-                    div()
-                        .text_size(gpui::rems(11. / 16.))
-                        .truncate()
-                        .text_color(muted)
-                        .child(tab.path.clone())
-                        .into_any_element(),
-                ),
+            // the branch, then the diff counts, the same words the tab sidebar
+            // uses, all secondary. A named tab off any repo shows its path.
+            let meta = match tab.git.as_ref() {
+                Some(g) => {
+                    let mut parts = vec![g.branch.clone()];
+                    let counts = [
+                        (g.added > 0).then(|| format!("+{}", g.added)),
+                        (g.removed > 0).then(|| format!("−{}", g.removed)),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                    if !counts.is_empty() {
+                        parts.push(counts.join(" "));
+                    }
+                    Some(parts.join("  ·  "))
+                }
+                None if tab.named && !tab.path.is_empty() => Some(tab.path.clone()),
                 None => None,
             };
+            let running = tab.status == Some(crate::core::cli_agent::AgentStatus::Working);
+            let dot_on = self.working_dot_on;
 
             list = list.child(
                 h_flex()
                     .id(("switcher-tab", index))
                     .items_center()
-                    .gap(px(8.))
-                    .min_h(px(ROW_H))
-                    .py(px(4.))
+                    .gap(px(10.))
+                    .h(px(TAB_ROW_H))
+                    .flex_shrink_0()
                     .px(px(ROW_PAD))
-                    .rounded(crate::ui::rounding::ROW_RADIUS)
+                    .rounded(px(LIST_RADIUS))
                     .overflow_hidden()
                     .cursor_pointer()
                     .when(picked, |r| r.bg(picked_bg))
@@ -2940,7 +3027,7 @@ impl Tty7App {
                         tab.status,
                         tab.unread,
                         tab.ssh,
-                        ROW_AVATAR,
+                        TAB_AVATAR,
                         cx,
                     ))
                     .child(
@@ -2956,7 +3043,13 @@ impl Tty7App {
                                     .text_color(fg)
                                     .child(tab.label.clone()),
                             )
-                            .children(subtitle),
+                            .children(meta.map(|meta| {
+                                div()
+                                    .truncate()
+                                    .text_size(gpui::rems(11.5 / 16.))
+                                    .text_color(muted)
+                                    .child(meta)
+                            })),
                     )
                     .when(tab.active, |r| {
                         r.child(
@@ -2967,15 +3060,20 @@ impl Tty7App {
                                 .child(t(L10nKey::SwitcherActiveTab)),
                         )
                     })
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        this.switcher_open_tab(
-                            ws,
-                            id,
-                            index,
-                            ev.modifiers().secondary(),
-                            window,
-                            cx,
+                    // A working agent's dot blinks in step with the sidebar's,
+                    // so a column of tabs says which ones are still going.
+                    .when(running, |r| {
+                        r.child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(RUN_DOT))
+                                .rounded_full()
+                                .bg(live)
+                                .when(!dot_on, |d| d.opacity(0.25)),
                         )
+                    })
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        this.switcher_open_tab(ws, id, ev.modifiers().secondary(), window, cx)
                     }))
                     // Mid-gesture a click arrives as a right press on macOS. It
                     // aims the cursor; releasing Ctrl is what commits.
@@ -3330,19 +3428,75 @@ fn step(at: usize, n: usize, forward: bool) -> usize {
     }
 }
 
-fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
+/// A key named in a hint: a small faint cap, never a button outline.
+fn keycap(label: impl Into<gpui::SharedString>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
     div()
-        .w(px(w))
         .flex_shrink_0()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px(px(4.))
         .flex()
         .items_center()
         .justify_center()
-        .child(child)
+        .rounded(px(4.))
+        .bg(theme.muted)
+        .text_size(gpui::rems(11. / 16.))
+        .text_color(theme.muted_foreground)
+        .child(label.into())
+        .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The workspace row's shape: a `flex_1` column, and in it a truncating
+    /// name sized by its own text beside the slot number. gpui measures that
+    /// name once against the column's zero basis, and used to answer the
+    /// content-size measure after it from the same cache — so every name in
+    /// the list read "…" with the whole column free beside it.
+    #[gpui::test]
+    fn a_truncating_name_beside_its_number_takes_the_room_it_has(cx: &mut gpui::TestAppContext) {
+        use gpui::{AvailableSpace, InteractiveElement as _, point, size};
+
+        let vcx = cx.add_empty_window();
+        vcx.draw(
+            point(px(0.), px(0.)),
+            size(
+                AvailableSpace::Definite(px(LEFT_W)),
+                AvailableSpace::Definite(px(WS_ROW_H)),
+            ),
+            |_, _| {
+                h_flex()
+                    .w(px(LEFT_W))
+                    .gap(px(10.))
+                    .child(div().flex_shrink_0().size(px(WS_AVATAR)))
+                    .child(
+                        v_flex().flex_1().min_w_0().child(
+                            h_flex()
+                                .gap(px(6.))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .debug_selector(|| "name".into())
+                                        .child("pale-seal"),
+                                )
+                                .child(div().flex_shrink_0().child("1")),
+                        ),
+                    )
+            },
+        );
+        let name = vcx.debug_bounds("name").expect("the name was drawn");
+        // Wider than an ellipsis by a long way: the whole name fits.
+        assert!(
+            name.size.width > px(40.),
+            "the name collapsed to {:?}",
+            name.size.width
+        );
+    }
 
     /// #485 on the path #645 did not cover. A machine the switcher knows only
     /// from a listing snapshot has no store entry to name it, so its group
@@ -4144,11 +4298,11 @@ mod gpui_tests {
             // The search row is the first thing in the card; both columns
             // start below it.
             Spot::Search => (100., 20.),
-            Spot::Workspaces => (20., super::SEARCH_H + 16.),
+            Spot::Workspaces => (20., super::SEARCH_H + super::COLUMN_PAD + 16.),
             // Past the tab column's own header row, onto its first tab.
             Spot::Tabs => (
                 left_w + 40.,
-                super::SEARCH_H + 6. + super::HOST_H + super::ROW_H / 2.,
+                super::SEARCH_H + super::COLUMN_PAD + super::HOST_H + super::TAB_ROW_H / 2.,
             ),
         };
         point(px(card_left + dx), px(super::CARD_TOP + dy))

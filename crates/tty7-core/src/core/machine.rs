@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::cli_agent::CLIAgent;
+use crate::core::group_key::{AutoKey, GroupId, WorkspaceGroups};
 use crate::core::session::WorkspaceId;
 use crate::daemon::protocol::{NativeSshSpec, ShellSpec};
 
@@ -134,6 +135,11 @@ pub struct Workspace {
     /// one read back at boot would name a holder that no longer exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<Attachment>,
+    /// The workspace's pinned sidebar groups and which groups are folded.
+    /// Kept here, beside the tabs that point into it, so every window onto
+    /// the workspace draws the same groups in the same order.
+    #[serde(default, skip_serializing_if = "WorkspaceGroups::is_empty")]
+    pub groups: WorkspaceGroups,
 }
 
 impl Default for Workspace {
@@ -145,6 +151,7 @@ impl Default for Workspace {
             tabs: Vec::new(),
             active_tab: None,
             attachment: None,
+            groups: WorkspaceGroups::default(),
         }
     }
 }
@@ -155,9 +162,34 @@ pub struct Tab {
     pub id: TabId,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub sidebar_group: Option<String>,
+    /// The pinned group this tab was put in, or `None` for one the sidebar
+    /// files by itself. Only pinned groups are stored: an auto group is
+    /// worked out from the tab's cwd every time it is drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
+    /// The auto group this tab last resolved to — a hint, not a membership.
+    ///
+    /// Auto groups are worked out from a repo probe, and at launch no probe
+    /// has answered yet: without this every restored tab sat in Ungrouped
+    /// until its own came back, then jumped. The GUI draws the tab here until
+    /// the live answer lands, and the live answer always wins and rewrites
+    /// it. It never outranks `group`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto: Option<AutoKey>,
     pub root: PaneNode,
+    /// The tab was put to sleep: its panes were stopped to give their memory
+    /// back, and it stays in the workspace to be woken later (#762).
+    ///
+    /// The panes keep their ids in `root` and their records in
+    /// [`Machine::panes`] — cwd, shell, agent session — because waking is a
+    /// restore of exactly those panes, through the same path a reboot takes.
+    /// That is also what keeps the sweeps off them: a pane the tree still
+    /// names is one whose stored screen and history are kept.
+    ///
+    /// Left out of the document while false, so a tree written by this build
+    /// reads the same to one that predates the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hibernated: bool,
 }
 
 impl Tab {
@@ -165,8 +197,10 @@ impl Tab {
         Tab {
             id: TabId::new(),
             name: None,
-            sidebar_group: None,
+            group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane },
+            hibernated: false,
         }
     }
 }
@@ -428,7 +462,12 @@ pub enum LayoutDelta {
     },
     TabRegrouped {
         tab: TabId,
-        group: Option<String>,
+        group: Option<GroupId>,
+        #[serde(default)]
+        last_auto: Option<AutoKey>,
+    },
+    GroupsChanged {
+        groups: WorkspaceGroups,
     },
     TabRestructured {
         tab: Tab,
@@ -747,20 +786,106 @@ impl MachineStore {
         })
     }
 
+    /// Put a tab to sleep, or mark it awake again. Answers the panes the tab
+    /// holds, which for a tab going to sleep are the ones whoever asked is now
+    /// expected to stop — see [`ControlRequest::TabSetHibernated`].
+    ///
+    /// Only the mark changes here. The panes stay in the tab and in the pane
+    /// list, so the facts a wake needs survive the processes: waking hands the
+    /// same ids to the ordinary restore, which spawns successors and swaps
+    /// them in with `pane_replace`. Setting the mark a tab already has is not
+    /// a change and raises no delta.
+    ///
+    /// The delta is `TabRestructured` carrying the whole tab rather than a
+    /// variant of its own, so a client that predates the mark still decodes
+    /// it — it reads the same tab back, minus a field it does not know.
+    ///
+    /// [`ControlRequest::TabSetHibernated`]: crate::daemon::control::ControlRequest::TabSetHibernated
+    pub fn tab_set_hibernated(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        hibernated: bool,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Vec<u64>> {
+        self.mutate(origin, |m| {
+            let t = find_tab(m, workspace, tab)?;
+            let panes = t.root.pane_ids();
+            if t.hibernated == hibernated {
+                return Ok((panes, Vec::new()));
+            }
+            t.hibernated = hibernated;
+            let delta = LayoutDelta::TabRestructured {
+                tab: t.clone(),
+                pane: None,
+            };
+            Ok((panes, vec![(workspace, delta)]))
+        })
+    }
+
     pub fn tab_set_group(
         &self,
         workspace: WorkspaceId,
         tab: TabId,
-        group: Option<String>,
+        group: Option<GroupId>,
+        last_auto: Option<AutoKey>,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
         self.mutate(origin, |m| {
             let t = find_tab(m, workspace, tab)?;
-            t.sidebar_group = group.clone();
+            t.group = group;
+            t.last_auto = last_auto.clone();
             Ok((
                 (),
-                vec![(workspace, LayoutDelta::TabRegrouped { tab, group })],
+                vec![(
+                    workspace,
+                    LayoutDelta::TabRegrouped {
+                        tab,
+                        group,
+                        last_auto,
+                    },
+                )],
             ))
+        })
+    }
+
+    /// Replaces the workspace's sidebar groups whole.
+    ///
+    /// Whole rather than one verb per edit: the set is small, edited by hand,
+    /// and every edit to it — a pin, a rename, a drag that reorders — is
+    /// "this is the list now". Last writer wins, which for two windows racing
+    /// to fold the same header is the answer either of them would have given.
+    ///
+    /// A tab still pointing at a group this drops is handed back to auto
+    /// grouping here, in the same mutation, so the tree never holds a tab
+    /// filed under a group nobody can see. Each such tab is announced like any
+    /// other regroup; the client that sent the new set is left out of those
+    /// deltas as usual and has already cleared the tabs itself.
+    pub fn workspace_set_groups(
+        &self,
+        workspace: WorkspaceId,
+        groups: WorkspaceGroups,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let mut deltas = Vec::new();
+            for t in &mut ws.tabs {
+                if t.group.is_some_and(|g| !groups.contains(g)) {
+                    t.group = None;
+                    deltas.push((
+                        workspace,
+                        LayoutDelta::TabRegrouped {
+                            tab: t.id,
+                            group: None,
+                            last_auto: t.last_auto.clone(),
+                        },
+                    ));
+                }
+            }
+            ws.groups = groups.clone();
+            deltas.push((workspace, LayoutDelta::GroupsChanged { groups }));
+            Ok(((), deltas))
         })
     }
 
@@ -2056,17 +2181,63 @@ mod tests {
         store
             .tab_rename(ws, first.id, Some("build".into()), None)
             .unwrap();
+        let group = GroupId::new();
         store
-            .tab_set_group(ws, first.id, Some("/repo/tty7".into()), None)
+            .tab_set_group(ws, first.id, Some(group), None, None)
             .unwrap();
         store.tab_move(ws, first.id, 1, None).unwrap();
 
         let workspace = store.workspace(ws).unwrap();
         assert_eq!(workspace.tabs[0].id, second.id);
         assert_eq!(workspace.tabs[1].name.as_deref(), Some("build"));
+        assert_eq!(workspace.tabs[1].group, Some(group));
+    }
+
+    /// Dropping a group hands its tabs back to auto grouping in the same
+    /// mutation, and says so — a window that only heard `GroupsChanged` would
+    /// otherwise keep a tab filed under a group it can no longer draw.
+    #[test]
+    fn dropping_a_group_returns_its_tabs_to_auto_grouping() {
+        use crate::core::group_key::PinnedGroup;
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
+        let (keep, drop) = (PinnedGroup::label("keep"), PinnedGroup::label("drop"));
+        let groups = WorkspaceGroups {
+            pinned: vec![keep.clone(), drop.clone()],
+            ..Default::default()
+        };
+        store.workspace_set_groups(ws, groups, None).unwrap();
+        store
+            .tab_set_group(ws, first.id, Some(drop.id), None, None)
+            .unwrap();
+        store
+            .tab_set_group(ws, second.id, Some(keep.id), None, None)
+            .unwrap();
+
+        let (_sub, heard) = recorded(&store);
+        let kept = WorkspaceGroups {
+            pinned: vec![keep.clone()],
+            ..Default::default()
+        };
+        store.workspace_set_groups(ws, kept.clone(), None).unwrap();
+
+        let workspace = store.workspace(ws).unwrap();
+        assert_eq!(workspace.groups, kept);
+        assert_eq!(workspace.tabs[0].group, None, "back to auto grouping");
+        assert_eq!(workspace.tabs[1].group, Some(keep.id), "untouched");
+        let heard = heard.lock().unwrap();
         assert_eq!(
-            workspace.tabs[1].sidebar_group.as_deref(),
-            Some("/repo/tty7")
+            heard.iter().map(|(_, d)| d.clone()).collect::<Vec<_>>(),
+            vec![
+                LayoutDelta::TabRegrouped {
+                    tab: first.id,
+                    group: None,
+                    last_auto: None,
+                },
+                LayoutDelta::GroupsChanged { groups: kept },
+            ]
         );
     }
 
@@ -2800,5 +2971,102 @@ mod tests {
         assert_eq!(machine.workspaces.len(), 1);
         assert_eq!(machine.workspaces[0].tabs[0].root.pane_ids(), vec![3]);
         assert!(machine.panes.is_empty());
+    }
+
+    /// A tab put to sleep keeps its panes — ids in the layout, records in the
+    /// pane list — because waking is a restore of exactly those. Only the
+    /// orphan collection a close runs could take them, and a sleeping tab
+    /// still names them.
+    #[test]
+    fn a_sleeping_tab_keeps_its_panes_and_says_so_in_a_delta() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/work"), false, None)
+            .unwrap();
+        let (_sub, heard) = recorded(&store);
+
+        let panes = store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+
+        assert_eq!(panes, vec![1, 2]);
+        let m = store.machine();
+        let asleep = &m.workspaces[0].tabs[0];
+        assert!(asleep.hibernated);
+        assert_eq!(asleep.root.pane_ids(), vec![1, 2]);
+        assert!(m.panes.iter().any(|p| p.id == 1) && m.panes.iter().any(|p| p.id == 2));
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1);
+        match &heard[0].1 {
+            LayoutDelta::TabRestructured { tab: t, pane: None } => {
+                assert_eq!(t.id, tab.id);
+                assert!(t.hibernated, "the delta carries the mark");
+            }
+            other => panic!("expected TabRestructured, heard {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setting_the_mark_a_tab_already_has_raises_nothing() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let (_sub, heard) = recorded(&store);
+        store.tab_set_hibernated(ws, tab.id, false, None).unwrap();
+        assert!(heard.lock().unwrap().is_empty());
+
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        assert_eq!(heard.lock().unwrap().len(), 1);
+
+        store.tab_set_hibernated(ws, tab.id, false, None).unwrap();
+        assert!(!store.machine().workspaces[0].tabs[0].hibernated);
+        assert_eq!(heard.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn hibernating_a_tab_that_is_not_there_is_refused() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let err = store
+            .tab_set_hibernated(ws, TabId::new(), true, None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Asleep has to outlive the daemon: a restart reads the tree back from
+    /// disk, and a tab that came back awake would be respawned on the spot —
+    /// every process the user put to sleep, started again unasked.
+    #[test]
+    fn a_sleeping_tab_is_still_asleep_after_the_tree_is_read_back() {
+        let (store, dir, ws, tab) = store_with_tab();
+        let other = store
+            .tab_create(ws, None, seed(5, "/else"), None, None)
+            .unwrap();
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        drop(store);
+
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let m = reopened.machine();
+        let tabs = &m.workspaces[0].tabs;
+        assert!(tabs.iter().find(|t| t.id == tab.id).unwrap().hibernated);
+        assert!(!tabs.iter().find(|t| t.id == other.id).unwrap().hibernated);
+        let record = m.panes.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(record.cwd.as_deref(), Some("/work"));
+        assert!(!record.live);
+    }
+
+    /// Awake is the default and stays out of the document, so a tree this
+    /// build writes for a tab that never slept reads the same to one that
+    /// predates the mark, and a tree from before it decodes as awake.
+    #[test]
+    fn the_mark_is_only_written_while_it_is_set() {
+        let tab = Tab::leaf(4);
+        let json = serde_json::to_string(&tab).unwrap();
+        assert!(!json.contains("hibernated"), "{json}");
+        let back: Tab = serde_json::from_str(&json).unwrap();
+        assert!(!back.hibernated);
+
+        let asleep = Tab {
+            hibernated: true,
+            ..Tab::leaf(4)
+        };
+        let back: Tab = serde_json::from_str(&serde_json::to_string(&asleep).unwrap()).unwrap();
+        assert!(back.hibernated);
     }
 }

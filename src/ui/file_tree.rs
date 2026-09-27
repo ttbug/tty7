@@ -11,7 +11,7 @@ use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{ROW_GLYPH, ROW_INSET, git_badge};
+use crate::ui::right_panel::{ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, git_badge};
 use crate::ui::scm::status::{status_color, status_glyph};
 use gpui::prelude::*;
 use gpui::{
@@ -25,10 +25,12 @@ use gpui_component::{
 };
 
 // The tree is laid out the way every other list in this panel is: the column
-// sits a `ROW_INSET` short of `CONTENT_INSET` and each row pads itself back
-// out, so a depth-0 name lands on the panel's 12px rail while the row's hover
-// and selection fill bleeds past it to 8. Depth is added on top of that inset,
-// so `INDENT` is the step between levels and nothing else.
+// sits `CONTENT_INSET` in and each row pads itself a further `ROW_INSET`, so a
+// depth-0 chevron lands on the panel's 20px text column — the search glyph's —
+// while the row's hover and selection fill bleeds past it to 12. Depth is
+// added on top of that inset, so `INDENT` is the step between levels and
+// nothing else: 16, which puts a child's chevron under its parent's folder
+// glyph.
 //
 // It used to run its own pair of numbers instead — a `px_1()` column and a 6px
 // row — which put the tree's names 2px left of the search field directly above
@@ -36,7 +38,24 @@ use gpui_component::{
 // an Info or Source Control row's. Two adjacent left edges that disagree by
 // 2px is the one misalignment a reader can actually catch, because the search
 // glyph sits right there to compare against.
-const INDENT: f32 = 14.0;
+const INDENT: f32 = 16.0;
+
+/// Room under the last row, so the tree does not end flush on the window's
+/// bottom edge.
+const TREE_PAD_BOTTOM: f32 = 16.;
+
+/// How tall a tree row is.
+const TREE_ROW_H: f32 = 26.;
+
+/// The disclosure chevron's column, drawn on folders and left empty on files
+/// so every name at one depth starts at the same x.
+const CHEVRON_W: f32 = 10.;
+
+/// The gap between a row's chevron, icon and name.
+const TREE_GAP: f32 = 6.;
+
+/// Where a row's label starts, measured from the row's own inset.
+const LABEL_LEAD: f32 = CHEVRON_W + TREE_GAP + ROW_GLYPH + TREE_GAP;
 
 const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -1580,7 +1599,7 @@ impl Tty7App {
                 false => t(L10nKey::OpenFileFromTree).to_string(),
             };
             div()
-                .px_3()
+                .px(px(ROW_INSET))
                 .py_4()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -1592,8 +1611,8 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.right_panel.tree_scroll)
-            .px(px(CONTENT_INSET - ROW_INSET))
-            .pb_1()
+            .px(px(CONTENT_INSET))
+            .pb(px(TREE_PAD_BOTTOM))
             .track_focus(&self.file_tree.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 this.file_tree_key_down(ev, window, cx);
@@ -1733,8 +1752,8 @@ impl Tty7App {
                     // Aligned with the label column of a real row at this
                     // depth: ROW_INSET for the row's own inset, INDENT for the
                     // depth, then the width of the icon and its gap.
-                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + 20.0))
-                    .py_1()
+                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + LABEL_LEAD))
+                    .h(px(TREE_ROW_H))
                     .items_center()
                     .text_xs()
                     .italic()
@@ -1807,9 +1826,9 @@ impl Tty7App {
                     cx.theme().sidebar_foreground
                 })
                 .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .when(row.entry.ignored, |d| {
-                    d.italic().text_color(muted.opacity(0.7))
-                })
+                // Ignored entries recede — dimmer ink and a half-strength icon —
+                // but stay upright: they are still files you can open.
+                .when(row.entry.ignored, |d| d.text_color(muted))
                 // Ordinary changes belong in the status badge. Only a conflict
                 // should turn an entire filename into an attention signal.
                 .when_some(deco.tint, |d, status| {
@@ -1824,24 +1843,50 @@ impl Tty7App {
                 .into_any_element()
         };
 
+        let chevron = is_dir.then(|| {
+            Icon::new(match row.expanded || row.is_root {
+                true => IconName::ChevronDown,
+                false => IconName::ChevronRight,
+            })
+            .size(px(CHEVRON_W))
+            .text_color(muted)
+        });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
             .items_center()
-            .gap_1()
+            .gap(px(TREE_GAP))
+            .h(px(TREE_ROW_H))
             .pl(px(ROW_INSET + row.depth as f32 * INDENT))
             .pr(px(ROW_INSET))
-            .py_1()
-            .rounded(cx.theme().radius)
+            .rounded(ROW_FILL_RADIUS)
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(CHEVRON_W))
+                    .flex()
+                    .justify_center()
+                    .children(chevron),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .when(row.entry.ignored, |d| d.opacity(0.5))
+                    .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted)),
+            )
             .child(label)
+            // A folder with work under it says so with one small dot in the
+            // tint of the change — amber for ordinary edits, red for a
+            // conflict — rather than a letter it cannot honestly carry.
             .when(is_dir && deco.tint.is_some(), |d| {
                 d.child(
                     div()
                         .flex_none()
-                        .size(px(4.))
+                        .size(px(5.))
                         .rounded_full()
                         .bg(status_color(deco.tint.unwrap(), cx)),
                 )
@@ -1903,7 +1948,6 @@ impl Tty7App {
                 let show_hidden = self.file_tree.show_hidden;
                 let paths_are_local = self.spawn_host(cx).is_local();
                 move |menu, _window, cx| {
-                    let danger = cx.theme().danger;
                     Self::tree_row_context_menu(
                         menu,
                         &path,
@@ -1911,8 +1955,8 @@ impl Tty7App {
                         is_root,
                         show_hidden,
                         paths_are_local,
-                        danger,
                         &app,
+                        cx,
                     )
                 }
             });
@@ -1953,9 +1997,16 @@ impl Tty7App {
         // here — silently opening nothing, or the wrong thing if a local path
         // happens to collide.
         paths_are_local: bool,
-        danger: gpui::Hsla,
         app: &gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> PopupMenu {
+        let danger = cx.theme().danger;
+        // Whether "Pin as Group" has a sidebar to put the group in: with the
+        // tabs along the top there is nowhere to show one. Offered on a remote
+        // workspace too, unlike the file manager above — the tree and a pinned
+        // folder are both on the workspace's own host.
+        let groups_shown = cx.global::<crate::core::config::Config>().tab_bar_position
+            == crate::core::config::TabBarPosition::Left;
         let mut menu = menu.min_w(px(200.));
         let p = path.to_path_buf();
 
@@ -1980,6 +2031,19 @@ impl Tty7App {
                     }
                 }),
             );
+            if groups_shown {
+                menu = menu.item(
+                    PopupMenuItem::new(t(L10nKey::FileTreeContextPinAsGroup)).on_click({
+                        let app = app.clone();
+                        let p = p.clone();
+                        move |_, _window, cx| {
+                            let _ = app.update(cx, |this, cx| {
+                                this.pin_folder(p.clone(), cx);
+                            });
+                        }
+                    }),
+                );
+            }
         }
         menu = menu
             .item(
@@ -2252,7 +2316,7 @@ fn order_innermost_first(decor: &mut Decorations) {
 
 /// One hash probe per row and no allocation on the path that matters.
 fn row_decoration(decor: &Decorations, entry: &TreeEntry) -> RowDeco {
-    // A gitignored row keeps the italic-and-dim it has always worn and takes
+    // A gitignored row keeps the dimmed ink and icon it already wears and takes
     // nothing else: a letter and a colour would be describing a file the
     // repository is not tracking.
     if entry.ignored {
@@ -2639,7 +2703,7 @@ mod tests {
         assert_eq!(
             row_decoration(&decor, &tree_entry("/repo/target/debug/app", false, true)),
             RowDeco::default(),
-            "italic and dim is the whole of what an ignored row says"
+            "dimmed ink and icon are the whole of what an ignored row says"
         );
         assert_eq!(
             row_decoration(&decor, &tree_entry("/repo/target", true, true)),

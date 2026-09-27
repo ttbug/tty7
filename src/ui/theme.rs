@@ -18,7 +18,7 @@ use crate::ui::presets::Fill;
 use std::sync::OnceLock;
 
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    point(px(9.), px(13.))
+    point(px(9.), px(17.))
 }
 
 pub(crate) fn set_menus(cx: &mut App) {
@@ -84,7 +84,7 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::action(t(L10nKey::AppMenuFindPrevious), FindPrevious),
         ]),
         Menu::new(t(L10nKey::AppMenuView)).items([
-            MenuItem::action(t(L10nKey::AppMenuCommandPalette), TogglePalette),
+            MenuItem::action(t(L10nKey::AppMenuSearchEverywhere), TogglePalette),
             MenuItem::separator(),
             MenuItem::action(t(L10nKey::AppMenuIncreaseFontSize), IncreaseFontSize),
             MenuItem::action(t(L10nKey::AppMenuDecreaseFontSize), DecreaseFontSize),
@@ -470,7 +470,18 @@ pub(crate) fn default_window_opacity(backdrop: WindowBackdrop, blur: bool) -> f3
 /// `theme.sidebar` itself stays opaque — the settings theme picker paints
 /// with it on top of the opaque settings overlay and must stay legible.
 pub(crate) fn workspace_surface_color(cx: &App) -> Hsla {
-    let base: Hsla = cx.theme().sidebar;
+    translucent_surface(cx.theme().sidebar, cx)
+}
+
+/// The left tab rail's fill: the one tinted surface in the workspace (see
+/// `Neutrals::rail`), with the same translucency rule as
+/// [`workspace_surface_color`].
+pub(crate) fn rail_surface_color(cx: &App) -> Hsla {
+    let base: Hsla = rgb(cx.global::<presets::Surfaces>().rail.base).into();
+    translucent_surface(base, cx)
+}
+
+fn translucent_surface(base: Hsla, cx: &App) -> Hsla {
     let translucent = cx
         .try_global::<presets::ActiveBackground>()
         .and_then(|bg| bg.opacity)
@@ -927,10 +938,34 @@ pub(crate) fn floating_surface<T: Styled>(element: T, cx: &App) -> T {
         .shadow_xl()
 }
 
-/// On-state shares the accent role with sliders and primary actions.
-pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
-    let accent = cx.global::<presets::ActiveAccent>().0;
-    gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))
+/// One device pixel: the v4 hairline, 0.5px on a Retina panel and a whole
+/// pixel on a 1x one. A literal `px(0.5)` would be antialiased down to half
+/// its ink on a 1x display, under the contrast floor `divider` is held to.
+pub(crate) fn hairline(window: &Window) -> Pixels {
+    px(1. / window.scale_factor().max(1.))
+}
+
+/// Tabular figures, so a column of counts, sizes and positions keeps its
+/// digits on one grid while the numbers change under it.
+pub(crate) fn tabular_figures() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
+/// The v4 primary button: an inverted neutral — body ink as the fill, the
+/// surface it sits on as the label — rather than the accent, which stays with
+/// focus and the things that are on. `surface` is the opaque fill under the
+/// button, so the label reads as cut out of it. Disabled, gpui-component
+/// drops the fill to 15% of itself, the faint well the rest of v4 uses.
+pub(crate) fn inverted_button(
+    surface: Hsla,
+    cx: &App,
+) -> gpui_component::button::ButtonCustomVariant {
+    let ink = cx.theme().foreground;
+    gpui_component::button::ButtonCustomVariant::new(cx)
+        .color(ink)
+        .foreground(surface)
+        .hover(ink.blend(surface.opacity(0.14)))
+        .active(ink.blend(surface.opacity(0.24)))
 }
 
 pub(crate) fn apply_cursor_hide_mode(cx: &mut App) {
