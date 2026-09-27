@@ -78,7 +78,7 @@ fn the_whole_suite_ran_against_the_server() {
         .map(|(n, _)| *n)
         .collect();
     assert!(
-        names.len() >= 46,
+        names.len() >= 52,
         "the conformance suite shrank to {} cases: {names:?}",
         names.len()
     );

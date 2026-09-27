@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -213,11 +213,6 @@ pub struct Config {
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
     pub tab_bar_position: TabBarPosition,
-    /// What an SSH pane's tab is called (#726). Only the name the tab shows:
-    /// the titles the remote side sets are still read and kept, and win again
-    /// the moment this is back on [`SshTabTitle::Dynamic`].
-    #[serde(default, deserialize_with = "de_lenient")]
-    pub ssh_tab_title: SshTabTitle,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
     #[serde(default)]
@@ -274,8 +269,6 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
-    #[serde(default = "default_true")]
-    pub sidebar_diff_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -422,6 +415,11 @@ pub struct Config {
     /// "New Agent Tab" opens.
     #[serde(default)]
     pub agent_frecency: HashMap<String, ProfileUsage>,
+    /// Past agent sessions taken out of the search's Sessions tab, as
+    /// `<agent slug>:<session id>`. Only the listing forgets them; the
+    /// agent's own history is not touched.
+    #[serde(default)]
+    pub hidden_agent_sessions: BTreeSet<String>,
     #[serde(default = "default_true")]
     pub restore_agent_sessions: bool,
     /// Give each pane its own shell history instead of one file every pane
@@ -579,21 +577,6 @@ pub enum TabBarPosition {
     Top,
     #[default]
     Left,
-}
-
-/// Where an SSH pane's tab takes its name from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SshTabTitle {
-    /// Whatever the remote shell or program titles itself, falling back to
-    /// the host's name until it says anything — what tty7 always did.
-    #[default]
-    Dynamic,
-    /// The saved host's name, the alias for a `~/.ssh/config` host, the
-    /// address typed for a quick connect.
-    ProfileName,
-    /// The address the connection dialled.
-    Hostname,
 }
 
 /// Native window backdrop material for the Windows GUI. Other platforms retain
@@ -764,7 +747,6 @@ impl Default for Config {
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
-            ssh_tab_title: SshTabTitle::Dynamic,
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             right_panel_visible: false,
@@ -778,7 +760,6 @@ impl Default for Config {
             editor_soft_wrap: false,
             editor_markdown_preview: false,
             sidebar_auto_grouping: true,
-            sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             update_channel: UpdateChannel::default(),
@@ -819,6 +800,7 @@ impl Default for Config {
             agent_commands: HashMap::new(),
             agent_launch: HashMap::new(),
             agent_frecency: HashMap::new(),
+            hidden_agent_sessions: BTreeSet::new(),
             restore_agent_sessions: true,
             per_pane_history: false,
             quarantined: false,
@@ -1511,13 +1493,18 @@ pub enum RightPanelTab {
     /// The source control panel. Renamed from `Changes` in place rather than
     /// added alongside it: `rename` works in both directions, so a config
     /// written by this version still says `"changes"` and an older build reads
-    /// it back unchanged. A fourth variant could not do that — the old build
-    /// would fall through `de_lenient` to `Info` and kick anyone who rolled
-    /// back off the panel they were sitting on. 260px has no room for a fourth
-    /// tab tile either.
+    /// it back unchanged.
     #[serde(rename = "changes", alias = "scm", alias = "git")]
     Scm,
     Files,
+    /// Project-wide content search. Added as a tab of its own, which costs a
+    /// rolled-back build one thing: it does not know `"search"`, falls through
+    /// `de_lenient` to `Info`, and opens there. Nothing else is lost.
+    Search,
+    /// The bound GitHub repository's issues and pull requests. Same rollback
+    /// cost as `Search`.
+    #[serde(rename = "github")]
+    GitHub,
 }
 
 /// What opens when a file link in the grid is clicked.
@@ -1766,24 +1753,6 @@ mod tests {
         // Unknown values fall back rather than refusing the whole file.
         let garbage: Config = serde_json::from_str(r#"{"link_file_open":"emacs"}"#).unwrap();
         assert_eq!(garbage.file_open_mode(), LinkFileOpen::Internal);
-    }
-
-    #[test]
-    fn sidebar_diff_preview_defaults_on_and_round_trips() {
-        assert!(Config::default().sidebar_diff_preview);
-
-        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
-        assert!(
-            old.sidebar_diff_preview,
-            "absent key means today's behaviour"
-        );
-
-        let off: Config = serde_json::from_str(r#"{"sidebar_diff_preview": false}"#).unwrap();
-        assert!(!off.sidebar_diff_preview);
-        let json = serde_json::to_string(&off).unwrap();
-        assert!(json.contains("\"sidebar_diff_preview\":false"), "persisted");
-        let back: Config = serde_json::from_str(&json).unwrap();
-        assert!(!back.sidebar_diff_preview);
     }
 
     #[test]
@@ -3070,27 +3039,6 @@ mod tests {
         assert!(value.get("ssh_profile_frecency").is_none());
         // The SSH preferences are settings like any other and stay put.
         assert_eq!(value["verify_host_keys"], serde_json::json!(false));
-    }
-
-    #[test]
-    fn ssh_tab_title_defaults_to_dynamic_and_round_trips_leniently() {
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.ssh_tab_title, SshTabTitle::Dynamic);
-        for (raw, mode) in [
-            ("\"dynamic\"", SshTabTitle::Dynamic),
-            ("\"profile-name\"", SshTabTitle::ProfileName),
-            ("\"hostname\"", SshTabTitle::Hostname),
-            ("\"sideways\"", SshTabTitle::Dynamic),
-            ("7", SshTabTitle::Dynamic),
-        ] {
-            let cfg: Config =
-                serde_json::from_str(&format!("{{\"ssh_tab_title\": {raw}, \"font_size\": 20}}"))
-                    .unwrap();
-            assert_eq!(cfg.ssh_tab_title, mode, "{raw}");
-            assert_eq!(cfg.font_size, 20.0, "a bad value must not cost the file");
-            let back: Config = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
-            assert_eq!(back.ssh_tab_title, mode);
-        }
     }
 
     #[test]

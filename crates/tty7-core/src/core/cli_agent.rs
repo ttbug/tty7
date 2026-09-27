@@ -324,7 +324,11 @@ impl CLIAgent {
         session_id: &str,
         launch_argv: Option<&[String]>,
     ) -> Option<String> {
+        // A leading `-` would be read as a flag, not the id: `--resume
+        // --dangerously-skip-permissions`. No agent writes such an id, but
+        // the listing takes ids from file and directory names on disk.
         if session_id.is_empty()
+            || session_id.starts_with('-')
             || !session_id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
@@ -2448,7 +2452,13 @@ mod tests {
 
     #[test]
     fn fork_commands_are_shell_safe() {
-        for id in ["abc; rm -rf /", "$(boom)", "", "a b"] {
+        for id in [
+            "abc; rm -rf /",
+            "$(boom)",
+            "",
+            "a b",
+            "--dangerously-skip-permissions",
+        ] {
             assert_eq!(
                 CLIAgent::Codex.fork_command(id, None),
                 None,

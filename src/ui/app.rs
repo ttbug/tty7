@@ -670,10 +670,7 @@ impl Tab {
             // name tty7 chose for it deliberately, and `stated_title` hands
             // those up as the title the pane is showing.
             title: crate::terminal::view::DEFAULT_TITLE.to_string(),
-            // On the title's rung, not a new one above it: a name given to the
-            // tab still beats an SSH host pinned by Settings (#726), and the
-            // pinned host beats everything the pane could say about itself.
-            osc_title: leaf.tab_title(cx),
+            osc_title: leaf.stated_title().map(str::to_string),
             cwd: leaf.cwd().map(|p| p.display().to_string()),
             agent: leaf.agent(),
             status: leaf.agent_session().map(|s| s.status),
@@ -902,11 +899,13 @@ pub struct Tty7App {
     pub(crate) sftp_panel: crate::ui::sftp::SftpPanelState,
     pub(crate) right_panel: crate::ui::right_panel::RightPanelState,
     pub(crate) scm: crate::ui::scm::ScmPanelState,
+    pub(crate) github: crate::ui::github::GitHubPanelState,
     pub(crate) diff_probes_inflight:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
     pub(crate) diff_probes_restale:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
     pub(crate) file_tree: crate::ui::file_tree::FileTreeState,
+    pub(crate) panel_search: crate::ui::panel_search::PanelSearchState,
     pub(crate) editor: crate::ui::code_editor::EditorPanelState,
     pub(crate) sidebar_width: Rc<Cell<f32>>,
     pub(crate) sidebar_dragging: Rc<Cell<bool>>,
@@ -1367,6 +1366,7 @@ impl Tty7App {
         };
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
+        let panel_search = crate::ui::panel_search::PanelSearchState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
@@ -1540,9 +1540,11 @@ impl Tty7App {
                 },
                 ..Default::default()
             },
+            github: Default::default(),
             diff_probes_inflight: Default::default(),
             diff_probes_restale: Default::default(),
             file_tree,
+            panel_search,
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
             sidebar_dragging: Rc::new(Cell::new(false)),
@@ -3484,18 +3486,6 @@ impl Tty7App {
 
     pub(crate) fn set_sidebar_auto_grouping(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
-    }
-
-    pub(crate) fn set_sidebar_diff_preview(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.update_config(cx, |cfg| cfg.sidebar_diff_preview = on);
-    }
-
-    pub(crate) fn set_ssh_tab_title(
-        &mut self,
-        mode: crate::core::config::SshTabTitle,
-        cx: &mut Context<Self>,
-    ) {
-        self.update_config(cx, |cfg| cfg.ssh_tab_title = mode);
     }
 
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -5630,8 +5620,8 @@ impl Tty7App {
             self.search_terminals(cx),
             crate::ui::search::host_items(cx),
         );
-        let (sessions, here) =
-            self.search_sessions(crate::core::agent_history::cached(), window, cx);
+        let last = last_sessions(self.spawn_host(cx));
+        let (sessions, here) = self.search_sessions(last, window, cx);
         catalog.sessions = sessions;
         catalog.sessions_here = here;
         catalog
@@ -5641,27 +5631,25 @@ impl Tty7App {
     /// pane's directory first, under its name, then the rest by recency. The
     /// second value is how many lead.
     ///
-    /// Only this computer's sessions, and only in a window on this computer:
-    /// a remote window's new tab opens on the other machine, where the
-    /// directory a local session ran in means nothing.
+    /// `found` are the sessions of the machine this window's workspace is
+    /// on: a remote window's new tab opens there, and so resumes there.
     pub(crate) fn search_sessions(
         &self,
         found: Vec<crate::core::agent_history::PastSession>,
         window: &Window,
         cx: &App,
     ) -> (Vec<Item>, usize) {
-        if WorkspaceStore::remote_ref(cx, self.workspace).is_some() {
-            return (Vec::new(), 0);
-        }
         let here = self
             .tabs
             .get(self.active)
             .and_then(|t| t.pane.focused_or_first(window, cx))
             .and_then(|leaf| leaf.read(cx).spawnable_cwd());
-        let home = crate::core::agent_history::home();
+        let home = crate::ui::path_display::home_for_host(cx, self.spawn_host(cx));
         let now = crate::core::config::unix_now();
+        let hidden = &cx.global::<Config>().hidden_agent_sessions;
         let (mut mine, mut rest): (Vec<_>, Vec<_>) = found
             .into_iter()
+            .filter(|s| !hidden.contains(&crate::core::agent_history::session_key(s.agent, &s.id)))
             .partition(|s| here.is_some() && s.cwd == here);
         let here_section: Option<gpui::SharedString> = here.as_ref().map(|dir| {
             t_fmt(
@@ -5902,8 +5890,9 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Reads the agents' history off the disk and hands what changed to the
-    /// open search. The search opened on the last scan's answer, so this is
+    /// Asks the machine this window's workspace is on — this one, or a
+    /// remote one's server — for its agents' history, and hands what changed
+    /// to the open search. The search opened on the last scan's answer, so this is
     /// only ever news: a session run since, or the first scan of the process.
     fn refresh_search_sessions(
         &mut self,
@@ -5911,29 +5900,47 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if WorkspaceStore::remote_ref(cx, self.workspace).is_some() {
-            return;
-        }
-        let Some(home) = crate::core::agent_history::home() else {
+        let host_id = self.spawn_host(cx);
+        let Some(host) = self.active_host(cx) else {
             return;
         };
-        let codex_home = crate::core::agent_history::codex_home();
-        let scan = cx.background_spawn(async move {
-            crate::core::agent_history::scan(&home, codex_home.as_deref())
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let found = scan.await;
-            this.update_in(cx, |this, window, cx| {
+        // Where this window's tabs are, on that machine: they place the
+        // chats Cursor files only under a hash of their directory.
+        let mut known_dirs: Vec<std::path::PathBuf> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.pane.terminals())
+            .filter_map(|leaf| leaf.read(cx).spawnable_cwd())
+            .collect();
+        known_dirs.sort();
+        known_dirs.dedup();
+        // Weak: a slow host must not keep a closed search alive.
+        let view = view.downgrade();
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| h.agent_sessions(&known_dirs),
+            move |this, found, window, cx| {
+                let found = match found {
+                    Ok(found) => found,
+                    Err(e) => {
+                        log::warn!("listing agent sessions: {e}");
+                        return;
+                    }
+                };
+                remember_sessions(host_id, found.clone());
                 // Closed, or closed and opened again, since: nothing to update.
-                if this.search.as_ref() != Some(&view) {
+                let Some(view) = view
+                    .upgrade()
+                    .filter(|view| this.search.as_ref() == Some(view))
+                else {
                     return;
-                }
+                };
                 let (sessions, here) = this.search_sessions(found, window, cx);
                 view.update(cx, |view, cx| view.set_sessions(sessions, here, window, cx));
-            })
-            .ok();
-        })
-        .detach();
+            },
+        );
     }
 
     fn on_search_event(
@@ -5954,6 +5961,8 @@ impl Tty7App {
                 self.close_search(window, cx);
                 self.run_command(kind, window, cx);
             }
+            // Done inside the search, which stays open on the list it was.
+            SearchEvent::RunInPlace(kind) => self.run_command(kind.clone(), window, cx),
             SearchEvent::Dismiss => self.close_search(window, cx),
             SearchEvent::PreviewTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(*i).map(|t| t.id.clone()) {
@@ -6164,7 +6173,17 @@ impl Tty7App {
                 agent,
                 session_id,
                 cwd,
-            } => self.resume_session(agent, &session_id, cwd, window, cx),
+            } => self.resume_session(agent, &session_id, cwd, false, window, cx),
+            ForkSession {
+                agent,
+                session_id,
+                cwd,
+            } => self.resume_session(agent, &session_id, cwd, true, window, cx),
+            CopySessionId(id) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(id)),
+            HideSession { agent, session_id } => self.update_config(cx, |cfg| {
+                cfg.hidden_agent_sessions
+                    .insert(crate::core::agent_history::session_key(agent, &session_id));
+            }),
         }
     }
 
@@ -6285,10 +6304,6 @@ impl Tty7App {
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
             }
-            L10nKey::SettingsDiffPreviewFromCounts => {
-                self.set_sidebar_diff_preview(defaults.sidebar_diff_preview, cx)
-            }
-            L10nKey::SettingsSshTabTitle => self.set_ssh_tab_title(defaults.ssh_tab_title, cx),
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
             }
@@ -6728,6 +6743,9 @@ impl Tty7App {
         });
         self.file_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
+        });
+        self.panel_search.input.update(cx, |state, cx| {
+            state.set_placeholder(t(L10nKey::PanelSearchPlaceholder), window, cx)
         });
         // The remote Files panel is built once with the app, so its placeholder
         // is the one input that would otherwise keep the old language.
@@ -9033,6 +9051,12 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelSearch, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Search, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelGitHub, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::GitHub, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &ScmToggleGraph, _window, cx| this.scm_toggle_graph(cx)),
@@ -13098,4 +13122,36 @@ mod hibernate_gpui_tests {
             assert!(!closed.hibernated, "reopening brings it back awake");
         });
     }
+}
+
+/// What each host's last session scan found: what the Sessions tab shows
+/// while the next scan runs, so it does not open empty.
+static LAST_SESSIONS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            crate::ui::host_ops::HostId,
+            Vec<crate::core::agent_history::PastSession>,
+        >,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+fn last_sessions(
+    host: crate::ui::host_ops::HostId,
+) -> Vec<crate::core::agent_history::PastSession> {
+    LAST_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&host)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn remember_sessions(
+    host: crate::ui::host_ops::HostId,
+    found: Vec<crate::core::agent_history::PastSession>,
+) {
+    LAST_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(host, found);
 }

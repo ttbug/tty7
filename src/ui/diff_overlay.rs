@@ -196,6 +196,35 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Open (or refocus, or close — the same toggle as any other source) the
+    /// overlay on a patch that did not come from git, with its snapshot.
+    ///
+    /// The snapshot names its own directory and source, which must be a
+    /// [`DiffSource::Patch`]; the probe skips those, so the snapshot installed
+    /// here is the only one the overlay will ever have.
+    pub(crate) fn open_supplied_diff(
+        &mut self,
+        host: crate::ui::host_ops::HostId,
+        snapshot: Arc<DiffSnapshot>,
+        focus: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (cwd, source) = (snapshot.root.clone(), snapshot.source.clone());
+        debug_assert!(source.is_supplied());
+        self.open_diff_overlay(host, cwd.clone(), source.clone(), focus, window, cx);
+        if let Some(overlay) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.diff_overlay.as_mut())
+            .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
+            && !matches!(overlay.load, DiffLoad::Ready(_))
+        {
+            overlay.load = DiffLoad::Ready(snapshot);
+            cx.notify();
+        }
+    }
+
     /// Which file the open overlay is focused on — for the row that asked,
     /// which means the *source* has to match too: a file staged and edited
     /// again sits in two panel groups, and only the row whose patch is
@@ -349,7 +378,8 @@ impl Tty7App {
         let Some(overlay) = self.tabs.get(active).and_then(|t| t.diff_overlay.as_ref()) else {
             return;
         };
-        if overlay.loading {
+        // A supplied patch has nothing to probe: git never had it.
+        if overlay.loading || overlay.source.is_supplied() {
             return;
         }
         let cwd = overlay.cwd.clone();
@@ -492,7 +522,9 @@ impl Tty7App {
         let stale = match overlay.source {
             // A commit and a range are fixed patches. Nothing can make either
             // of them out of date, so nothing should reprobe them.
-            DiffSource::Commit { .. } | DiffSource::Range { .. } => return,
+            DiffSource::Commit { .. } | DiffSource::Range { .. } | DiffSource::Patch { .. } => {
+                return;
+            }
             // The cached counts come from `git diff --numstat HEAD`, so only a
             // HEAD snapshot is comparable to them.
             DiffSource::Head => {
@@ -1973,6 +2005,16 @@ fn source_subject(source: &DiffSource, branch: String) -> SourceSubject {
             is_rev: true,
             label: None,
         },
+        // A pull request: `#12` in mono, its title beside it.
+        DiffSource::Patch { id, label } => SourceSubject {
+            icon: "icons/github.svg",
+            text: id
+                .rsplit_once('#')
+                .map_or(id.clone(), |(_, n)| format!("#{n}")),
+            chip: None,
+            is_rev: true,
+            label: label.clone().filter(|l| !l.subject.is_empty()),
+        },
     }
 }
 
@@ -2848,6 +2890,33 @@ mod tests {
                  Arc::clone {shared:?}, per holder on the UI thread"
             );
         }
+    }
+
+    #[test]
+    fn a_supplied_patch_is_named_by_its_number() {
+        let source = DiffSource::Patch {
+            id: "l0ng-ai/tty7#974".into(),
+            label: Some(CommitLabel {
+                subject: "feat(tabs): reorder".into(),
+                author: "migege".into(),
+                at: 0,
+            }),
+        };
+        let subject = source_subject(&source, "move-tab-keybind".into());
+        assert_eq!(subject.text, "#974");
+        assert!(subject.is_rev);
+        assert_eq!(subject.icon, "icons/github.svg");
+        assert_eq!(subject.label.unwrap().subject, "feat(tabs): reorder");
+        assert!(source.is_supplied());
+        assert!(!DiffSource::Head.is_supplied());
+        // One pull request is one overlay, however it is labelled.
+        assert_eq!(
+            source,
+            DiffSource::Patch {
+                id: "l0ng-ai/tty7#974".into(),
+                label: None
+            }
+        );
     }
 }
 

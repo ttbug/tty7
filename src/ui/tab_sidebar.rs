@@ -3225,31 +3225,17 @@ fn group_names(roots: &[&PathBuf]) -> Vec<String> {
 }
 
 /// Where a click on a tab's diff counts opens the overlay: the focused pane's
-/// repo, when the setting allows a preview at all.
+/// repo.
 fn git_click(
     tab: &Tab,
     window: &Window,
     cx: &gpui::App,
 ) -> Option<(crate::ui::host_ops::HostId, PathBuf)> {
-    diff_click_cwd(
-        cx.global::<Config>(),
-        tab.pane.focused_or_first(window, cx).and_then(|leaf| {
-            let view = leaf.read(cx);
-            let cwd = view.git_status_cwd()?.to_path_buf();
-            Some((view.host_id(), cwd))
-        }),
-    )
-}
-
-/// Whether a `+N −M` is a button, and what it opens if it is.
-///
-/// One function because the setting is one setting: the sidebar's counts and
-/// the Info panel's `changes` row are the same number about the same working
-/// tree, and "Open diff preview from sidebar counts" turning one of them into
-/// plain text while the other stayed clickable would be a setting that half
-/// works.
-pub(crate) fn diff_click_cwd<T>(cfg: &Config, target: Option<T>) -> Option<T> {
-    cfg.sidebar_diff_preview.then_some(target).flatten()
+    tab.pane.focused_or_first(window, cx).and_then(|leaf| {
+        let view = leaf.read(cx);
+        let cwd = view.git_status_cwd()?.to_path_buf();
+        Some((view.host_id(), cwd))
+    })
 }
 
 #[cfg(test)]
@@ -4240,32 +4226,6 @@ mod tests {
 
     fn none() -> WorkspaceGroups {
         WorkspaceGroups::default()
-    }
-
-    #[test]
-    fn diff_preview_setting_gates_the_click_target() {
-        let mut cfg = Config::default();
-        assert!(cfg.sidebar_diff_preview, "default is today's behaviour");
-        assert_eq!(
-            diff_click_cwd(&cfg, Some(p("/w/repo"))),
-            Some(p("/w/repo")),
-            "enabled: the counts are a click target"
-        );
-
-        cfg.sidebar_diff_preview = false;
-        assert_eq!(
-            diff_click_cwd(&cfg, Some(p("/w/repo"))),
-            None,
-            "disabled: no cwd, so no cursor and no toggle_diff_overlay"
-        );
-    }
-
-    #[test]
-    fn diff_click_target_needs_a_repo_either_way() {
-        let mut cfg = Config::default();
-        assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
-        cfg.sidebar_diff_preview = false;
-        assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
     }
 
     /// Two machines' `/home/ubuntu` are two directories: each host gets a

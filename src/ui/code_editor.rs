@@ -1255,10 +1255,13 @@ impl Tty7App {
                             .track_scroll(&scroll)
                             .px_4()
                             .py_3()
-                            .child(gpui_component::text::TextView::markdown(
-                                "editor-md-preview-body",
-                                markdown,
-                            )),
+                            .child(
+                                gpui_component::text::TextView::markdown(
+                                    "editor-md-preview-body",
+                                    markdown,
+                                )
+                                .style(crate::ui::theme::markdown_style(cx)),
+                            ),
                         &scroll,
                     ))
                     .into_any_element()

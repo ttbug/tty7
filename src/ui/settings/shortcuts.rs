@@ -39,7 +39,7 @@ impl Tty7App {
 
         // The toolbar: the filter, a way back from every change at once, and
         // the preset the whole table starts from.
-        let presets = self.segmented(
+        let presets = self.settings_choice(
             "kb-preset",
             &[t(L10nKey::SettingsDefault), "tmux"],
             usize::from(tmux),
@@ -91,7 +91,7 @@ impl Tty7App {
                         .text_color(tk.k5)
                         .child(t(L10nKey::SettingsPrefix)),
                 )
-                .child(self.segmented(
+                .child(self.settings_choice(
                     "kb-prefix",
                     &["⌃B", "⌃A"],
                     usize::from(prefix == "ctrl-a"),

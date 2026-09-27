@@ -31,12 +31,10 @@ fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
     (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
 }
 
-/// The tab row's leading inset: the first label lands 22px in, and each tab's
-/// click target already reaches `TAB_OUTER_PAD` past its label.
-///
-/// The tabs sit flush against each other — no row gap — so two labels are
-/// exactly `2 × TAB_OUTER_PAD` = 18px apart, which is the whole spacing rule.
-const TAB_ROW_LEAD: f32 = 22. - crate::ui::tab_strip::TAB_OUTER_PAD;
+/// The tab row's leading inset: the selected tab's pill starts on
+/// `CONTENT_INSET`, the edge every row fill below it starts on, and each tab's
+/// click target reaches `TAB_OUTER_PAD` past its pill.
+const TAB_ROW_LEAD: f32 = crate::ui::app::CONTENT_INSET - crate::ui::tab_strip::TAB_OUTER_PAD;
 
 /// The panel toggle and the app menu where they sit in this panel's own tab
 /// row (macOS): 26px tiles, 4px apart, the last one 12px from the panel's
@@ -347,6 +345,8 @@ enum InfoValue {
         removed: u32,
         open: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     },
+    /// Text that opens a web page when clicked — the repository on GitHub.
+    Link { text: String, url: String },
 }
 
 /// The table convention for a cell with nothing in it. Needs no translating,
@@ -414,6 +414,7 @@ impl InfoRow {
         self.copy.is_some()
             || self.reveal.is_some()
             || matches!(self.value, InfoValue::Diff { open: Some(_), .. })
+            || matches!(self.value, InfoValue::Link { .. })
     }
 }
 
@@ -515,6 +516,11 @@ impl Tty7App {
     }
 
     pub(crate) fn set_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<Self>) {
+        // Every way to the Search tab ends here, and none of them has a
+        // `Window` to move focus with; the tab takes it on its next frame.
+        if tab == RightPanelTab::Search {
+            self.panel_search.focus_pending = true;
+        }
         self.right_panel_tab = tab;
         self.right_panel_visible = true;
         self.update_config(cx, |cfg| {
@@ -545,6 +551,8 @@ impl Tty7App {
             RightPanelTab::Info => self.render_panel_info(window, cx),
             RightPanelTab::Scm => self.render_panel_scm(window, cx),
             RightPanelTab::Files => self.render_panel_files(window, cx),
+            RightPanelTab::Search => self.render_panel_search(window, cx),
+            RightPanelTab::GitHub => self.render_panel_github(window, cx),
         };
         let (backing, handle) = self.right_panel_resize(cx);
 
@@ -574,11 +582,7 @@ impl Tty7App {
                     .items_center()
                     .pl(px(TAB_ROW_LEAD))
                     .relative()
-                    .children(self.right_panel_tabs(
-                        width - TAB_ROW_LEAD - PANEL_CHROME_W,
-                        window,
-                        cx,
-                    ))
+                    .children(self.right_panel_tabs(cx))
                     .child(div().flex_1())
                     // Navigation controls stay visible on both sidebars —
                     // here at the panel row's smaller size.
@@ -589,15 +593,16 @@ impl Tty7App {
                         cx,
                     ))
                 }))
-                // Only the Files tab steps down 8px. Its first row is a filled
-                // search well whose top edge is the first thing you see, so it
-                // wants air under the tab row. Info and Source Control open on
+                // Only the Files and Search tabs step down 8px. Their first row
+                // is a filled search well whose top edge is the first thing you
+                // see, so it wants air under the tab row. Info and Source Control open on
                 // bare text centred in a 28px row, which already sits ~7px
                 // under the row's top; adding 8 more put their first line a
                 // visible step lower than the Files well beside them.
                 .children(
-                    (cfg!(target_os = "macos") && tab == RightPanelTab::Files)
-                        .then(|| div().flex_none().h(px(8.))),
+                    (cfg!(target_os = "macos")
+                        && matches!(tab, RightPanelTab::Files | RightPanelTab::Search))
+                    .then(|| div().flex_none().h(px(8.))),
                 )
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
@@ -714,15 +719,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let has_trailing = trailing.is_some();
-        let tabs = (!cfg!(target_os = "macos")).then(|| {
-            let width = self.right_panel_px(window, cx);
-            let trailing_w = match has_trailing {
-                true => 2. * TILE_SIZE_SM + 6.,
-                false => 0.,
-            };
-            let avail = width - TAB_ROW_LEAD - tile_trailing_inset() - trailing_w;
-            self.right_panel_tabs(avail, window, cx)
-        });
+        let tabs = (!cfg!(target_os = "macos")).then(|| self.right_panel_tabs(cx));
         if tabs.is_none() && !has_trailing {
             return div().flex_none().into_any_element();
         }
@@ -903,9 +900,7 @@ impl Tty7App {
         // its ports. Worked out once, by the same call the watch uses.
         let ctx = self.pane_forward_ctx(window, cx);
         let mut pane_id: Option<u64> = None;
-        // Where the `changes` row's counts lead. Same source as the sidebar's,
-        // and gated on the same setting, so turning the preview off turns it
-        // off in both places rather than in one of them.
+        // Where the `changes` row's counts lead. Same source as the sidebar's.
         let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
         let mut git: Option<crate::terminal::git_status::GitStatus> = None;
 
@@ -913,11 +908,9 @@ impl Tty7App {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
-                diff_target = crate::ui::tab_sidebar::diff_click_cwd(
-                    cx.global::<Config>(),
-                    view.git_status_cwd()
-                        .map(|cwd| (view.host_id(), cwd.to_path_buf())),
-                );
+                diff_target = view
+                    .git_status_cwd()
+                    .map(|cwd| (view.host_id(), cwd.to_path_buf()));
                 if let Some(cwd) = view.effective_cwd() {
                     let home = view.display_home(cx);
                     // Whether this pane's paths are this machine's decides
@@ -989,6 +982,19 @@ impl Tty7App {
                     copy: None,
                     reveal: None,
                 });
+                // The same repository on GitHub, at this branch, when one of
+                // its remotes is there.
+                if let Some((text, url)) = self.github_info_link(&git.branch, window, cx) {
+                    rows.push(InfoRow {
+                        label: t(L10nKey::PanelGitHubTitle),
+                        value: InfoValue::Link {
+                            text,
+                            url: url.clone(),
+                        },
+                        copy: Some(url),
+                        reveal: None,
+                    });
+                }
             }
         }
 
@@ -1077,6 +1083,26 @@ impl Tty7App {
                     .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
                     .into_any_element()
             }
+            // Underlined on hover like the counts below: the row's fill says
+            // it reacts, the underline says the text is the button.
+            InfoValue::Link { text, url } => div()
+                .id(("panel-info-link", i))
+                .min_w_0()
+                .truncate()
+                .text_size(rems(TEXT))
+                .text_color(cx.theme().foreground)
+                .cursor_pointer()
+                .hover(|s| s.underline())
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new(t(L10nKey::GitHubOpenOnGitHub))
+                        .build(window, cx)
+                })
+                .on_click(move |_, _window, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
+                .child(text)
+                .into_any_element(),
             InfoValue::Text(v) => div()
                 .flex_1()
                 .min_w_0()

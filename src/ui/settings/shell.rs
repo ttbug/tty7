@@ -595,6 +595,76 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// A single choice from a fixed list: a dropdown, the one control every
+    /// pick-one row on the page uses.
+    pub(crate) fn settings_choice(
+        &self,
+        id: impl Into<SharedString>,
+        options: &[&str],
+        selected: usize,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        self.settings_choice_full(id, options, Some(selected), None, cx, on_pick)
+    }
+
+    /// A choice over a fixed set of values, used where the config accepts
+    /// anything in a range. When the live value matches a bucket exactly that
+    /// bucket is checked; when it does not, a trailing "Custom (N)" row carries
+    /// the check and the trigger's label instead of the nearest bucket getting
+    /// a label it does not have (#550).
+    ///
+    /// The custom row writes nothing — there is no bucket value behind it — so
+    /// picking it only closes the menu.
+    pub(crate) fn settings_choice_valued(
+        &self,
+        id: impl Into<SharedString>,
+        options: &[&str],
+        selected: Option<usize>,
+        custom_label: Option<String>,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        self.settings_choice_full(id, options, selected, custom_label, cx, on_pick)
+    }
+
+    fn settings_choice_full(
+        &self,
+        id: impl Into<SharedString>,
+        options: &[&str],
+        selected: Option<usize>,
+        custom_label: Option<String>,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let on_pick = Rc::new(on_pick);
+        let label: SharedString = selected
+            .and_then(|i| options.get(i))
+            .map(|l| SharedString::from(l.to_string()))
+            .or_else(|| custom_label.clone().map(SharedString::from))
+            .unwrap_or_default();
+        let mut entries: Vec<MenuEntry> = options
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let on_pick = on_pick.clone();
+                MenuEntry::item(
+                    l.to_string(),
+                    selected == Some(i),
+                    move |this, window, cx| on_pick(this, i, window, cx),
+                )
+            })
+            .collect();
+        if let Some(custom) = custom_label.filter(|_| selected.is_none()) {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::item(custom, true, |_, _, _| {}));
+        }
+        self.settings_dropdown(id, label, None, entries, cx)
+    }
+
+    /// A segmented control. Settings rows pick with [`Self::settings_choice`];
+    /// this is for forms outside the settings window — the SSH strip's forward
+    /// form — which have no settings popover to hang a menu from.
     pub(crate) fn segmented(
         &self,
         id: impl Into<SharedString>,
@@ -603,47 +673,9 @@ impl Tty7App {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        self.segmented_full(id, options, Some(selected), None, cx, on_pick)
-    }
-
-    /// A segmented control over a fixed set of values, used where the config
-    /// accepts anything in a range. When the live value matches a bucket
-    /// exactly that bucket is highlighted; when it does not, a trailing
-    /// "Custom (N)" cell carries the highlight instead of the nearest bucket
-    /// getting a label it does not have (#550).
-    ///
-    /// The custom cell is not a button — there is no bucket value behind it to
-    /// write — so it takes neither a click handler nor a pointer cursor.
-    pub(crate) fn segmented_valued(
-        &self,
-        id: impl Into<SharedString>,
-        options: &[&str],
-        selected: Option<usize>,
-        custom_label: Option<String>,
-        cx: &mut Context<Self>,
-        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        self.segmented_full(id, options, selected, custom_label, cx, on_pick)
-    }
-
-    fn segmented_full(
-        &self,
-        id: impl Into<SharedString>,
-        options: &[&str],
-        selected: Option<usize>,
-        custom_label: Option<String>,
-        cx: &mut Context<Self>,
-        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
         let tk = Tk::of(cx);
         let id: SharedString = id.into();
         let on_pick = Rc::new(on_pick);
-        let cells: Vec<(String, Option<usize>)> = options
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l.to_string(), Some(i)))
-            .chain(custom_label.map(|l| (l, None)))
-            .collect();
         h_flex()
             .id(ElementId::Name(id.clone()))
             .flex_shrink_0()
@@ -651,12 +683,10 @@ impl Tty7App {
             .gap(px(2.))
             .rounded(px(7.))
             .bg(tk.k05)
-            .children(cells.into_iter().enumerate().map(|(i, (label, bucket))| {
-                // A bucket is highlighted only on an exact match, and the
-                // custom cell (`bucket == None`) exactly when no bucket was.
-                let active = bucket == selected;
+            .children(options.iter().enumerate().map(|(i, label)| {
+                let active = i == selected;
                 let on_pick = on_pick.clone();
-                let cell = h_flex()
+                h_flex()
                     .id(ElementId::NamedInteger(id.clone(), i as u64))
                     .items_center()
                     .justify_center()
@@ -671,16 +701,11 @@ impl Tty7App {
                     .when(!active, |s| {
                         s.text_color(tk.k5).hover(move |h| h.text_color(tk.fg))
                     })
-                    .child(label);
-                match bucket {
-                    Some(ix) => {
-                        cell.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_pick(this, ix, window, cx);
-                            }))
-                    }
-                    None => cell,
-                }
+                    .child(label.to_string())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_pick(this, i, window, cx);
+                    }))
             }))
             .into_any_element()
     }
@@ -779,7 +804,6 @@ impl Tty7App {
                 SettingsSection::KeyboardMouse => self.render_settings_input(cx),
                 SettingsSection::Ssh => self.render_settings_ssh(cx),
                 SettingsSection::Agents => self.render_settings_agents(cx),
-                SettingsSection::WindowTabs => self.render_window_preferences(cx),
                 SettingsSection::Keybindings => self.render_settings_keybindings(cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
@@ -1348,9 +1372,6 @@ impl Tty7App {
                 }
                 SettingsSection::KeyboardMouse => {
                     self.render_settings_input(cx);
-                }
-                SettingsSection::WindowTabs => {
-                    self.render_window_preferences(cx);
                 }
                 SettingsSection::Ssh => {
                     self.render_ssh_connection_rows(cx);

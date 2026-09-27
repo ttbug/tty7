@@ -167,7 +167,7 @@ const PROBE_RETRY: Duration = Duration::from_secs(2);
 const NOT_A_REPO_RETRY: Duration = Duration::from_secs(10);
 
 /// What the panel knows about the directory the active pane is sitting in.
-enum RepoLookup {
+pub(crate) enum RepoLookup {
     /// Nothing has answered yet — the tab's own probe is still out.
     Pending,
     NotARepo,
@@ -1215,7 +1215,7 @@ impl Tty7App {
     }
 
     /// The host and directory the panel is looking at.
-    fn scm_pane_target(
+    pub(crate) fn scm_pane_target(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1239,7 +1239,7 @@ impl Tty7App {
     /// different directory inside a linked worktree, and it is only filled in
     /// for panes whose shell reports a cwd — a pane without shell integration
     /// would leave the panel loading forever.
-    fn scm_repo_root(
+    pub(crate) fn scm_repo_root(
         &mut self,
         host: &SharedHost,
         cwd: &Path,

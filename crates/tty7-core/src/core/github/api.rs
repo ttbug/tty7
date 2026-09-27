@@ -1,0 +1,639 @@
+//! The REST calls the panel makes, over an injected [`Transport`].
+//!
+//! Everything here is request shaping and response decoding; the bytes move
+//! through a `Transport`, which the GUI backs with HTTPS
+//! ([`super::http::HttpTransport`]) and tests back with fixtures. No test in
+//! this crate touches the network.
+
+use serde::de::DeserializeOwned;
+
+use super::model::{
+    Comment, Detail, Item, Kind, PrFile, RawComment, RawFile, RawIssue, RawPull, StateFilter,
+};
+use super::remote::RepoSlug;
+
+/// Rows per page. GitHub's maximum is 100; 50 keeps the first answer quick on
+/// a slow link while still filling a tall panel.
+pub const PAGE_SIZE: u32 = 50;
+
+/// Comments and files fetched with a detail view. One page each: past that the
+/// view says there is more and links to GitHub.
+pub const DETAIL_PAGE: u32 = 100;
+
+/// Why a call failed, in the terms the panel explains to the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiError {
+    /// 401: a token was sent and GitHub refused it (revoked, expired).
+    Unauthorized,
+    /// 404: no such repository — or a private one this request cannot see,
+    /// which GitHub deliberately does not distinguish.
+    NotFound,
+    /// The rate limit is spent. `reset` is when it refills, unix seconds.
+    RateLimited { reset: Option<i64> },
+    /// 403 for another reason (SSO enforcement, a blocked token), with
+    /// GitHub's own message.
+    Forbidden(String),
+    /// The request never got an HTTP answer.
+    Network(String),
+    /// Any other non-success status.
+    Http(u16),
+    /// A 2xx whose body did not decode.
+    Decode(String),
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Unauthorized => f.write_str("GitHub rejected the token (401)"),
+            ApiError::NotFound => f.write_str("not found (404)"),
+            ApiError::RateLimited { reset } => match reset {
+                Some(at) => write!(f, "rate limited until {at}"),
+                None => f.write_str("rate limited"),
+            },
+            ApiError::Forbidden(msg) => write!(f, "forbidden (403): {msg}"),
+            ApiError::Network(msg) => write!(f, "network error: {msg}"),
+            ApiError::Http(code) => write!(f, "HTTP {code}"),
+            ApiError::Decode(msg) => write!(f, "unexpected response: {msg}"),
+        }
+    }
+}
+
+/// A successful answer: the body, and whether the `Link` header offered a
+/// next page.
+#[derive(Clone, Debug, Default)]
+pub struct Reply {
+    pub body: Vec<u8>,
+    pub has_next: bool,
+}
+
+/// One authenticated-or-not GET against `https://api.github.com`.
+pub trait Transport: Send + Sync {
+    /// `path` starts with `/` and includes the query string.
+    fn get(&self, path: &str) -> Result<Reply, ApiError>;
+    /// The same GET, asking for the `full` media type: text fields come with
+    /// their rendered `*_html` too, which is where GitHub puts the signed
+    /// URLs a pasted attachment can actually be downloaded from (see
+    /// [`markdown::sign_attachments`](super::markdown::sign_attachments)).
+    /// Only the detail asks for it; a list does not need 50 bodies twice.
+    fn get_full(&self, path: &str) -> Result<Reply, ApiError> {
+        self.get(path)
+    }
+    /// Whether requests carry a token. Decides how a 404 or a rate limit is
+    /// explained: to a signed-out user, both usually mean "sign in".
+    fn authenticated(&self) -> bool;
+}
+
+/// Map a response's status and headers to success or an [`ApiError`].
+///
+/// `header` looks a response header up by lower-case name. `body` is only read
+/// for GitHub's `message`, which tells a secondary rate limit apart from any
+/// other 403.
+pub fn classify(
+    status: u16,
+    header: &dyn Fn(&str) -> Option<String>,
+    body: &[u8],
+) -> Result<(), ApiError> {
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    let message = || {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+    let reset = || {
+        header("x-ratelimit-reset")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .or_else(|| {
+                let after = header("retry-after")?.trim().parse::<i64>().ok()?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs() as i64;
+                Some(now.saturating_add(after))
+            })
+    };
+    match status {
+        401 => Err(ApiError::Unauthorized),
+        404 => Err(ApiError::NotFound),
+        429 => Err(ApiError::RateLimited { reset: reset() }),
+        403 => {
+            let spent = header("x-ratelimit-remaining").is_some_and(|v| v.trim() == "0");
+            let msg = message();
+            if spent
+                || header("retry-after").is_some()
+                || msg.to_ascii_lowercase().contains("rate limit")
+            {
+                Err(ApiError::RateLimited { reset: reset() })
+            } else {
+                Err(ApiError::Forbidden(msg))
+            }
+        }
+        code => Err(ApiError::Http(code)),
+    }
+}
+
+/// Whether a `Link` header names a `rel="next"` page.
+pub fn link_has_next(link: &str) -> bool {
+    link.split(',').any(|part| {
+        part.split(';')
+            .skip(1)
+            .any(|p| p.trim().eq_ignore_ascii_case("rel=\"next\""))
+    })
+}
+
+/// What a list shows: which repository, which kind, which state, which label.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ListQuery {
+    pub slug: RepoSlug,
+    pub kind: Kind,
+    pub state: StateFilter,
+    pub label: Option<String>,
+}
+
+/// One page of a list, and the page after it when there is one.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ListPage {
+    pub items: Vec<Item>,
+    pub next_page: Option<u32>,
+}
+
+/// Which endpoint answers a list query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Endpoint {
+    /// `/issues`, keeping only the entries whose kind matches.
+    Issues { want_prs: bool },
+    /// `/pulls`, which can say draft and merged but cannot filter by label.
+    Pulls,
+}
+
+fn repo_path(slug: &RepoSlug) -> String {
+    format!(
+        "/repos/{}/{}",
+        super::remote::escape_path(&slug.owner),
+        super::remote::escape_path(&slug.name)
+    )
+}
+
+fn list_request(q: &ListQuery, page: u32) -> (String, Endpoint) {
+    let base = repo_path(&q.slug);
+    let common = format!(
+        "state={}&sort=updated&direction=desc&per_page={PAGE_SIZE}&page={page}",
+        q.state.as_query()
+    );
+    let label = q.label.as_deref().filter(|l| !l.is_empty());
+    match (q.kind, label) {
+        (Kind::Pulls, None) => (format!("{base}/pulls?{common}"), Endpoint::Pulls),
+        (kind, label) => {
+            let mut path = format!("{base}/issues?{common}");
+            if let Some(label) = label {
+                path.push_str("&labels=");
+                path.push_str(&escape_query(label));
+            }
+            (
+                path,
+                Endpoint::Issues {
+                    want_prs: kind == Kind::Pulls,
+                },
+            )
+        }
+    }
+}
+
+fn escape_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn decode<T: DeserializeOwned>(reply: &Reply) -> Result<T, ApiError> {
+    serde_json::from_slice(&reply.body).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Page `page` (1-based) of a list.
+///
+/// `/issues` interleaves pull requests with issues, so a page of it filtered
+/// down to one kind can be short — even empty — while later pages still hold
+/// matches. `next_page` follows GitHub's `Link` header, not the row count, so
+/// "load more" stays offered for exactly as long as there is more to load.
+pub fn list(t: &dyn Transport, q: &ListQuery, page: u32) -> Result<ListPage, ApiError> {
+    let page = page.max(1);
+    let (path, endpoint) = list_request(q, page);
+    let reply = t.get(&path)?;
+    let items = match endpoint {
+        Endpoint::Pulls => decode::<Vec<RawPull>>(&reply)?
+            .into_iter()
+            .map(|p| p.into_item().0)
+            .collect(),
+        Endpoint::Issues { want_prs } => decode::<Vec<RawIssue>>(&reply)?
+            .into_iter()
+            .filter(|i| i.is_pr() == want_prs)
+            .map(RawIssue::into_item)
+            .collect(),
+    };
+    Ok(ListPage {
+        items,
+        next_page: reply.has_next.then_some(page + 1),
+    })
+}
+
+/// One issue or pull request with its body and conversation — and, for a pull
+/// request, its branches, size and changed files.
+pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail, ApiError> {
+    let base = repo_path(slug);
+    let issue: RawIssue = decode(&t.get_full(&format!("{base}/issues/{number}"))?)?;
+    let is_pr = issue.is_pr();
+    let body = super::markdown::sign_attachments(
+        issue.body.as_deref().unwrap_or_default(),
+        issue.body_html.as_deref().unwrap_or_default(),
+    );
+    let mut item = issue.into_item();
+
+    let reply = t.get_full(&format!(
+        "{base}/issues/{number}/comments?per_page={DETAIL_PAGE}"
+    ))?;
+    let comments: Vec<Comment> = decode::<Vec<RawComment>>(&reply)?
+        .into_iter()
+        .map(RawComment::into_comment)
+        .collect();
+    let comments_truncated = reply.has_next;
+
+    let (mut pull, mut files, mut files_truncated) = (None, None, false);
+    if is_pr {
+        let (pr_item, info) =
+            decode::<RawPull>(&t.get(&format!("{base}/pulls/{number}"))?)?.into_item();
+        // `/pulls/{n}` is the one that knows about drafts; the issue's
+        // labels and comment count are kept, which `/pulls` omits.
+        item.state = pr_item.state;
+        pull = Some(info);
+        let reply = t.get(&format!(
+            "{base}/pulls/{number}/files?per_page={DETAIL_PAGE}"
+        ))?;
+        files = Some(
+            decode::<Vec<RawFile>>(&reply)?
+                .into_iter()
+                .map(RawFile::into_file)
+                .collect::<Vec<PrFile>>(),
+        );
+        files_truncated = reply.has_next;
+    }
+
+    Ok(Detail {
+        item,
+        body,
+        comments,
+        comments_truncated,
+        pull,
+        files,
+        files_truncated,
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::core::git::diff::FileStatus;
+    use crate::core::github::model::ItemState;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A transport that answers from a path → reply table and records every
+    /// path asked for. Paths it has no answer for are a 404.
+    pub(crate) struct Fixture {
+        pub(crate) replies: HashMap<String, Result<Reply, ApiError>>,
+        pub(crate) asked: Mutex<Vec<String>>,
+        pub(crate) authenticated: bool,
+    }
+
+    impl Fixture {
+        pub(crate) fn new() -> Fixture {
+            Fixture {
+                replies: HashMap::new(),
+                asked: Mutex::new(Vec::new()),
+                authenticated: true,
+            }
+        }
+
+        pub(crate) fn on(&mut self, path: &str, body: &str, has_next: bool) {
+            self.replies.insert(
+                path.to_string(),
+                Ok(Reply {
+                    body: body.as_bytes().to_vec(),
+                    has_next,
+                }),
+            );
+        }
+    }
+
+    impl Transport for Fixture {
+        fn get(&self, path: &str) -> Result<Reply, ApiError> {
+            self.asked.lock().unwrap().push(path.to_string());
+            self.replies
+                .get(path)
+                .cloned()
+                .unwrap_or(Err(ApiError::NotFound))
+        }
+
+        fn authenticated(&self) -> bool {
+            self.authenticated
+        }
+    }
+
+    pub(crate) fn slug() -> RepoSlug {
+        RepoSlug {
+            owner: "l0ng-ai".into(),
+            name: "tty7".into(),
+        }
+    }
+
+    const ISSUE_LIST: &str = r#"[
+      {"number": 12, "title": "Crash on resize", "state": "open", "state_reason": null,
+       "user": {"login": "ada"}, "labels": [{"name": "bug", "color": "d73a4a"}],
+       "comments": 3, "created_at": "2026-09-01T10:00:00Z", "updated_at": "2026-09-20T08:30:00Z",
+       "html_url": "https://github.com/l0ng-ai/tty7/issues/12", "body": "It crashes."},
+      {"number": 13, "title": "Add panel", "state": "open", "user": {"login": "bob"},
+       "labels": [], "comments": 0, "created_at": "2026-09-02T10:00:00Z",
+       "updated_at": "2026-09-21T08:30:00Z", "html_url": "https://github.com/l0ng-ai/tty7/pull/13",
+       "draft": true, "pull_request": {"url": "x", "merged_at": null}},
+      {"number": 9, "title": "Old idea", "state": "closed", "state_reason": "not_planned",
+       "user": null, "labels": [], "comments": 1, "created_at": "2026-08-01T10:00:00Z",
+       "updated_at": "2026-08-02T10:00:00Z", "html_url": "https://github.com/l0ng-ai/tty7/issues/9"}
+    ]"#;
+
+    const PULL_LIST: &str = r#"[
+      {"number": 13, "title": "Add panel", "state": "open", "draft": true, "merged_at": null,
+       "user": {"login": "bob"}, "labels": [{"name": "ui", "color": "0e8a16"}],
+       "created_at": "2026-09-02T10:00:00Z", "updated_at": "2026-09-21T08:30:00Z",
+       "html_url": "https://github.com/l0ng-ai/tty7/pull/13",
+       "head": {"ref": "feat/panel", "label": "bob:feat/panel"}, "base": {"ref": "main"}},
+      {"number": 8, "title": "Fix typo", "state": "closed", "draft": false,
+       "merged_at": "2026-09-03T10:00:00Z", "user": {"login": "cy"}, "labels": [],
+       "created_at": "2026-09-02T10:00:00Z", "updated_at": "2026-09-03T10:00:00Z",
+       "html_url": "https://github.com/l0ng-ai/tty7/pull/8",
+       "head": {"ref": "typo"}, "base": {"ref": "main"}}
+    ]"#;
+
+    fn query(kind: Kind, label: Option<&str>) -> ListQuery {
+        ListQuery {
+            slug: slug(),
+            kind,
+            state: StateFilter::Open,
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn issues_come_from_issues_with_the_pull_requests_filtered_out() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues?state=open&sort=updated&direction=desc&per_page=50&page=1",
+            ISSUE_LIST,
+            true,
+        );
+        let page = list(&t, &query(Kind::Issues, None), 1).unwrap();
+        let numbers: Vec<u64> = page.items.iter().map(|i| i.number).collect();
+        assert_eq!(numbers, vec![12, 9]);
+        assert_eq!(page.next_page, Some(2));
+        let first = &page.items[0];
+        assert_eq!(first.author, "ada");
+        assert_eq!(first.state, ItemState::Open);
+        assert_eq!(first.labels[0].name, "bug");
+        assert_eq!(first.comments, 3);
+        assert!(first.updated_at > first.created_at);
+        assert_eq!(page.items[1].state, ItemState::NotPlanned);
+        assert_eq!(
+            page.items[1].author, "",
+            "a deleted user is blank, not a failure"
+        );
+    }
+
+    #[test]
+    fn pull_requests_come_from_pulls_with_draft_and_merged() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls?state=open&sort=updated&direction=desc&per_page=50&page=2",
+            PULL_LIST,
+            false,
+        );
+        let page = list(&t, &query(Kind::Pulls, None), 2).unwrap();
+        assert_eq!(page.next_page, None);
+        let states: Vec<ItemState> = page.items.iter().map(|i| i.state).collect();
+        assert_eq!(states, vec![ItemState::Draft, ItemState::Merged]);
+        assert!(page.items.iter().all(|i| i.is_pr));
+    }
+
+    #[test]
+    fn a_label_filter_on_pull_requests_goes_through_issues() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues?state=open&sort=updated&direction=desc&per_page=50&page=1&labels=good%20first%20issue",
+            ISSUE_LIST,
+            false,
+        );
+        let page = list(&t, &query(Kind::Pulls, Some("good first issue")), 1).unwrap();
+        let numbers: Vec<u64> = page.items.iter().map(|i| i.number).collect();
+        assert_eq!(numbers, vec![13]);
+        assert_eq!(page.items[0].state, ItemState::Draft);
+    }
+
+    #[test]
+    fn page_zero_is_page_one() {
+        let t = Fixture::new();
+        let _ = list(&t, &query(Kind::Issues, None), 0);
+        assert!(t.asked.lock().unwrap()[0].ends_with("&page=1"));
+    }
+
+    #[test]
+    fn an_issue_detail_reads_the_issue_and_its_comments_only() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/12",
+            r#"{"number": 12, "title": "Crash on resize", "state": "open",
+                "user": {"login": "ada"}, "labels": [], "comments": 1,
+                "created_at": "2026-09-01T10:00:00Z", "updated_at": "2026-09-20T08:30:00Z",
+                "html_url": "https://github.com/l0ng-ai/tty7/issues/12", "body": "It **crashes**."}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/12/comments?per_page=100",
+            r#"[{"id": 1, "user": {"login": "bob"}, "body": "Same here",
+                 "created_at": "2026-09-02T10:00:00Z", "html_url": "https://github.com/c/1"}]"#,
+            true,
+        );
+        let d = detail(&t, &slug(), 12).unwrap();
+        assert_eq!(d.body, "It **crashes**.");
+        assert_eq!(d.comments.len(), 1);
+        assert_eq!(d.comments[0].author, "bob");
+        assert!(d.comments_truncated);
+        assert!(d.pull.is_none() && d.files.is_none());
+        assert_eq!(t.asked.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_pull_request_detail_adds_branches_and_files() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/13",
+            r#"{"number": 13, "title": "Add panel", "state": "open", "user": {"login": "bob"},
+                "labels": [{"name": "ui"}], "comments": 0, "created_at": "2026-09-02T10:00:00Z",
+                "updated_at": "2026-09-21T08:30:00Z", "html_url": "https://github.com/l0ng-ai/tty7/pull/13",
+                "body": null, "pull_request": {"merged_at": null}}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/13/comments?per_page=100",
+            "[]",
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls/13",
+            r#"{"number": 13, "title": "Add panel", "state": "open", "draft": true,
+                "merged_at": null, "user": {"login": "bob"}, "labels": [],
+                "created_at": "2026-09-02T10:00:00Z", "updated_at": "2026-09-21T08:30:00Z",
+                "html_url": "https://github.com/l0ng-ai/tty7/pull/13",
+                "head": {"ref": "feat/panel"}, "base": {"ref": "main"},
+                "additions": 120, "deletions": 4, "changed_files": 2, "commits": 3}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls/13/files?per_page=100",
+            r#"[{"filename": "src/new.rs", "status": "added", "additions": 118, "deletions": 0,
+                 "patch": "@@ -0,0 +1,2 @@\n+fn a() {}\n+fn b() {}"},
+                {"filename": "assets/logo.png", "status": "renamed",
+                 "previous_filename": "logo.png", "additions": 2, "deletions": 4}]"#,
+            true,
+        );
+        let d = detail(&t, &slug(), 13).unwrap();
+        assert_eq!(d.body, "", "a null body is an empty one");
+        assert_eq!(d.item.state, ItemState::Draft);
+        assert_eq!(d.item.labels[0].name, "ui", "labels come from the issue");
+        let pull = d.pull.unwrap();
+        assert_eq!(
+            (pull.head_ref.as_str(), pull.base_ref.as_str()),
+            ("feat/panel", "main")
+        );
+        assert_eq!((pull.additions, pull.deletions, pull.commits), (120, 4, 3));
+        let files = d.files.unwrap();
+        assert_eq!(files[0].status, FileStatus::Added);
+        assert!(files[0].patch.is_some());
+        assert_eq!(files[1].status, FileStatus::Renamed);
+        assert_eq!(files[1].old_path.as_deref(), Some("logo.png"));
+        assert!(files[1].patch.is_none());
+        assert!(d.files_truncated);
+    }
+
+    #[test]
+    fn a_failed_sub_request_fails_the_detail() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/12",
+            r#"{"number": 12, "title": "x", "state": "open"}"#,
+            false,
+        );
+        t.replies.insert(
+            "/repos/l0ng-ai/tty7/issues/12/comments?per_page=100".into(),
+            Err(ApiError::RateLimited { reset: Some(5) }),
+        );
+        assert_eq!(
+            detail(&t, &slug(), 12),
+            Err(ApiError::RateLimited { reset: Some(5) })
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_the_expected_shape_is_a_decode_error() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/issues?state=open&sort=updated&direction=desc&per_page=50&page=1",
+            r#"{"message": "surprise"}"#,
+            false,
+        );
+        assert!(matches!(
+            list(&t, &query(Kind::Issues, None), 1),
+            Err(ApiError::Decode(_))
+        ));
+    }
+
+    fn headers(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn statuses_map_to_distinct_errors() {
+        let none = headers(&[]);
+        assert_eq!(classify(200, &none, b""), Ok(()));
+        assert_eq!(classify(204, &none, b""), Ok(()));
+        assert_eq!(classify(401, &none, b""), Err(ApiError::Unauthorized));
+        assert_eq!(classify(404, &none, b""), Err(ApiError::NotFound));
+        assert_eq!(classify(500, &none, b""), Err(ApiError::Http(500)));
+        assert_eq!(
+            classify(
+                403,
+                &none,
+                br#"{"message": "Resource protected by organization SAML enforcement."}"#
+            ),
+            Err(ApiError::Forbidden(
+                "Resource protected by organization SAML enforcement.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_spent_rate_limit_is_told_apart_from_other_403s() {
+        let spent = headers(&[
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1790000000"),
+        ]);
+        assert_eq!(
+            classify(403, &spent, b"{}"),
+            Err(ApiError::RateLimited {
+                reset: Some(1_790_000_000)
+            })
+        );
+        assert_eq!(
+            classify(429, &spent, b"{}"),
+            Err(ApiError::RateLimited {
+                reset: Some(1_790_000_000)
+            })
+        );
+        // A secondary limit keeps quota but says so in its message.
+        let left = headers(&[("x-ratelimit-remaining", "12")]);
+        assert_eq!(
+            classify(
+                403,
+                &left,
+                br#"{"message": "You have exceeded a secondary rate limit."}"#
+            ),
+            Err(ApiError::RateLimited { reset: None })
+        );
+        let retry = headers(&[("retry-after", "60")]);
+        assert!(matches!(
+            classify(403, &retry, b"{}"),
+            Err(ApiError::RateLimited { reset: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn the_link_header_decides_whether_there_is_more() {
+        assert!(link_has_next(
+            r#"<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=9>; rel="last""#
+        ));
+        assert!(!link_has_next(
+            r#"<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=1>; rel="first""#
+        ));
+        assert!(!link_has_next(""));
+    }
+}

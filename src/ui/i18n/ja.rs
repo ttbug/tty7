@@ -91,6 +91,33 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
 
         L10nKey::SearchTabs => "タブを検索…",
         L10nKey::SearchFiles => "ファイルを検索…",
+        L10nKey::PanelSearchPlaceholder => "ファイル内を検索…",
+        L10nKey::PanelSearchWholeWord => "単語単位で検索",
+        L10nKey::PanelSearchIdle => "次のフォルダー内のすべてのファイルの内容を検索します：",
+        L10nKey::PanelSearchNoFolder => "検索するフォルダーがありません",
+        L10nKey::PanelSearchNoFolderHint => "アクティブなタブのプロジェクト内を検索します。",
+        L10nKey::PanelSearchSshPane => "SSH ペインのファイルの内容は検索できません",
+        L10nKey::PanelSearchSshPaneHint => {
+            "ホストをリモートワークスペースとして開くと検索できます。ファイルタブで閲覧することもできます。"
+        }
+        L10nKey::PanelSearchSearching => "検索中…",
+        L10nKey::PanelSearchNoMatches => "「{query}」の結果はありません",
+        L10nKey::PanelSearchBadPattern => "正規表現が正しくありません: {e}",
+        L10nKey::PanelSearchServerTooOld => {
+            "このマシンの tty7-server は古いため、ファイルの内容を検索できません"
+        }
+        L10nKey::PanelSearchServerTooOldHint => {
+            "検索を使うには、そのホストのサーバーを更新してください。"
+        }
+        L10nKey::PanelSearchFailed => "検索に失敗しました: {e}",
+        L10nKey::PanelSearchResultCount => "{count} 件",
+        L10nKey::PanelSearchFileCount => "{count} 個のファイル",
+        L10nKey::PanelSearchSummary => "{files}で {results}",
+        L10nKey::PanelSearchTruncated => {
+            "一致した結果の一部だけを表示しています。検索条件を絞り込むと残りを確認できます。"
+        }
+        L10nKey::PanelSearchLineTooltip => "{line} 行目、{column} 列目",
+        L10nKey::PanelSearchHostGone => "このプロジェクトがあるマシンに接続されていません",
         L10nKey::SearchThemes => "テーマを検索…",
         L10nKey::SearchSettings => "設定を検索…",
         L10nKey::FilterHosts => "ホストを絞り込み…",
@@ -106,12 +133,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabSessions => "セッション",
         L10nKey::SearchPlaceholderSessions => "過去のエージェントセッションを検索…",
         L10nKey::SearchSessionsEmptyHint => {
-            "このコンピューター上の Claude Code と Codex のセッションがここに表示されます。"
+            "このコンピューター上のコーディングエージェントの過去のセッションがここに表示されます。"
         }
         L10nKey::SearchSectionSessionsHere => "{dir} 内",
         L10nKey::SearchSectionSessionsRecent => "最近",
         L10nKey::AppSessionNotResumable => "{name} は ID によるセッション再開に対応していません。",
         L10nKey::AppSessionDirectoryGone => "セッションのディレクトリが存在しません: {path}",
+        L10nKey::SearchSessionActions => "このセッションの操作を選択…",
+        L10nKey::SessionActionsHint => "操作",
+        L10nKey::SessionActionResume => "再開",
+        L10nKey::SessionActionResumeSubtitle => "実行したディレクトリの新しいタブで続ける",
+        L10nKey::SessionActionHide => "リストから削除",
+        L10nKey::SessionActionHideSubtitle => "エージェント自身の履歴は残ります",
         L10nKey::SearchMoreIn => "{tab} にさらに {count} 件",
         L10nKey::SearchNoResults => "結果がありません",
         L10nKey::SearchSectionNewTerminal => "新しいターミナル",
@@ -183,7 +216,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "キーボードとマウス",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "連携",
-        L10nKey::SettingsNavWindowTabs => "ウィンドウとタブ",
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
@@ -646,13 +678,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"
         }
-        L10nKey::SettingsDiffPreviewFromCounts => "サイドバーのカウントから Diff プレビューを開く",
-        L10nKey::SettingsDiffPreviewFromCountsDesc => "行の +N −N をクリックして Diff を開きます",
-        L10nKey::SettingsSshTabTitle => "SSH タブのタイトル",
-        L10nKey::SettingsSshTabTitleDesc => "SSH タブの名前の付け方",
-        L10nKey::SettingsSshTabTitleDynamic => "動的",
-        L10nKey::SettingsSshTabTitleProfileName => "プロファイル名",
-        L10nKey::SettingsSshTabTitleHostname => "ホスト名",
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -878,9 +903,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchDetectUrlsKeywords => {
             "リンク ハイパーリンク クリック可能 開く detect urls links hyperlink clickable open"
         }
-        L10nKey::SettingsSearchDiffPreviewFromCountsKeywords => {
-            "diff オーバーレイ プレビュー サイドバー カウント git 変更 クリック ブランチ 行数 diff preview overlay sidebar counts git changes"
-        }
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "非アクティブ ペイン 暗く フォーカス 分割 fade unfocused inactive split pane focus opacity highlight active dimming"
         }
@@ -1029,9 +1051,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
-        }
-        L10nKey::SettingsSearchSshTabTitleKeywords => {
-            "SSH タブ タイトル 名前 ホスト ホスト名 プロファイル エイリアス 固定 ssh tab title name host hostname profile alias pin"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"
@@ -1205,6 +1224,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelChangesTitle => "変更",
         L10nKey::PanelScmTitle => "変更",
         L10nKey::PanelFilesTitle => "ファイル",
+        L10nKey::PanelSearchTitle => "検索",
+        L10nKey::PanelGitHubTitle => "GitHub",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
             "タブを開くと、そのシェル、ディレクトリ、プロセスがここに表示されます"
@@ -1647,6 +1668,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelInfo => "右パネル: 情報",
         L10nKey::CmdRightPanelChanges => "右パネル: 変更",
         L10nKey::CmdRightPanelFiles => "右パネル: ファイル",
+        L10nKey::CmdRightPanelSearch => "右パネル: 検索",
+        L10nKey::CmdRightPanelGitHub => "右パネル: GitHub",
         L10nKey::CmdChangeTheme => "テーマを変更…",
         L10nKey::CmdResetFontSize => "フォントサイズをリセット",
         L10nKey::CmdEnterFullScreen => "全画面表示",
@@ -1773,7 +1796,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{name} のセッションはローカルペインからしかフォークできません"
         }
         L10nKey::AppForkNoSessionId => {
-            "tty7 はこのペインで {name} のセッション ID を確認できていません — 設定 → エージェントでフックをインストールしてください"
+            "tty7 はこのペインで {name} のセッション ID を確認できていません — 設定 → 連携でフックをインストールしてください"
         }
         L10nKey::AppForkSessionIdNotToken => {
             "{name} のセッション ID はプレーンなトークンではありません"
@@ -2052,6 +2075,52 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabContextWake => "復帰",
         L10nKey::TabTooltipAsleep => "休止中 — 選択すると復帰",
         L10nKey::TabWakeFailed => "タブを復帰できませんでした：どのペインも起動できません",
+        // ---- The right panel's GitHub tab ----
+        L10nKey::GitHubIssues => "イシュー",
+        L10nKey::GitHubPulls => "プルリクエスト",
+        L10nKey::GitHubOpen => "オープン",
+        L10nKey::GitHubClosed => "クローズ済み",
+        L10nKey::GitHubMerged => "マージ済み",
+        L10nKey::GitHubDraft => "下書き",
+        L10nKey::GitHubNotPlanned => "対応予定なし",
+        L10nKey::GitHubRefresh => "再読み込み",
+        L10nKey::GitHubOpenOnGitHub => "GitHub で開く",
+        L10nKey::GitHubShowRemote => "表示するリモート",
+        L10nKey::GitHubLoadMore => "さらに読み込む",
+        L10nKey::GitHubNoRemote => "GitHub リモートがありません",
+        L10nKey::GitHubNoRemoteHint => {
+            "このリポジトリのリモートはどれも github.com を指していません。"
+        }
+        L10nKey::GitHubNoIssues => "一致するイシューはありません。",
+        L10nKey::GitHubNoPulls => "一致するプルリクエストはありません。",
+        L10nKey::GitHubSignInHint => {
+            "ターミナルで `gh auth login` を実行してサインインし、再読み込みしてください。"
+        }
+        L10nKey::GitHubNotFoundSignedOut => {
+            "GitHub でこのリポジトリが見つかりません。非公開の場合は先にサインインしてください。"
+        }
+        L10nKey::GitHubNotFoundSignedIn => {
+            "GitHub でこのリポジトリが見つからないか、このアカウントでは閲覧できません。"
+        }
+        L10nKey::GitHubUnauthorized => "GitHub が保存済みのサインイン情報を拒否しました。",
+        L10nKey::GitHubRateLimited => "GitHub のレート制限に達しました。",
+        L10nKey::GitHubRateLimitResetIn => "{n} 分後にリセットされます。",
+        L10nKey::GitHubRateLimitSignedOut => {
+            "サインインしていない場合、GitHub へのリクエストは 1 時間に 60 回までです。`gh auth login` でサインインすると上限が上がります。"
+        }
+        L10nKey::GitHubForbidden => "GitHub がリクエストを拒否しました。",
+        L10nKey::GitHubNetworkError => "GitHub に接続できません。",
+        L10nKey::GitHubHttpError => "GitHub がエラーを返しました（{code}）。",
+        L10nKey::GitHubDecodeError => "GitHub から tty7 が読み取れない応答が返されました。",
+        L10nKey::GitHubMoreOnGitHub => "続きは GitHub で",
+        L10nKey::GitHubNoDescription => "説明はありません。",
+        L10nKey::GitHubFilterByLabel => "このラベルのみ表示",
+        L10nKey::GitHubClearLabel => "ラベルの絞り込みを解除",
+        L10nKey::GitHubImage => "画像",
+        L10nKey::GitHubComments => "{count} 件のコメント",
+        L10nKey::GitHubCommits => "{count} 件のコミット",
+        L10nKey::GitHubOpenedAt => "作成 {when}",
+        L10nKey::GitHubUpdatedAt => "更新 {when}",
     })
 }
 
@@ -2060,6 +2129,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "0 件",
         (L10nKey::SettingsMatchCount, "one") => "1 件",
         (L10nKey::SettingsMatchCount, "other") => "{count} 件",
+        (L10nKey::PanelSearchResultCount, "zero") => "0 件",
+        (L10nKey::PanelSearchResultCount, "one") => "1 件",
+        (L10nKey::PanelSearchResultCount, "other") => "{count} 件",
+        (L10nKey::PanelSearchFileCount, "zero") => "0 個のファイル",
+        (L10nKey::PanelSearchFileCount, "one") => "1 個のファイル",
+        (L10nKey::PanelSearchFileCount, "other") => "{count} 個のファイル",
         (L10nKey::SettingsRestoreChanged, "zero") => "変更を戻す",
         (L10nKey::SettingsRestoreChanged, "one") => "変更した 1 件を戻す",
         (L10nKey::SettingsRestoreChanged, "other") => "変更した {count} 件を戻す",
@@ -2199,6 +2274,13 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::WindowDeleteShells, "other") => {
             "{count} 個の実行中シェルが終了し、レイアウトが消去されます"
         }
+        // ---- The right panel's GitHub tab ----
+        (L10nKey::GitHubComments, "zero") => "コメントはありません",
+        (L10nKey::GitHubComments, "one") => "1 件のコメント",
+        (L10nKey::GitHubComments, "other") => "{count} 件のコメント",
+        (L10nKey::GitHubCommits, "zero") => "コミットはありません",
+        (L10nKey::GitHubCommits, "one") => "1 件のコミット",
+        (L10nKey::GitHubCommits, "other") => "{count} 件のコミット",
         _ => return None,
     };
     Some(res)

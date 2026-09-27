@@ -19,19 +19,21 @@ use crate::core::actions::{SearchNextTab, SearchPrevTab};
 use crate::ui::dialog::{CARD_RADIUS, FOOTER_H, KEYCAP, keycap};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
-/// What the list is showing: one of the tabs, or the theme picker one of the
-/// Actions rows opens. The picker has no tabs — Escape goes back to the one it
-/// came from.
+/// What the list is showing: one of the tabs, or a list a row opens — the
+/// theme picker one of the Actions rows opens, or what can be done with a
+/// past session. Those have no tabs — Escape goes back to the one they came
+/// from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Scope {
     Tab(SearchTab),
     Themes,
+    SessionActions,
 }
 
 pub(crate) struct SearchDelegate {
     catalog: Rc<Catalog>,
     scope: Scope,
-    /// The theme picker's rows, built when it opens.
+    /// The rows of a list a row opens, built when it opens.
     themes: Vec<Item>,
     query: String,
     sections: Vec<Section>,
@@ -56,7 +58,7 @@ impl SearchDelegate {
     fn refresh(&mut self, cx: &App) {
         self.sections = match self.scope {
             Scope::Tab(tab) => self.catalog.sections(tab, &self.query, cx),
-            Scope::Themes => plain(&self.themes, &self.query),
+            Scope::Themes | Scope::SessionActions => plain(&self.themes, &self.query),
         };
     }
 
@@ -130,14 +132,23 @@ impl SearchDelegate {
                     .child(note),
             );
         }
-        if item.kind.edit_variant().is_some() {
+        let gesture_hint = match &item.kind {
+            kind if kind.edit_variant().is_some() => Some(t(L10nKey::EditHint)),
+            // Only on the row the keyboard is on: every session row has the
+            // same gesture, and a column of identical hints is noise.
+            CommandKind::ResumeSession { .. } if picked && self.scope != Scope::SessionActions => {
+                Some(t(L10nKey::SessionActionsHint))
+            }
+            _ => None,
+        };
+        if let Some(hint) = gesture_hint {
             right = right.child(
                 h_flex()
                     .items_center()
                     .gap(px(6.))
                     .text_size(rems(ROW_META))
                     .text_color(muted)
-                    .child(t(L10nKey::EditHint))
+                    .child(hint)
                     .child(keycap(
                         crate::ui::keymap::key_tokens(EDIT_GESTURE).join(""),
                         cx,
@@ -310,6 +321,9 @@ impl ListDelegate for SearchDelegate {
 
 pub enum SearchEvent {
     Confirm(CommandKind),
+    /// Run this and leave the search open: what it changed is already
+    /// reflected in the rows.
+    RunInPlace(CommandKind),
     Dismiss,
     /// Show the theme at this preset index without persisting it: the theme
     /// picker previews the highlighted row while it stays open.
@@ -323,11 +337,15 @@ pub struct SearchView {
     catalog: Rc<Catalog>,
     /// The tab showing — or, in the theme picker, the one Escape returns to.
     tab: SearchTab,
-    /// What was typed when the theme picker opened, put back when it closes.
+    /// What was typed when a row's list (the theme picker, a session's
+    /// actions) opened, put back when it closes.
     parked_query: Option<String>,
     /// Preset index the theme picker is currently previewing, so the same
     /// theme is not re-applied on every redundant selection event.
     previewing: Option<usize>,
+    /// How many session lists have arrived since the search opened. A test
+    /// waits on it: the scan runs on a real thread and lands when it lands.
+    sessions_landed: usize,
     _sub: Subscription,
 }
 
@@ -358,12 +376,18 @@ impl SearchView {
             tab,
             parked_query: None,
             previewing: None,
+            sessions_landed: 0,
             _sub,
         }
     }
 
-    fn in_themes(&self) -> bool {
+    /// Whether a row's list is showing rather than a tab.
+    fn in_sub_list(&self) -> bool {
         self.parked_query.is_some()
+    }
+
+    fn scope(&self, cx: &App) -> Scope {
+        self.list.read(cx).delegate().scope
     }
 
     fn build_list(
@@ -410,7 +434,7 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.in_themes() {
+        if self.in_sub_list() {
             return;
         }
         self.tab = tab;
@@ -439,11 +463,12 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sessions_landed += 1;
         let mut catalog = (*self.catalog).clone();
         catalog.sessions = sessions;
         catalog.sessions_here = here;
         self.catalog = Rc::new(catalog);
-        if self.in_themes() {
+        if self.in_sub_list() {
             return;
         }
         let catalog = self.catalog.clone();
@@ -464,22 +489,35 @@ impl SearchView {
     }
 
     fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.parked_query = Some(self.list.read(cx).delegate().query.clone());
         // Open on the theme already in use: the picker previews the
         // highlighted row, and merely opening it must not change what the
         // window looks like.
         self.previewing = Item::active_theme_index(cx);
-        let delegate =
-            SearchDelegate::new(self.catalog.clone(), Scope::Themes, Item::themes(cx), cx);
-        let list = Self::build_list(delegate, self.previewing.map(IndexPath::new), window, cx);
+        let selected = self.previewing.map(IndexPath::new);
+        self.open_sub_list(Scope::Themes, Item::themes(cx), selected, window, cx);
+    }
+
+    fn open_sub_list(
+        &mut self,
+        scope: Scope,
+        items: Vec<Item>,
+        selected: Option<IndexPath>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.parked_query = Some(self.list.read(cx).delegate().query.clone());
+        let delegate = SearchDelegate::new(self.catalog.clone(), scope, items, cx);
+        let list = Self::build_list(delegate, selected, window, cx);
         self.replace_list(list, window, cx);
     }
 
-    fn close_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Backing out of the picker is not a choice: whatever was previewed
-        // goes back to what it was.
-        self.previewing = None;
-        cx.emit(SearchEvent::CancelThemePreview);
+    fn close_sub_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Backing out of the theme picker is not a choice: whatever was
+        // previewed goes back to what it was.
+        if self.scope(cx) == Scope::Themes {
+            self.previewing = None;
+            cx.emit(SearchEvent::CancelThemePreview);
+        }
         let query = self.parked_query.take().unwrap_or_default();
         let delegate =
             SearchDelegate::new(self.catalog.clone(), Scope::Tab(self.tab), Vec::new(), cx);
@@ -498,6 +536,45 @@ impl SearchView {
             .and_then(|item| item.kind.edit_variant())
     }
 
+    /// The edit gesture on the selected row: edit it, or open what can be
+    /// done with it. `false` when the row has neither.
+    fn on_edit_gesture(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.in_sub_list() {
+            return false;
+        }
+        if let Some(edit) = self.selected_edit_command(cx) {
+            cx.emit(SearchEvent::Confirm(edit));
+            return true;
+        }
+        let kind = self
+            .list
+            .read(cx)
+            .delegate()
+            .selected_item()
+            .map(|item| item.kind.clone());
+        let Some(actions) = kind.and_then(|kind| Item::session_actions(&kind, cx)) else {
+            return false;
+        };
+        self.open_sub_list(Scope::SessionActions, actions, None, window, cx);
+        true
+    }
+
+    /// Take a hidden session's row out of the lists at once, rather than
+    /// waiting for the next scan to leave it out.
+    fn drop_session(&mut self, agent: crate::core::cli_agent::CLIAgent, id: &str) {
+        let mut catalog = (*self.catalog).clone();
+        let at = catalog.sessions.iter().position(|item| {
+            matches!(&item.kind, CommandKind::ResumeSession { agent: a, session_id, .. }
+                if *a == agent && session_id == id)
+        });
+        let Some(at) = at else { return };
+        catalog.sessions.remove(at);
+        if at < catalog.sessions_here {
+            catalog.sessions_here -= 1;
+        }
+        self.catalog = Rc::new(catalog);
+    }
+
     fn on_list_event(
         &mut self,
         list: &Entity<ListState<SearchDelegate>>,
@@ -512,6 +589,14 @@ impl SearchView {
                     Some(Row::More { tab, .. }) => self.set_tab(tab, None, window, cx),
                     Some(Row::Item(item)) => match item.kind {
                         CommandKind::OpenThemePicker => self.open_themes(window, cx),
+                        CommandKind::HideSession { agent, session_id } => {
+                            self.drop_session(agent, &session_id);
+                            self.close_sub_list(window, cx);
+                            cx.emit(SearchEvent::RunInPlace(CommandKind::HideSession {
+                                agent,
+                                session_id,
+                            }));
+                        }
                         // What was typed found this row; it is not an address.
                         CommandKind::SearchHosts => {
                             self.set_tab(SearchTab::Hosts, Some(""), window, cx)
@@ -521,12 +606,12 @@ impl SearchView {
                     None => cx.emit(SearchEvent::Dismiss),
                 }
             }
-            ListEvent::Cancel => match self.in_themes() {
-                true => self.close_themes(window, cx),
+            ListEvent::Cancel => match self.in_sub_list() {
+                true => self.close_sub_list(window, cx),
                 false => cx.emit(SearchEvent::Dismiss),
             },
             ListEvent::Select(ix) => {
-                if self.in_themes()
+                if self.in_sub_list()
                     && let Some(Row::Item(item)) = list.read(cx).delegate().row_at(*ix)
                     && let CommandKind::SetTheme(i) = item.kind
                     && self.previewing != Some(i)
@@ -689,7 +774,7 @@ pub(crate) const KEY_CONTEXT: &str = "Search";
 impl Render for SearchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scrim = crate::ui::presets::scrim_fill(cx);
-        let tabs = !self.in_themes();
+        let tabs = !self.in_sub_list();
 
         let viewport = window.viewport_size();
         // The switcher's drop from the top on a full-size window; a short one
@@ -704,9 +789,10 @@ impl Render for SearchView {
             .max(ROW_H)
             .min(ROW_H * VISIBLE_ROWS + LIST_PAD * 2.));
         let typed = !self.list.read(cx).delegate().query.is_empty();
-        let placeholder = match tabs {
-            true => self.tab.placeholder(),
-            false => t(L10nKey::SearchTheme),
+        let placeholder = match self.scope(cx) {
+            Scope::Tab(_) => self.tab.placeholder(),
+            Scope::Themes => t(L10nKey::SearchTheme),
+            Scope::SessionActions => t(L10nKey::SearchSessionActions),
         };
         let card = v_flex()
             .relative()
@@ -752,12 +838,9 @@ impl Render for SearchView {
             .on_action(
                 cx.listener(|this, _: &SearchPrevTab, window, cx| this.step_tab(false, window, cx)),
             )
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
-                if is_edit_gesture(&ev.keystroke)
-                    && let Some(edit) = this.selected_edit_command(cx)
-                {
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                if is_edit_gesture(&ev.keystroke) && this.on_edit_gesture(window, cx) {
                     cx.stop_propagation();
-                    cx.emit(SearchEvent::Confirm(edit));
                 }
             }))
             .on_mouse_down(
@@ -913,6 +996,99 @@ mod tests {
         view.read_with(&vcx, |view, cx| {
             assert_eq!(view.tab, SearchTab::Hosts);
             assert_eq!(view.list.read(cx).delegate().query, "");
+        });
+    }
+
+    fn past_session(id: &str) -> Item {
+        Item::new(
+            format!("session {id}"),
+            CommandKind::ResumeSession {
+                agent: crate::core::cli_agent::CLIAgent::Claude,
+                session_id: id.into(),
+                cwd: None,
+            },
+        )
+    }
+
+    fn row_kinds(view: &Entity<SearchView>, vcx: &mut VisualTestContext) -> Vec<CommandKind> {
+        view.read_with(vcx, |view, cx| {
+            let delegate = view.list.read(cx).delegate();
+            delegate
+                .sections
+                .iter()
+                .flat_map(|s| &s.rows)
+                .filter_map(|r| Some(r.item()?.kind.clone()))
+                .collect()
+        })
+    }
+
+    /// The edit gesture on a past session opens what can be done with it;
+    /// removing it takes the row away at once, keeps the search open, and
+    /// is remembered.
+    #[gpui::test]
+    fn a_past_session_opens_its_actions_and_can_be_removed(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search(SearchTab::Sessions, "", window, cx)
+        });
+        // This machine's own scan runs on a real thread. Let it land before
+        // replacing what it found, or it lands afterwards and replaces ours.
+        let view = open(&app, &mut vcx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while view.read_with(&vcx, |view, _| view.sessions_landed) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scan never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            vcx.run_until_parked();
+        }
+        view.update_in(&mut vcx, |view, window, cx| {
+            view.set_sessions(vec![past_session("a"), past_session("b")], 0, window, cx)
+        });
+        vcx.run_until_parked();
+
+        vcx.simulate_keystrokes("secondary-e");
+        vcx.run_until_parked();
+        let actions = row_kinds(&view, &mut vcx);
+        assert!(view.read_with(&vcx, |view, cx| view.scope(cx) == Scope::SessionActions));
+        assert!(matches!(actions[0], CommandKind::ResumeSession { .. }));
+        for wanted in [
+            CommandKind::ForkSession {
+                agent: crate::core::cli_agent::CLIAgent::Claude,
+                session_id: "a".into(),
+                cwd: None,
+            },
+            CommandKind::CopySessionId("a".into()),
+        ] {
+            assert!(actions.contains(&wanted));
+        }
+
+        vcx.simulate_input("remove");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(app.read_with(&vcx, |app, _| app.search.is_some()));
+        view.read_with(&vcx, |view, cx| {
+            assert_eq!(view.scope(cx), Scope::Tab(SearchTab::Sessions));
+            assert_eq!(
+                view.list.read(cx).delegate().query,
+                "",
+                "the query comes back"
+            );
+        });
+        let left = row_kinds(&view, &mut vcx);
+        assert_eq!(left.len(), 1);
+        assert!(
+            matches!(&left[0], CommandKind::ResumeSession { session_id, .. } if session_id == "b")
+        );
+        app.read_with(&vcx, |_, cx| {
+            assert!(
+                cx.global::<crate::core::config::Config>()
+                    .hidden_agent_sessions
+                    .contains("claude:a")
+            );
         });
     }
 

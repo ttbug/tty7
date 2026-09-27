@@ -1761,25 +1761,6 @@ impl TerminalView {
         stated_title(&self.title)
     }
 
-    /// The title this pane gives its tab: [`Self::stated_title`], unless this
-    /// is an SSH pane and Settings pins its tab to the host's name instead
-    /// (#726). The pane's own title is untouched either way — OSC 0/2 keep
-    /// landing in it, and it is back on the tab the moment the setting is.
-    ///
-    /// A pane that has ended still says so: the pinned name takes the same
-    /// suffix the pane's own title would have.
-    pub(crate) fn tab_title(&self, cx: &App) -> Option<String> {
-        let pinned = self.ssh_spec.as_deref().and_then(|spec| {
-            let cfg = cx.try_global::<Config>()?;
-            crate::ui::ssh_connect::pinned_ssh_title(cfg.ssh_tab_title, spec, &cfg.ssh_profiles)
-        });
-        match pinned {
-            Some(name) if self.terminal.exited => Some(self.ended_title(&name)),
-            Some(name) => Some(name),
-            None => self.stated_title().map(str::to_string),
-        }
-    }
-
     /// `name` with the suffix that says how this pane ended.
     fn ended_title(&self, name: &str) -> String {
         let key = if self.workspace().is_some() && !self.terminal.child_exited() {

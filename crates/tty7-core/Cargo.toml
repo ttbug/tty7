@@ -48,6 +48,14 @@ sha2 = "0.11"
 # implementation.
 ignore = "0.4"
 
+# The matcher behind `Host::search_content` (the right panel's Search tab):
+# a literal, whole-word or regular-expression query compiled once and run over
+# each file the `ignore` walk above hands it. Lives here for the same reason
+# `ignore` does — a remote `tty7-server` answers the search with the identical
+# implementation. Already in the tree via the GUI and `ignore`, so this pins no
+# new code.
+regex = "1"
+
 # Format-preserving TOML editing for `core::agent_hooks`: Kimi Code takes its
 # hooks as `[[hooks]]` entries in the same `config.toml` that holds the user's
 # providers, models and comments, so installing must edit that file in place
@@ -133,6 +141,15 @@ base64 = "0.22"
 # in the tree transitively — the same crate `terminal-browser` uses for the
 # deflate side, so the two ends agree on the wire format.
 miniz_oxide = "0.8"
+# Reading coding agents' past sessions (`core::agent_history`), on this
+# machine or a remote one's server: Copilot names a session in YAML, Cursor
+# keys a chat by the md5 of its directory and hex-encodes its metadata, and
+# OpenCode and Cursor keep history in SQLite — bundled, so no system library
+# is needed on any host the server lands on.
+serde_yaml = "0.9"
+md5 = "0.8"
+hex = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -222,6 +239,10 @@ remote-install = [
     "dep:system-configuration",
     "dep:system-configuration-sys",
 ]
+# The GitHub tab's REST client (`core::github::http`). It rides the same HTTPS
+# stack and system-proxy resolution as the installer, so it is that feature
+# plus a name of its own: the server, which never reads GitHub, builds neither.
+github = ["remote-install"]
 
 [lints]
 workspace = true

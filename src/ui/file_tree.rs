@@ -755,9 +755,42 @@ impl Tty7App {
 
     pub(crate) fn file_tree_refresh_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.spawn_host(cx);
-        let Some(host) = self.active_host(cx) else {
+        let Some((host, mut roots)) = self.project_roots(cx) else {
             return;
         };
+        if roots.is_empty()
+            && id.is_local()
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            roots.push(PathBuf::from(home));
+        }
+        let _ = window;
+        let Some(code) = self.tab_code_mut_or_init() else {
+            return;
+        };
+        if roots != code.roots {
+            code.roots = roots;
+            self.file_tree.invalidate_all();
+            cx.notify();
+        }
+        self.file_tree_sync_watch(host, cx);
+    }
+
+    /// The project directories behind the active tab, on the host they live
+    /// on: each pane's repository root, or its directory where it is not in
+    /// one. `None` while a root is still being asked for (the ask is sent from
+    /// here); an empty list where no pane has a directory on this host.
+    ///
+    /// The tree and the Search tab both start from this, so what Search looks
+    /// through is always what the tree shows. Only the tree falls back to the
+    /// home directory — a folder to browse is harmless, a search of all of it
+    /// is not.
+    pub(crate) fn project_roots(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(SharedHost, Vec<PathBuf>)> {
+        let id = self.spawn_host(cx);
+        let host = self.active_host(cx)?;
         let leaves = match self.tabs.get(self.active) {
             Some(tab) => tab.pane.terminals(),
             None => Vec::new(),
@@ -788,25 +821,7 @@ impl Tty7App {
                 }
             }
         }
-        if !resolved {
-            return;
-        }
-        if roots.is_empty()
-            && id.is_local()
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            roots.push(PathBuf::from(home));
-        }
-        let _ = window;
-        let Some(code) = self.tab_code_mut_or_init() else {
-            return;
-        };
-        if roots != code.roots {
-            code.roots = roots;
-            self.file_tree.invalidate_all();
-            cx.notify();
-        }
-        self.file_tree_sync_watch(host, cx);
+        resolved.then_some((host, roots))
     }
 
     fn file_tree_sync_watch(&mut self, host: SharedHost, cx: &mut Context<Self>) {

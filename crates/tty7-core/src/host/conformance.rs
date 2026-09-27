@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{Host, MTime, SearchHit};
+use super::{ContentLimits, ContentQuery, ContentResults, Host, MTime, SearchHit};
 use crate::daemon::control::WATCH_COALESCE_WINDOW;
 
 pub type Case = fn(h: &dyn Host, sandbox: &dyn Sandbox);
@@ -64,6 +64,12 @@ macro_rules! for_each_host_case {
             search_skips_ignored_dirs,
             search_respects_limit,
             search_respects_max_dirs,
+            search_content_reports_line_column_and_ranges,
+            search_content_honours_gitignore_without_a_repo,
+            search_content_skips_binary_and_oversized_files,
+            search_content_caps_and_says_so,
+            search_content_options_change_what_matches,
+            search_content_rejects_a_bad_expression,
             shells_are_named_and_have_a_default,
             watch_reports_create_and_delete,
             watch_ignores_reads,
@@ -905,6 +911,204 @@ pub fn search_respects_max_dirs(h: &dyn Host, sb: &dyn Sandbox) {
     assert_eq!(hit_names(&hits), vec!["needle.txt"]);
 }
 
+fn content(
+    h: &dyn Host,
+    root: &Path,
+    query: ContentQuery,
+    limits: ContentLimits,
+) -> ContentResults {
+    h.search_content(&[root.to_path_buf()], &query, &limits)
+        .unwrap_or_else(|e| panic!("search_content {query:?}: {e}"))
+}
+
+fn text_query(pattern: &str) -> ContentQuery {
+    ContentQuery {
+        pattern: pattern.into(),
+        ..ContentQuery::default()
+    }
+}
+
+fn hit_files(found: &ContentResults) -> Vec<String> {
+    let mut names: Vec<String> = found
+        .hits
+        .iter()
+        .filter_map(|h| h.path.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+    names.dedup();
+    names
+}
+
+pub fn search_content_reports_line_column_and_ranges(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    let src = h.join(sandbox, "src");
+    mkdir(h, &src);
+    write(
+        h,
+        &h.join(&src, "lib.rs"),
+        "fn main() {}\n\n    let needle = 1; // needle\n",
+    );
+    write(h, &h.join(sandbox, "notes.txt"), "no match here\n");
+
+    let found = content(h, sandbox, text_query("needle"), ContentLimits::default());
+    assert!(!found.truncated);
+    assert_eq!(found.files_searched, 2);
+    assert_eq!(found.hits.len(), 1, "one hit per line: {:?}", found.hits);
+    let hit = &found.hits[0];
+    assert_eq!(hit.path, h.join(&src, "lib.rs"), "an absolute host path");
+    assert_eq!((hit.line, hit.column), (3, 9));
+    assert_eq!(hit.text, "let needle = 1; // needle");
+    let marked: Vec<&str> = hit
+        .ranges
+        .iter()
+        .map(|r| &hit.text[r.start as usize..r.end as usize])
+        .collect();
+    assert_eq!(marked, vec!["needle", "needle"]);
+}
+
+pub fn search_content_honours_gitignore_without_a_repo(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    write(h, &h.join(sandbox, ".gitignore"), "build/\n*.log\n");
+    let build = h.join(sandbox, "build");
+    mkdir(h, &build);
+    write(h, &h.join(&build, "out.rs"), "needle\n");
+    write(h, &h.join(sandbox, "trace.log"), "needle\n");
+    let dot = h.join(sandbox, ".cache");
+    mkdir(h, &dot);
+    write(h, &h.join(&dot, "hidden.rs"), "needle\n");
+    write(h, &h.join(sandbox, "kept.rs"), "needle\n");
+
+    let found = content(h, sandbox, text_query("needle"), ContentLimits::default());
+    assert_eq!(hit_files(&found), vec!["kept.rs"]);
+
+    let everything = ContentQuery {
+        show_hidden: true,
+        ..text_query("needle")
+    };
+    let mut all = hit_files(&content(h, sandbox, everything, ContentLimits::default()));
+    all.sort_unstable();
+    assert_eq!(all, vec!["hidden.rs", "kept.rs", "out.rs", "trace.log"]);
+}
+
+pub fn search_content_skips_binary_and_oversized_files(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    put(h, &h.join(sandbox, "blob.bin"), b"needle\0\x01\x02");
+    write(h, &h.join(sandbox, "big.txt"), &"needle\n".repeat(200));
+    write(h, &h.join(sandbox, "small.txt"), "needle\n");
+    put(h, &h.join(sandbox, "latin1.txt"), b"caf\xe9 needle\n");
+
+    let limits = ContentLimits {
+        max_file_bytes: 100,
+        ..ContentLimits::default()
+    };
+    let found = content(h, sandbox, text_query("needle"), limits);
+    let mut files = hit_files(&found);
+    files.sort_unstable();
+    assert_eq!(
+        files,
+        vec!["latin1.txt", "small.txt"],
+        "binary and oversized files are stepped past; bad UTF-8 is not"
+    );
+}
+
+pub fn search_content_caps_and_says_so(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    for i in 0..5 {
+        write(h, &h.join(sandbox, &format!("f{i}.txt")), "x\nx\nx\n");
+    }
+
+    let exact = content(h, sandbox, text_query("x"), ContentLimits::default());
+    assert_eq!(exact.hits.len(), 15);
+    assert!(!exact.truncated, "everything found is not truncated");
+
+    let total = ContentLimits {
+        max_hits: 4,
+        ..ContentLimits::default()
+    };
+    let capped = content(h, sandbox, text_query("x"), total);
+    assert_eq!(capped.hits.len(), 4);
+    assert!(capped.truncated);
+
+    let per_file = ContentLimits {
+        max_hits_per_file: 1,
+        ..ContentLimits::default()
+    };
+    let capped = content(h, sandbox, text_query("x"), per_file);
+    assert_eq!(capped.hits.len(), 5, "one line from each file");
+    assert!(capped.truncated);
+
+    let files = ContentLimits {
+        max_files: 2,
+        ..ContentLimits::default()
+    };
+    let capped = content(h, sandbox, text_query("x"), files);
+    assert_eq!(capped.files_searched, 2);
+    assert_eq!(capped.hits.len(), 6);
+    assert!(capped.truncated);
+}
+
+pub fn search_content_options_change_what_matches(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    write(
+        h,
+        &h.join(sandbox, "a.rs"),
+        "Widget\nwidget\nwidgets\nfn widget_new()\n",
+    );
+    let lines = |q: ContentQuery| -> Vec<u32> {
+        content(h, sandbox, q, ContentLimits::default())
+            .hits
+            .iter()
+            .map(|hit| hit.line)
+            .collect()
+    };
+    assert_eq!(lines(text_query("widget")), vec![1, 2, 3, 4]);
+    assert_eq!(
+        lines(ContentQuery {
+            case_sensitive: true,
+            ..text_query("Widget")
+        }),
+        vec![1]
+    );
+    assert_eq!(
+        lines(ContentQuery {
+            whole_word: true,
+            ..text_query("widget")
+        }),
+        vec![1, 2]
+    );
+    assert_eq!(
+        lines(ContentQuery {
+            regex: true,
+            ..text_query(r"^widgets?$")
+        }),
+        vec![1, 2, 3]
+    );
+    assert!(
+        lines(text_query("widget.")).is_empty(),
+        "literal by default"
+    );
+}
+
+pub fn search_content_rejects_a_bad_expression(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    write(h, &h.join(sandbox, "a.rs"), "(\n");
+    let bad = ContentQuery {
+        regex: true,
+        ..text_query("(")
+    };
+    let e = h
+        .search_content(&[sandbox.to_path_buf()], &bad, &ContentLimits::default())
+        .unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+
+    let literal = content(h, sandbox, text_query("("), ContentLimits::default());
+    assert_eq!(
+        literal.hits.len(),
+        1,
+        "the same text, taken literally, is fine"
+    );
+}
+
 pub fn shells_are_named_and_have_a_default(h: &dyn Host, _sb: &dyn Sandbox) {
     let inv = h.shells().expect("a host can list its shells");
     assert!(
@@ -1162,7 +1366,7 @@ mod tests {
         }
         assert_eq!(defined.len(), registered.len(), "duplicate registration");
         assert!(
-            defined.len() >= 46,
+            defined.len() >= 52,
             "the suite lost cases: {}",
             defined.len()
         );

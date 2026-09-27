@@ -723,6 +723,7 @@ fn main() {
         crate::ui::theme::apply_cursor_hide_mode(cx);
         spawn_config_watcher(cx);
         crate::core::update::spawn_check(cx);
+        crate::core::update::install_image_client(cx);
         cx.background_executor()
             .spawn(async {
                 crate::core::agent_hooks::refresh_hooks_at_launch();

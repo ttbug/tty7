@@ -1,5 +1,5 @@
 //! The pages that are rows and nothing else: General, the text and window
-//! halves of Appearance, Terminal, Keyboard & Mouse, Window & Tabs, and About.
+//! halves of Appearance, Terminal, Keyboard & Mouse, and About.
 
 use std::rc::Rc;
 
@@ -93,7 +93,7 @@ impl Tty7App {
             |secs| format!("{secs}s"),
         );
 
-        let startup = self.segmented(
+        let startup = self.settings_choice(
             "wt-startup",
             &[
                 t(L10nKey::SettingsStartupNormal),
@@ -126,7 +126,7 @@ impl Tty7App {
         let tray = self.settings_switch("wt-tray-icon", show_tray_icon, cx, |this, on, _, cx| {
             this.set_show_tray_icon(on, cx)
         });
-        let notify = self.segmented(
+        let notify = self.settings_choice(
             "wt-notify",
             &[
                 t(L10nKey::NotifyModeNever),
@@ -144,7 +144,7 @@ impl Tty7App {
                 this.set_notify_mode(mode, cx);
             },
         );
-        let threshold = self.segmented_valued(
+        let threshold = self.settings_choice_valued(
             "wt-notify-threshold",
             &NOTIFY_THRESHOLD_LABELS,
             threshold_sel,
@@ -193,6 +193,7 @@ impl Tty7App {
                 .map(IntoElement::into_any_element),
                 cx,
             ),
+            self.render_tabs_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsNotifications)),
                 None,
@@ -400,7 +401,7 @@ impl Tty7App {
             CursorStyle::Bar => 1,
             CursorStyle::Underline => 2,
         };
-        let cursor_style_control = self.segmented(
+        let cursor_style_control = self.settings_choice(
             "cursor-style",
             &[
                 t(L10nKey::CursorShapeBlock),
@@ -425,7 +426,7 @@ impl Tty7App {
         let prompt_cursor_labels = prompt_cursor_shape_labels();
         let prompt_cursor_labels: Vec<&str> =
             prompt_cursor_labels.iter().map(String::as_str).collect();
-        let prompt_cursor_style_control = self.segmented(
+        let prompt_cursor_style_control = self.settings_choice(
             "prompt-cursor-style",
             &prompt_cursor_labels,
             prompt_cursor_idx,
@@ -800,7 +801,7 @@ impl Tty7App {
             WdStrategy::Home => 1,
             WdStrategy::Custom => 2,
         };
-        let wd_radio = self.segmented(
+        let wd_radio = self.settings_choice(
             "wd-strategy",
             &[
                 t(L10nKey::SettingsWdInherit),
@@ -909,7 +910,7 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_ssh_loopback_forward(on, cx),
         );
-        let link_file_open_radio = self.segmented(
+        let link_file_open_radio = self.settings_choice(
             "term-link-file-open",
             &[
                 t(L10nKey::SettingsOpenFilesInternal),
@@ -953,7 +954,7 @@ impl Tty7App {
             )
             .into_any_element()
         });
-        let scrollback = self.segmented_valued(
+        let scrollback = self.settings_choice_valued(
             "term-scrollback",
             &SCROLLBACK_LABELS,
             scrollback_sel,
@@ -973,7 +974,7 @@ impl Tty7App {
             BellMode::Audible => 2,
             BellMode::Both => 3,
         };
-        let bell_control = self.segmented(
+        let bell_control = self.settings_choice(
             "term-bell",
             &[
                 t(L10nKey::SettingsBellModeOff),
@@ -1230,7 +1231,7 @@ impl Tty7App {
             (MouseZoomModifier::None, true) => 3,
             (MouseZoomModifier::None, false) => 2,
         };
-        let zoom = self.segmented(
+        let zoom = self.settings_choice(
             "term-mouse-zoom",
             &zoom_labels,
             zoom_idx,
@@ -1357,7 +1358,7 @@ impl Tty7App {
         Self::settings_page(groups)
     }
 
-    pub(crate) fn render_window_preferences(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tabs_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let new_tab_idx = match cfg.new_tab_position {
             NewTabPosition::AfterCurrent => 0,
@@ -1367,13 +1368,7 @@ impl Tty7App {
             TabBarPosition::Top => 0,
             TabBarPosition::Left => 1,
         };
-        let sidebar_diff_preview = cfg.sidebar_diff_preview;
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
-        let ssh_tab_title_idx = match cfg.ssh_tab_title {
-            SshTabTitle::Dynamic => 0,
-            SshTabTitle::ProfileName => 1,
-            SshTabTitle::Hostname => 2,
-        };
         let new_tab = self.segmented(
             "wt-new-tab-pos",
             &[t(L10nKey::SettingsAfterCurrent), t(L10nKey::SettingsAtEnd)],
@@ -1412,31 +1407,7 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
-        let ssh_tab_title = self.segmented(
-            "wt-ssh-tab-title",
-            &[
-                t(L10nKey::SettingsSshTabTitleDynamic),
-                t(L10nKey::SettingsSshTabTitleProfileName),
-                t(L10nKey::SettingsSshTabTitleHostname),
-            ],
-            ssh_tab_title_idx,
-            cx,
-            |this, ix, _w, cx| {
-                let mode = match ix {
-                    0 => SshTabTitle::Dynamic,
-                    1 => SshTabTitle::ProfileName,
-                    _ => SshTabTitle::Hostname,
-                };
-                this.set_ssh_tab_title(mode, cx);
-            },
-        );
-        let diff = self.settings_switch(
-            "wt-sidebar-diff-preview",
-            sidebar_diff_preview,
-            cx,
-            |this, on, _, cx| this.set_sidebar_diff_preview(on, cx),
-        );
-        Self::settings_page([self.settings_group(
+        self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
             [
@@ -1458,22 +1429,10 @@ impl Tty7App {
                     grouping,
                     cx,
                 ),
-                self.settings_row(
-                    t(L10nKey::SettingsDiffPreviewFromCounts),
-                    t(L10nKey::SettingsDiffPreviewFromCountsDesc),
-                    diff,
-                    cx,
-                ),
-                self.settings_row(
-                    t(L10nKey::SettingsSshTabTitle),
-                    t(L10nKey::SettingsSshTabTitleDesc),
-                    ssh_tab_title,
-                    cx,
-                ),
             ]
             .map(IntoElement::into_any_element),
             cx,
-        )])
+        )
     }
 
     pub(crate) fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1719,7 +1678,7 @@ impl Tty7App {
             UpdateChannel::Stable => 0,
             UpdateChannel::Nightly => 1,
         };
-        let channel = self.segmented(
+        let channel = self.settings_choice(
             "wt-update-channel",
             &[
                 t(L10nKey::SettingsUpdateChannelStable),

@@ -1,7 +1,6 @@
 pub use tty7_core::core::*;
 
 pub mod actions;
-pub mod agent_history;
 pub mod agent_prompt;
 #[cfg(target_os = "windows")]
 pub mod aumid;

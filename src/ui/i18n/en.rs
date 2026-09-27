@@ -90,6 +90,33 @@ pub fn translate_en(key: L10nKey) -> &'static str {
 
         L10nKey::SearchTabs => "Search tabs…",
         L10nKey::SearchFiles => "Search files…",
+        L10nKey::PanelSearchPlaceholder => "Search in files…",
+        L10nKey::PanelSearchWholeWord => "Match whole word",
+        L10nKey::PanelSearchIdle => "Search the contents of every file under:",
+        L10nKey::PanelSearchNoFolder => "No folder to search.",
+        L10nKey::PanelSearchNoFolderHint => {
+            "Search looks through the project the active tab is in."
+        }
+        L10nKey::PanelSearchSshPane => "Search can't look inside an SSH pane's files.",
+        L10nKey::PanelSearchSshPaneHint => {
+            "Open the host as a remote workspace to search it, or browse it in Files."
+        }
+        L10nKey::PanelSearchSearching => "Searching…",
+        L10nKey::PanelSearchNoMatches => "No results for “{query}”.",
+        L10nKey::PanelSearchBadPattern => "Not a valid regular expression: {e}",
+        L10nKey::PanelSearchServerTooOld => {
+            "The tty7-server on this machine is too old to search file contents."
+        }
+        L10nKey::PanelSearchServerTooOldHint => "Update the server on that host to use Search.",
+        L10nKey::PanelSearchFailed => "Search failed: {e}",
+        L10nKey::PanelSearchResultCount => "{count} results",
+        L10nKey::PanelSearchFileCount => "{count} files",
+        L10nKey::PanelSearchSummary => "{results} in {files}",
+        L10nKey::PanelSearchTruncated => {
+            "Not every match is shown. Narrow the search to see the rest."
+        }
+        L10nKey::PanelSearchLineTooltip => "Line {line}, column {column}",
+        L10nKey::PanelSearchHostGone => "The machine this project is on is not connected.",
         L10nKey::SearchThemes => "Search themes…",
         L10nKey::SearchSettings => "Search settings…",
         L10nKey::FilterHosts => "Filter hosts…",
@@ -105,12 +132,18 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchTabSessions => "Sessions",
         L10nKey::SearchPlaceholderSessions => "Search past agent sessions…",
         L10nKey::SearchSessionsEmptyHint => {
-            "Claude Code and Codex sessions on this computer are listed here."
+            "Past coding-agent sessions on this computer are listed here."
         }
         L10nKey::SearchSectionSessionsHere => "In {dir}",
         L10nKey::SearchSectionSessionsRecent => "Recent",
         L10nKey::AppSessionNotResumable => "{name} cannot resume a session by id.",
         L10nKey::AppSessionDirectoryGone => "The session's directory no longer exists: {path}",
+        L10nKey::SearchSessionActions => "Choose what to do with this session…",
+        L10nKey::SessionActionsHint => "actions",
+        L10nKey::SessionActionResume => "Resume",
+        L10nKey::SessionActionResumeSubtitle => "continue it in a new tab where it ran",
+        L10nKey::SessionActionHide => "Remove from List",
+        L10nKey::SessionActionHideSubtitle => "the agent's own history is kept",
         L10nKey::SearchMoreIn => "{count} more in {tab}",
         L10nKey::SearchNoResults => "No results",
         L10nKey::SearchSectionNewTerminal => "New Terminal",
@@ -178,7 +211,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavInput => "Keyboard & Mouse",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "Integrations",
-        L10nKey::SettingsNavWindowTabs => "Window & Tabs",
         L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
@@ -651,13 +683,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."
         }
-        L10nKey::SettingsDiffPreviewFromCounts => "Open diff preview from sidebar counts",
-        L10nKey::SettingsDiffPreviewFromCountsDesc => "Click a row's +N −N to open its diff.",
-        L10nKey::SettingsSshTabTitle => "SSH tab title",
-        L10nKey::SettingsSshTabTitleDesc => "What an SSH tab is named after.",
-        L10nKey::SettingsSshTabTitleDynamic => "Dynamic",
-        L10nKey::SettingsSshTabTitleProfileName => "Profile name",
-        L10nKey::SettingsSshTabTitleHostname => "Hostname",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -871,9 +896,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "theme duplicate edit colors folder yaml import background image wallpaper"
         }
         L10nKey::SettingsSearchDetectUrlsKeywords => "links hyperlink clickable open",
-        L10nKey::SettingsSearchDiffPreviewFromCountsKeywords => {
-            "diff overlay preview sidebar counts git changes click branch lines"
-        }
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "fade unfocused inactive split pane focus opacity highlight active dimming"
         }
@@ -988,9 +1010,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
-        }
-        L10nKey::SettingsSearchSshTabTitleKeywords => {
-            "ssh tab title name host hostname profile alias pin fixed osc remote"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"
@@ -1161,6 +1180,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelChangesTitle => "Changes",
         L10nKey::PanelScmTitle => "Changes",
         L10nKey::PanelFilesTitle => "Files",
+        L10nKey::PanelSearchTitle => "Search",
+        L10nKey::PanelGitHubTitle => "GitHub",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
             "Open a tab to see its shell, directory, and processes here."
@@ -1606,6 +1627,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRightPanelInfo => "Right Panel: Info",
         L10nKey::CmdRightPanelChanges => "Right Panel: Changes",
         L10nKey::CmdRightPanelFiles => "Right Panel: Files",
+        L10nKey::CmdRightPanelSearch => "Right Panel: Search",
+        L10nKey::CmdRightPanelGitHub => "Right Panel: GitHub",
         L10nKey::CmdChangeTheme => "Change Theme…",
         L10nKey::CmdResetFontSize => "Reset Font Size",
         L10nKey::CmdEnterFullScreen => "Enter Full Screen",
@@ -1730,7 +1753,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",
         L10nKey::AppForkLocalOnly => "{name} sessions can only be forked from a local pane",
         L10nKey::AppForkNoSessionId => {
-            "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents"
+            "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Integrations"
         }
         L10nKey::AppForkSessionIdNotToken => "{name}'s session id isn't a plain token",
         L10nKey::AppForkMidTurn => "{name} is mid-turn — the fork won't include the turn in flight",
@@ -2003,6 +2026,48 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabContextWake => "Wake",
         L10nKey::TabTooltipAsleep => "Hibernated — select to wake",
         L10nKey::TabWakeFailed => "Could not wake the tab: none of its panes could be started",
+        // ---- The right panel's GitHub tab ----
+        L10nKey::GitHubIssues => "Issues",
+        L10nKey::GitHubPulls => "Pull Requests",
+        L10nKey::GitHubOpen => "Open",
+        L10nKey::GitHubClosed => "Closed",
+        L10nKey::GitHubMerged => "Merged",
+        L10nKey::GitHubDraft => "Draft",
+        L10nKey::GitHubNotPlanned => "Not planned",
+        L10nKey::GitHubRefresh => "Refresh",
+        L10nKey::GitHubOpenOnGitHub => "Open on GitHub",
+        L10nKey::GitHubShowRemote => "Show issues from",
+        L10nKey::GitHubLoadMore => "Load more",
+        L10nKey::GitHubNoRemote => "No GitHub remote",
+        L10nKey::GitHubNoRemoteHint => "None of this repository's remotes point at github.com.",
+        L10nKey::GitHubNoIssues => "No issues match.",
+        L10nKey::GitHubNoPulls => "No pull requests match.",
+        L10nKey::GitHubSignInHint => "Sign in with `gh auth login` in a terminal, then refresh.",
+        L10nKey::GitHubNotFoundSignedOut => {
+            "GitHub did not find this repository. If it is private, sign in first."
+        }
+        L10nKey::GitHubNotFoundSignedIn => {
+            "GitHub did not find this repository, or this account cannot see it."
+        }
+        L10nKey::GitHubUnauthorized => "GitHub rejected the saved sign-in.",
+        L10nKey::GitHubRateLimited => "GitHub's rate limit is used up.",
+        L10nKey::GitHubRateLimitResetIn => "It resets in {n} min.",
+        L10nKey::GitHubRateLimitSignedOut => {
+            "Signed out, GitHub allows 60 requests an hour. Sign in with `gh auth login` for more."
+        }
+        L10nKey::GitHubForbidden => "GitHub refused the request.",
+        L10nKey::GitHubNetworkError => "Could not reach GitHub.",
+        L10nKey::GitHubHttpError => "GitHub answered with an error ({code}).",
+        L10nKey::GitHubDecodeError => "GitHub sent a response tty7 could not read.",
+        L10nKey::GitHubMoreOnGitHub => "More on GitHub",
+        L10nKey::GitHubNoDescription => "No description provided.",
+        L10nKey::GitHubFilterByLabel => "Show only this label",
+        L10nKey::GitHubClearLabel => "Clear label filter",
+        L10nKey::GitHubImage => "image",
+        L10nKey::GitHubComments => "{count} comments",
+        L10nKey::GitHubCommits => "{count} commits",
+        L10nKey::GitHubOpenedAt => "opened {when}",
+        L10nKey::GitHubUpdatedAt => "updated {when}",
     }
 }
 
@@ -2011,6 +2076,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "No matches",
         (L10nKey::SettingsMatchCount, "one") => "1 match",
         (L10nKey::SettingsMatchCount, "other") => "{count} matches",
+        (L10nKey::PanelSearchResultCount, "zero") => "No results",
+        (L10nKey::PanelSearchResultCount, "one") => "1 result",
+        (L10nKey::PanelSearchResultCount, "other") => "{count} results",
+        (L10nKey::PanelSearchFileCount, "zero") => "no files",
+        (L10nKey::PanelSearchFileCount, "one") => "1 file",
+        (L10nKey::PanelSearchFileCount, "other") => "{count} files",
         (L10nKey::SettingsRestoreChanged, "zero") => "Restore changes",
         (L10nKey::SettingsRestoreChanged, "one") => "Restore 1 changed",
         (L10nKey::SettingsRestoreChanged, "other") => "Restore {count} changed",
@@ -2157,6 +2228,13 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::WindowDeleteShells, "other") => {
             "{count} running shells will be ended and the layout forgotten."
         }
+        // ---- The right panel's GitHub tab ----
+        (L10nKey::GitHubComments, "zero") => "No comments",
+        (L10nKey::GitHubComments, "one") => "1 comment",
+        (L10nKey::GitHubComments, "other") => "{count} comments",
+        (L10nKey::GitHubCommits, "zero") => "No commits",
+        (L10nKey::GitHubCommits, "one") => "1 commit",
+        (L10nKey::GitHubCommits, "other") => "{count} commits",
         _ => return None,
     };
     Some(res)

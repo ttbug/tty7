@@ -10,8 +10,8 @@ use notify::{RecursiveMode, Watcher};
 use crate::core::git;
 use crate::core::gitignore::GitignoreChain;
 use crate::host::{
-    Entry, Host, HostId, MTime, Meta, Output, SearchHit, SharedHost, ShellInventory, WatchHandle,
-    WatchSub, guard_off_ui,
+    ContentLimits, ContentQuery, ContentResults, Entry, Host, HostId, MTime, Meta, Output,
+    SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub, guard_off_ui,
 };
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(100);
@@ -256,6 +256,16 @@ impl Host for LocalHost {
         Ok(out)
     }
 
+    fn search_content(
+        &self,
+        roots: &[PathBuf],
+        query: &ContentQuery,
+        limits: &ContentLimits,
+    ) -> io::Result<ContentResults> {
+        guard_off_ui();
+        crate::host::content_search::search(roots, query, limits)
+    }
+
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta> {
         guard_off_ui();
         fs::write(p, bytes)?;
@@ -332,6 +342,15 @@ impl Host for LocalHost {
     fn shells(&self) -> io::Result<ShellInventory> {
         guard_off_ui();
         Ok(crate::core::shells::inventory())
+    }
+
+    fn agent_sessions(
+        &self,
+        known_dirs: &[PathBuf],
+    ) -> io::Result<Vec<crate::core::agent_history::PastSession>> {
+        guard_off_ui();
+        use crate::core::agent_history::{Roots, scan};
+        Ok(Roots::local().map_or_else(Vec::new, |roots| scan(&roots, known_dirs)))
     }
 
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {

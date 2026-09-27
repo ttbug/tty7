@@ -1,13 +1,13 @@
 ---
 title: "The side panel"
-description: "Info, Source Control, and Files — plus the built-in editor."
+description: "Info, Files, Search, Source Control and GitHub — plus the built-in editor."
 ---
 
-<kbd>⌘ J</kbd> opens a panel on the right of the window with three tabs. It is
-hidden by default; whichever tab you leave it on is where it opens next time.
+<kbd>⌘ J</kbd> opens a panel on the right of the window. It is hidden by
+default; whichever tab you leave it on is where it opens next time.
 
-The three icons at the top switch tabs, and clicking the lit one puts the panel
-away again.
+The icons at the top switch tabs — hover one for its name — and clicking the
+lit one puts the panel away again.
 
 <Frame caption="The Info tab beside a terminal: session, processes, listening ports">
   <img src="/images/side-panel.webp" alt="The tty7 side panel" />
@@ -27,20 +27,11 @@ Hovering a row shows what it can do at the right-hand end of it: **Copy** on the
 working directory, the SSH host and the branch, and **Reveal in Finder** / **Open
 Folder** alongside it on a working directory this machine can see. The `+N −M`
 counts open the [diff overlay](/git/diffs), the same click the sidebar's counts
-answer to — and the same **Settings → Window & Tabs → Open diff preview from
-sidebar counts** turns both of them back into plain text.
+answer to.
 
 The ports section is the quickest answer to "what is this pane serving, and
 where" — the same data `tty7 procs` prints. A port row copies `localhost:PORT`,
 and on a local pane opens it in your browser.
-
-## Source Control
-
-The git panel for the focused pane's repository, in four groups — **Merge
-Changes**, **Staged Changes**, **Changes**, **Untracked**. Write a message,
-commit, and push without leaving the window.
-
-[Source control →](/git/source-control)
 
 ## Files
 
@@ -59,6 +50,93 @@ while there is something in it.
 Both directions work over a [remote workspace](/remote/workspaces) too, reading
 on one machine and writing on the other, up to the size one control frame can
 carry — past that the panel tells you to use [SFTP](/remote/sftp).
+
+## Search
+
+Find in files across the project the Files tab shows: the repository root of
+each pane in the tab, or its working directory outside a repository. Opening the
+tab — from its icon, **Right Panel: Search** in Search Everywhere, or the
+`ShowRightPanelSearch` action — puts the cursor in the search field.
+
+Results arrive as you type, grouped by file with a count per file; click a
+file's row to fold it away. Each hit is its line with the matches highlighted,
+and **clicking one opens the file in the built-in editor with the cursor on that
+line and column**. <kbd>Enter</kbd> in the field searches again, for when the
+files changed underneath you.
+
+The three toggles at the end of the field:
+
+| | |
+|---|---|
+| **Aa** | Match case — off by default, so `needle` finds `Needle` |
+| **ab** | Whole word — `foo` no longer finds `foobar` or `foo_bar` |
+| **.\*** | Regular expression, in Rust [`regex`](https://docs.rs/regex) syntax. A pattern that does not parse says why in red instead of searching |
+
+What is searched is what the tree shows: a folder's `.gitignore` applies whether
+or not it is in a repository, and dot-files and dot-directories are skipped.
+Binary files and files over 1 MB are stepped past. A search stops at 2,000
+matching lines, 100 per file, 20,000 files or ten seconds, whichever comes
+first, and says so under the results — narrow the query to see the rest.
+
+In a [remote workspace](/remote/workspaces) the search runs on the remote
+machine and only the hits cross the network. A remote `tty7-server` older than
+this feature cannot search; the tab says so and asks you to update the server
+rather than showing an empty result. An SSH pane's files are browsed over
+[SFTP](/remote/sftp), which cannot search them — open the host as a remote
+workspace for that.
+
+## Source Control
+
+The git panel for the focused pane's repository, in four groups — **Merge
+Changes**, **Staged Changes**, **Changes**, **Untracked**. Write a message,
+commit, and push without leaving the window.
+
+[Source control →](/git/source-control)
+
+## GitHub
+
+Issues and pull requests for the repository the focused pane is in, read-only.
+The tab reads the repository's remotes and binds to the one on `github.com`; in a
+fork, where `origin` is yours and `upstream` is the project, it picks
+`upstream`, and the name at the top is a menu of every GitHub remote when there
+is more than one. GitHub Enterprise hosts are not supported.
+
+- **Issues | Pull Requests** and **Open | Closed** switch the list, newest
+  activity first, 50 at a time with **Load more** underneath.
+- Each row carries a state glyph whose *shape* says open, closed, not planned,
+  merged or draft; the number, author and last update; and the labels.
+  **Click a label** to show only that label, and the × beside it to clear it.
+- **Click a row** for the detail: title, state, author, labels, the description
+  and the conversation as Markdown. A pull request adds its branches, size and
+  changed files — click a file to open its patch in the
+  [diff overlay](/git/diffs).
+- The ↗ button opens the repository, or the issue, on github.com; ↻ refreshes.
+
+Lists are kept per repository, so switching tabs or panes does not fetch them
+again; anything older than two minutes is refreshed in the background while
+it stays on screen.
+
+### Signing in
+
+There is nothing to sign in to in tty7. It reuses the GitHub CLI's login: the
+token comes from `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`. `gh` is
+looked for on your `PATH` and in the usual Homebrew and `/usr/local/bin`
+locations, so it is found even when tty7 was opened from Finder.
+
+Without a token, public repositories still work, at GitHub's unauthenticated
+limit of 60 requests an hour. A private repository, or a spent limit, says so
+in the panel and suggests running `gh auth login`; press ↻ afterwards and the
+new login is picked up without a restart.
+
+The Info tab gains a **GitHub** row for a repository with a GitHub remote. It
+opens the branch you are on, on the remote it tracks — or the repository's page
+for a branch you have not pushed.
+
+Markdown from GitHub is written by strangers, so it is rendered with two
+changes: only images GitHub hosts itself — the screenshots pasted into an issue
+— are loaded, and any other image becomes a link you can open in the browser;
+and links that would open anything other than a web page or an e-mail are
+disabled. See [what leaves your machine](/reference/privacy#what-leaves-your-machine).
 
 ## The editor
 

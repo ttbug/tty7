@@ -1899,7 +1899,7 @@ fn agents_human(
     for diagnostic in diagnostics {
         let state = diagnostic.gap.describe();
         human.push_str(&format!(
-            "{} is running, but its tty7 agent-status hooks are {state}. Open Settings → Agents to {} the hooks, then start a new {} session.\n",
+            "{} is running, but its tty7 agent-status hooks are {state}. Open Settings → Integrations to {} the hooks, then start a new {} session.\n",
             diagnostic.agent.display_name(),
             diagnostic.gap.action(),
             diagnostic.agent.display_name(),
@@ -2071,7 +2071,7 @@ fn hooks_summary(hooks: &[(HookAgent, HooksState)]) -> String {
         summary.push_str(&format!("; {missing} not installed"));
     }
     if installed.is_empty() || !outdated.is_empty() {
-        summary.push_str(" (Settings → Agents)");
+        summary.push_str(" (Settings → Integrations)");
     }
     summary
 }
@@ -4734,7 +4734,7 @@ mod tests {
             r.human
         );
         assert!(
-            r.human.contains("Settings → Agents"),
+            r.human.contains("Settings → Integrations"),
             "say where the fix is: {}",
             r.human
         );

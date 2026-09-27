@@ -148,6 +148,15 @@ impl Host for SftpHost {
         Err(unsupported("search"))
     }
 
+    fn search_content(
+        &self,
+        _roots: &[PathBuf],
+        _query: &tty7_core::host::ContentQuery,
+        _limits: &tty7_core::host::ContentLimits,
+    ) -> io::Result<tty7_core::host::ContentResults> {
+        Err(unsupported("search"))
+    }
+
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta> {
         match self.op(SftpOp::WriteFile {
             path: rpath(p),

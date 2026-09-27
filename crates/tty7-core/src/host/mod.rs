@@ -1,4 +1,5 @@
 pub mod conformance;
+pub mod content_search;
 pub mod local;
 pub mod remote;
 pub mod server;
@@ -147,6 +148,96 @@ pub struct SearchHit {
     pub ignored: bool,
 }
 
+/// What [`Host::search_content`] looks for.
+///
+/// Every flag defaults to off, so a peer that grows a field later still reads
+/// an older client's query the way that client meant it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ContentQuery {
+    /// The text to find — or, with `regex`, the expression.
+    pub pattern: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    /// Only where the match starts and ends on a word boundary.
+    #[serde(default)]
+    pub whole_word: bool,
+    /// `pattern` is a regular expression (Rust `regex` syntax) rather than
+    /// literal text.
+    #[serde(default)]
+    pub regex: bool,
+    /// Walk dot-directories and gitignored paths too, as the name search's
+    /// flag of the same name does.
+    #[serde(default)]
+    pub show_hidden: bool,
+}
+
+/// How far one [`Host::search_content`] may go before it stops and says it
+/// stopped. Every cap reached is reported as `truncated`, never as silence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ContentLimits {
+    /// Matching lines across every file.
+    pub max_hits: u64,
+    /// Matching lines taken from one file; the rest of that file is skipped.
+    pub max_hits_per_file: u64,
+    /// Files opened and read. The walk stops at this many.
+    pub max_files: u64,
+    /// A file longer than this is not read at all — a minified bundle or a
+    /// data dump is not source anyone is searching.
+    pub max_file_bytes: u64,
+    /// Wall-clock budget for the whole search, so a huge tree answers with
+    /// what it found instead of running into the caller's deadline.
+    pub max_millis: u64,
+}
+
+impl Default for ContentLimits {
+    fn default() -> Self {
+        ContentLimits {
+            max_hits: 2000,
+            max_hits_per_file: 100,
+            max_files: 20_000,
+            max_file_bytes: 1024 * 1024,
+            max_millis: 10_000,
+        }
+    }
+}
+
+/// One matching line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentHit {
+    pub path: PathBuf,
+    /// 1-based.
+    pub line: u32,
+    /// 1-based, in characters, of the first match on the line in the file —
+    /// what an editor's cursor wants, independent of how `text` was cut.
+    pub column: u32,
+    /// The line as shown: leading whitespace dropped, and a line too long to
+    /// show cut down to a window around its first match, with `…` marking
+    /// each cut.
+    pub text: String,
+    /// Byte ranges of each match within `text`, in order, never overlapping,
+    /// always on character boundaries.
+    pub ranges: Vec<ContentRange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// What a [`Host::search_content`] found, in walk order: files sorted by path
+/// within each directory, lines in file order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentResults {
+    pub hits: Vec<ContentHit>,
+    /// A limit in [`ContentLimits`] cut the search short, so there may be
+    /// more matches than `hits` holds.
+    pub truncated: bool,
+    /// How many files were actually read.
+    #[serde(default)]
+    pub files_searched: u64,
+}
+
 pub struct WatchSub {
     rx: smol::channel::Receiver<Vec<PathBuf>>,
     inner: Box<dyn WatchHandle>,
@@ -211,6 +302,22 @@ pub trait Host: Send + Sync + 'static {
         show_hidden: bool,
     ) -> io::Result<Vec<SearchHit>>;
 
+    /// Search file *contents* under `roots` — the right panel's Search tab.
+    ///
+    /// Walks the way [`Host::search`] does: `.gitignore` honoured (with or
+    /// without a repository), dot-directories skipped, both unless
+    /// `query.show_hidden`. Binary files and files over
+    /// `limits.max_file_bytes` are skipped. A pattern that does not compile is
+    /// [`io::ErrorKind::InvalidInput`]; a host that cannot search contents at
+    /// all is [`io::ErrorKind::Unsupported`], which callers must tell apart
+    /// from "no matches".
+    fn search_content(
+        &self,
+        roots: &[PathBuf],
+        query: &ContentQuery,
+        limits: &ContentLimits,
+    ) -> io::Result<ContentResults>;
+
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta>;
 
     fn create_file_new(&self, p: &Path) -> io::Result<()>;
@@ -263,6 +370,17 @@ pub trait Host: Send + Sync + 'static {
     }
 
     fn shells(&self) -> io::Result<ShellInventory>;
+
+    /// Past coding-agent sessions on this host, most recent first.
+    /// `known_dirs` are directories open on it (see
+    /// [`crate::core::agent_history::scan`]). A host that cannot look has
+    /// none to offer.
+    fn agent_sessions(
+        &self,
+        _known_dirs: &[PathBuf],
+    ) -> io::Result<Vec<crate::core::agent_history::PastSession>> {
+        Ok(Vec::new())
+    }
 
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub>;
 

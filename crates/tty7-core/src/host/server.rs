@@ -377,6 +377,10 @@ fn handshake<R: Read>(
         feature::CONTROL.to_string(),
         feature::HOST_RPC.to_string(),
         feature::STDIO_BRIDGE.to_string(),
+        // Every host this server fronts can search its own files; the
+        // request only needs a name so an older client's peer is never sent
+        // it (see `RemoteHost::search_content`).
+        feature::CONTENT_SEARCH.to_string(),
     ];
     // Only where there are panes to ask about. A control peer serving no panes
     // would answer every ask with an empty list, which reads to a client as
@@ -563,6 +567,20 @@ fn drop_unsendable_hits(hits: &mut Vec<SearchHit>) {
     }
 }
 
+/// [`drop_unsendable_hits`] for content hits: a path that is not UTF-8 cannot
+/// cross the JSON wire intact, and a hit the client cannot open is worse than
+/// one it never sees.
+fn drop_unsendable_content_hits(hits: &mut Vec<crate::host::ContentHit>) {
+    let before = hits.len();
+    hits.retain(|hit| hit.path.to_str().is_some());
+    if hits.len() != before {
+        log::debug!(
+            "content search dropped {} hit(s) whose paths are not UTF-8",
+            before - hits.len()
+        );
+    }
+}
+
 fn machine_with_live_panes(conn: &Conn) -> io::Result<machine::Machine> {
     let mut machine = conn.machine()?.machine();
     let Some(panes) = conn.panes.as_ref().map(|p| p.panes()) else {
@@ -634,6 +652,16 @@ fn run_request(
             drop_unsendable_hits(&mut hits);
             (ReplyOk::Hits(hits), Vec::new())
         }
+        ControlRequest::SearchContent {
+            roots,
+            query,
+            limits,
+        } => {
+            let roots: Vec<PathBuf> = roots.iter().map(|r| p(r)).collect();
+            let mut found = h.search_content(&roots, &query, &limits)?;
+            drop_unsendable_content_hits(&mut found.hits);
+            (ReplyOk::ContentHits(found), Vec::new())
+        }
 
         ControlRequest::WriteFile { path } => {
             (ReplyOk::Meta(h.write_file(&p(&path), &blob)?), Vec::new())
@@ -672,6 +700,10 @@ fn run_request(
         }
 
         ControlRequest::Shells => (ReplyOk::Shells(h.shells()?), Vec::new()),
+        ControlRequest::AgentSessions { known_dirs } => (
+            ReplyOk::AgentSessions(h.agent_sessions(&paths(&known_dirs))?),
+            Vec::new(),
+        ),
 
         ControlRequest::WatchOpen { dirs } => {
             let id = conn.open_watch(req_id, &paths(&dirs))?;
@@ -2430,6 +2462,14 @@ mod tests {
             self.inner
                 .search(roots, query, limit, max_dirs, show_hidden)
         }
+        fn search_content(
+            &self,
+            roots: &[PathBuf],
+            query: &crate::host::ContentQuery,
+            limits: &crate::host::ContentLimits,
+        ) -> io::Result<crate::host::ContentResults> {
+            self.inner.search_content(roots, query, limits)
+        }
         fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta> {
             self.inner.write_file(p, bytes)
         }
@@ -2617,6 +2657,7 @@ mod tests {
         assert_eq!(peer.separator, std::path::MAIN_SEPARATOR);
         assert!(peer.has_feature(feature::CONTROL));
         assert!(peer.has_feature(feature::HOST_RPC));
+        assert!(peer.has_feature(feature::CONTENT_SEARCH));
         assert!(
             !peer.home.is_empty(),
             "the server's $HOME backs `new workspace in ~`"

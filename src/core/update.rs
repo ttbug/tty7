@@ -1830,6 +1830,20 @@ fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
         .map(|(_, version)| version)
 }
 
+/// Give gpui an HTTP client, so an `img` with a web URL can load.
+///
+/// Until this runs gpui holds a null client and every remote image quietly
+/// fails. The only remote images tty7 draws are the GitHub-hosted ones in an
+/// issue's text (see `core::github::markdown`). Built with the update check's
+/// user agent and proxy; a proxy changed later applies from the next launch.
+pub(crate) fn install_image_client(cx: &mut App) {
+    let manual_proxy = cx.global::<Config>().http_proxy.clone();
+    match build_http_client(manual_proxy.as_deref()) {
+        Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
+        Err(err) => log::warn!("no HTTP client for images: {err:#}"),
+    }
+}
+
 fn build_http_client(manual_proxy: Option<&str>) -> Result<ReqwestClient> {
     let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
     // Normalise through the same helper the downloader uses, so a bare

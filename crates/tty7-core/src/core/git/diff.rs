@@ -66,6 +66,14 @@ pub enum DiffSource {
     },
     /// `base...head`: what `head` added since the two diverged.
     Range { base: String, head: String },
+    /// A patch handed over whole rather than read from git — a GitHub pull
+    /// request's files. `id` is its identity (`owner/repo#12`); `label` rides
+    /// along the way a commit's does. Never probed: whoever opens one installs
+    /// the snapshot with it, and nothing can make it stale.
+    Patch {
+        id: String,
+        label: Option<CommitLabel>,
+    },
 }
 
 impl PartialEq for DiffSource {
@@ -109,6 +117,7 @@ impl DiffSource {
             // US, which can occur in neither a refname nor an object id.
             DiffSource::Commit { rev, .. } => format!("commit\u{1f}{rev}"),
             DiffSource::Range { base, head } => format!("range\u{1f}{base}\u{1f}{head}"),
+            DiffSource::Patch { id, .. } => format!("patch\u{1f}{id}"),
         }
     }
 
@@ -143,6 +152,9 @@ impl DiffSource {
                 argv.push("diff".to_string());
                 argv.push(format!("{base}...{head}"));
             }
+            // Not git's to produce. `probe_diff` refuses the source before an
+            // argv is built; this arm only keeps the match total.
+            DiffSource::Patch { .. } => argv.push("diff".to_string()),
         }
         argv.extend(strings(&[
             "--no-color",
@@ -155,6 +167,11 @@ impl DiffSource {
             argv.push("-w".to_string());
         }
         argv
+    }
+
+    /// Whether this patch is supplied from outside rather than read from git.
+    pub fn is_supplied(&self) -> bool {
+        matches!(self, DiffSource::Patch { .. })
     }
 
     /// Whether untracked files belong in the snapshot. They are a property of
@@ -178,6 +195,7 @@ impl DiffSource {
             DiffSource::Worktree | DiffSource::Staged | DiffSource::Head => true,
             DiffSource::Commit { rev, .. } => ok(rev),
             DiffSource::Range { base, head } => ok(base) && ok(head),
+            DiffSource::Patch { .. } => false,
         }
     }
 }

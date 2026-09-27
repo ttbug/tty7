@@ -573,8 +573,10 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // in config.json was dropped without a word, and the Keybindings page —
         // which reads this list — never showed them at all.
         ("ShowRightPanelInfo", ""),
-        ("ShowRightPanelChanges", ""),
         ("ShowRightPanelFiles", ""),
+        ("ShowRightPanelSearch", ""),
+        ("ShowRightPanelChanges", ""),
+        ("ShowRightPanelGitHub", ""),
         ("EditorSave", "secondary-s"),
         ("OpenSshProfiles", ""),
         ("RestartSshSession", "secondary-shift-r"),
@@ -821,6 +823,14 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "ShowRightPanelFiles" => (
             CommandGroup::View,
             t(L10nKey::CmdRightPanelFiles).to_string(),
+        ),
+        "ShowRightPanelSearch" => (
+            CommandGroup::View,
+            t(L10nKey::CmdRightPanelSearch).to_string(),
+        ),
+        "ShowRightPanelGitHub" => (
+            CommandGroup::View,
+            t(L10nKey::CmdRightPanelGitHub).to_string(),
         ),
         "FindInTerminal" => (
             CommandGroup::Terminal,
@@ -1473,6 +1483,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowRightPanelInfo" => KeyBinding::new(keystroke, ShowRightPanelInfo, None),
         "ShowRightPanelChanges" => KeyBinding::new(keystroke, ShowRightPanelChanges, None),
         "ShowRightPanelFiles" => KeyBinding::new(keystroke, ShowRightPanelFiles, None),
+        "ShowRightPanelSearch" => KeyBinding::new(keystroke, ShowRightPanelSearch, None),
+        "ShowRightPanelGitHub" => KeyBinding::new(keystroke, ShowRightPanelGitHub, None),
         "ScmCommit" => KeyBinding::new(keystroke, ScmCommit, action_context(action)),
         "ScmCommitAmend" => KeyBinding::new(keystroke, ScmCommitAmend, action_context(action)),
         "ScmStageAll" => KeyBinding::new(keystroke, ScmStageAll, None),
@@ -1593,6 +1605,8 @@ mod tests {
             "ShowRightPanelInfo",
             "ShowRightPanelChanges",
             "ShowRightPanelFiles",
+            "ShowRightPanelSearch",
+            "ShowRightPanelGitHub",
         ] {
             assert!(bindable.contains(action), "{action} has nowhere to bind to");
             assert!(

@@ -85,6 +85,8 @@ actions!(
         // orphan every custom binding already on disk.
         ShowRightPanelChanges,
         ShowRightPanelFiles,
+        ShowRightPanelSearch,
+        ShowRightPanelGitHub,
         ScmCommit,
         ScmCommitAmend,
         ScmStageAll,

@@ -134,6 +134,19 @@ pub(crate) fn resume_line(
     agent.resume_command(session_id, Some(&argv))
 }
 
+/// The line that forks `agent`'s session `session_id` into a new one, with
+/// the same flags [`resume_line`] carries. `None` for an agent that cannot
+/// fork.
+pub(crate) fn fork_line(
+    agent: CLIAgent,
+    session_id: &str,
+    overrides: &HashMap<String, String>,
+) -> Option<String> {
+    let launch = agent.launch_command(overrides);
+    let argv: Vec<String> = launch.split_whitespace().map(str::to_string).collect();
+    agent.fork_command(session_id, Some(&argv))
+}
+
 /// Type `command` into the shell `slot` holds — now if it is up, or the
 /// moment it lands if it is still connecting.
 fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
@@ -211,16 +224,24 @@ impl Tty7App {
     /// `--resume` elsewhere finds nothing. The resume carries the flags the
     /// agent is configured to launch with (`agent_launch`), so a session
     /// started with them comes back with them.
+    ///
+    /// With `fork`, the session is branched instead: the agent starts a new
+    /// one from its history and the original is left as it was.
     pub(crate) fn resume_session(
         &mut self,
         agent: CLIAgent,
         session_id: &str,
         cwd: Option<std::path::PathBuf>,
+        fork: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(command) = resume_line(agent, session_id, &cx.global::<Config>().agent_launch)
-        else {
+        let launch = &cx.global::<Config>().agent_launch;
+        let command = match fork {
+            true => fork_line(agent, session_id, launch),
+            false => resume_line(agent, session_id, launch),
+        };
+        let Some(command) = command else {
             window.push_notification(
                 t_fmt(
                     L10nKey::AppSessionNotResumable,
@@ -231,8 +252,11 @@ impl Tty7App {
             return;
         };
         // A directory that is gone cannot hold the session either; say so
-        // rather than resume into a history the agent will not find.
-        if let Some(dir) = cwd.as_ref().filter(|dir| !dir.is_dir()) {
+        // rather than resume into a history the agent will not find. Only
+        // asked of this machine: a remote session's directory is not here.
+        if self.spawn_host(cx).is_local()
+            && let Some(dir) = cwd.as_ref().filter(|dir| !dir.is_dir())
+        {
             window.push_notification(
                 t_fmt(
                     L10nKey::AppSessionDirectoryGone,

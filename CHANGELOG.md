@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Find in files, in the right panel's new Search tab.** Type and the active
+  tab's project — the same roots the Files tab shows — is searched as you go,
+  with hits grouped by file, a count per file, and each match highlighted in
+  its line. Click a hit to open the file in the built-in editor at that line
+  and column; Enter searches again. Toggles for match case, whole word and
+  regular expressions sit at the end of the field. The walk honours
+  `.gitignore` with or without a repository, skips dot-directories, binary
+  files and files over 1 MB, and says so when a cap (2,000 lines, 100 per
+  file, 20,000 files, ten seconds) cut it short. In a remote workspace the
+  search runs on the remote machine through `tty7-server`; a server that
+  predates it is never sent the request — the tab asks for the server to be
+  updated instead of showing an empty result.
+
+- **A GitHub tab in the right panel: issues and pull requests, read-only.** It
+  follows the focused pane's repository, binds to its `github.com` remote
+  (`upstream` over `origin` in a fork, with a menu to pick another), and lists
+  open or closed issues or pull requests with state glyphs, labels and
+  relative times; a label click filters by it. A row opens the detail —
+  description and comments as Markdown, and for a pull request its branches,
+  size and changed files, each of which opens its patch in the diff overlay.
+  Sign-in reuses the GitHub CLI (`GH_TOKEN`, `GITHUB_TOKEN`, then
+  `gh auth token`, found even from a Finder launch); public repositories work
+  signed out, and a private repository or a spent rate limit says to run
+  `gh auth login`. Screenshots pasted into an issue are shown; images from
+  any other host are shown as links rather than loaded, and non-web link
+  targets are disabled. The Info tab gains a GitHub
+  row that opens the branch you are on. The tab talks to `api.github.com` only
+  while you use it.
+
 - **Reorder the active tab from the keyboard** (`MoveTabLeft` / `MoveTabRight`).
   The tab moves one slot past its neighbour — the keyboard form of dragging it
   in the tab strip or the sidebar — and wraps past either end, so one held key
@@ -62,16 +91,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the next connection opens the same set; a rule saved switched off is listed
   but not opened. Profiles saved before this load with every rule on.
 
-- **SSH tabs can be named after the host instead of whatever the remote shell
-  titles itself** (#726). **Settings → Window & Tabs → SSH tab title** is
-  *Dynamic* (the default, and what tty7 always did), *Profile name* — the saved
-  host's name, the alias for a `~/.ssh/config` host, the address typed for a
-  quick connect — or *Hostname*, the address dialled. Only the tab's name is
-  pinned: OSC 0/2 titles are still tracked and come back the moment it is
-  *Dynamic* again, a tab you renamed keeps its name, a split tab follows the
-  pane in front as before, and an ended session still says so. The key is
-  `ssh_tab_title` (`dynamic`, `profile-name`, `hostname`).
-
 - **Windows file paths are links** (#965). `C:\Users\me\a.png`,
   `c:/Users/me/a.png` and `\\server\share\a.png` underline and open like any
   other file path, with a `:10:2`, `(10,2)` or `#L10` location kept. The path
@@ -97,6 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every pick-one setting is a dropdown.** Settings drew a single choice two
+  ways — a row of segmented buttons for most, a dropdown for the language, the
+  window backdrop and the rest — with nothing to say which got which, and the
+  segmented rows ran to whatever width their labels made, so the right-hand
+  column never lined up. All of them are dropdowns now, one width. A value set
+  by hand off the presets (scrollback, the notification threshold) shows as a
+  checked "Custom (N)" at the foot of the menu, as the extra segment did.
+
 - **The mouse wheel no longer zooms the font by default.** ⌘ (Ctrl elsewhere)
   plus the wheel used to resize the font, and ⌘ is held for so much else that
   the text jumped size mid-scroll. `mouse_zoom_modifier` now defaults to
@@ -116,12 +143,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   <kbd>⏎</kbd> goes back to the tab you were just in. The keybinding action is
   still `TogglePalette`, so a custom binding keeps working.
 - **Resume a past agent session from Search Everywhere.** Its **Sessions** tab
-  lists the Claude Code and Codex sessions on this computer — those that ran in
-  the focused tab's directory first — by the title the agent gave them, with
-  directory, branch and age, and <kbd>⏎</kbd> resumes one in a new tab in the
-  directory it ran in, with the agent's configured launch flags. Only the ends
-  of each transcript are read, in the background, and remembered until the file
-  changes.
+  lists past sessions of Claude Code, Codex, Gemini CLI, Qwen Code, Qoder,
+  CodeBuddy, Pi, Oh My Pi, Kimi Code, Copilot CLI, Droid, Cursor CLI and
+  OpenCode — those that ran in the focused tab's directory first — by the title
+  the agent gave them, with directory, branch and age, and <kbd>⏎</kbd>
+  resumes one in a new tab in the directory it ran in, with the agent's
+  configured launch flags. In a remote workspace the list is that machine's
+  sessions, and they resume there. <kbd>⌘ E</kbd> (<kbd>Ctrl E</kbd>
+  elsewhere) on a session opens what else can be done with it: fork it, for
+  the agents that can, copy its id, or *Remove from List*, which only hides it
+  from the tab (`hidden_agent_sessions` in `config.json`) and leaves the
+  agent's history alone. Only the ends of each transcript are read, in the
+  background, and remembered until the file changes; OpenCode's and Cursor's
+  SQLite stores are opened read-only. The control dialect moves to v12, so
+  each remote host needs one Update Server, which ends the sessions on it.
 
 - **The command-line ghost suggests what you ran last, not what you ran
   most.** It was the top prefix match by frecency, where run count and the
@@ -150,8 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tab's right-click makes a label group. Deleting a group closes nothing — its
   tabs go back to auto grouping — and dragging a tab below the pinned groups
   does the same for one tab. Groups, their order and which are folded are stored
-  with the workspace, so every window onto it agrees. **Settings → Window & Tabs
-  → Auto grouping** replaces the three-way *Sidebar grouping* choice; off,
+  with the workspace, so every window onto it agrees. **Settings → General →
+  Auto grouping** replaces the three-way *Sidebar grouping* choice; off,
   unpinned tabs sit in one flat list under the pinned groups. Scratch is now
   **Ungrouped**.
 
@@ -225,6 +260,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The Window & Tabs settings page.** Its three tab settings — New tab
+  position, Tab bar position and Auto grouping — are a **Tabs** group on
+  **Settings → General** now, below Startup & restore.
+
+- **The *Open diff preview from sidebar counts* setting**
+  (`sidebar_diff_preview`). A tab's `+N −M` in the sidebar, and the Info
+  panel's `changes` row, always open the diff overlay; the stalls on large
+  working trees that the switch was a way around were fixed alongside it. The
+  key is ignored if a `config.json` still has it.
+
 - **The *By repo or folder* grouping mode, "Group Automatically", and groups
   stored by name.** A folder you want grouped is pinned instead, and dragging a
   tab below the divider is the way back to automatic grouping. Hand-made groups
@@ -234,6 +279,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Chinese UI copy reads like Chinese** (#980). Half-width `?` and `,` in the
+  hard-reset confirmation, the passphrase, Finder and server naming used two
+  words each, and three quote/dash styles were mixed; these are now one each,
+  and the most literal translations (file errors, update and version-mismatch
+  dialogs, SSH prompts) are rewritten. The fork error that pointed to
+  "Settings → Agents" — a page that is called Integrations — now names it
+  correctly in every language and in the `tty7` CLI.
 - **Return runs the top row after a search that found nothing.** Backspacing
   from a query with no results to one with some — or opening the search
   already filtered, as the New Tab menu's *Other Shells…* row does — left no row selected, so Return did nothing until an arrow key was
