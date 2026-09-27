@@ -57,7 +57,10 @@ const GROUP_GAP: f32 = 16.;
 /// A group heading's line.
 const HEADER_HEIGHT: f32 = 22.;
 
-/// The group heading and the row's branch line: 11.5px at the default size.
+/// The group heading's line: 13px at the default size.
+const HEADER_REM: f32 = 13. / 16.;
+
+/// The row's branch line: 11.5px at the default size.
 const META_REM: f32 = 11.5 / 16.;
 
 /// The rail's side inset, for its header tiles, controls and rows alike.
@@ -376,7 +379,7 @@ impl Tty7App {
         };
         let rem = window.rem_size().as_f32();
         // Measure with the same interface scale used to paint the header.
-        let header_size = rem * META_REM;
+        let header_size = rem * HEADER_REM;
         let header_font = gpui::Font {
             weight: FontWeight::MEDIUM,
             ..font.clone()
@@ -1410,10 +1413,11 @@ impl Tty7App {
                             .flex_shrink_0()
                             .min_w_0()
                             .truncate()
+                            .text_color(added_ink)
                             // A caption, not a title: the rows under it are
-                            // what the column is for, so the heading keeps
-                            // the metadata's grey and only a medium weight
-                            // to stand apart from the branch beside it.
+                            // what the column is for, so the heading keeps a
+                            // restrained medium weight while its cyan color
+                            // separates it from the branch beside it.
                             .font_weight(FontWeight::MEDIUM)
                             .child(label)
                             // A folder group may have been renamed to anything;
@@ -1451,6 +1455,7 @@ impl Tty7App {
                             .min_w_0()
                             .items_center()
                             .gap_1p5()
+                            .text_color(cx.theme().danger)
                             .child(div().min_w_0().truncate().child(branch));
                         if status.added > 0 || status.removed > 0 {
                             line = line.child(
@@ -1496,14 +1501,14 @@ impl Tty7App {
                             if status.added > 0 {
                                 counts = counts.child(
                                     div()
-                                        .text_color(count_ink)
+                                        .text_color(added_ink)
                                         .child(format!("+{}", status.added)),
                                 );
                             }
                             if status.removed > 0 {
                                 counts = counts.child(
                                     div()
-                                        .text_color(count_ink)
+                                        .text_color(cx.theme().danger)
                                         .child(format!("−{}", status.removed)),
                                 );
                             }

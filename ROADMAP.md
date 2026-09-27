@@ -14,6 +14,9 @@
 - 侧边栏改动已通过 `cargo build` 完整编译验证。
 - workspace 创建与切换入口已从侧边栏顶部移到底部固定区域，任务树保持独立滚动，并继续复用现有切换面板及其新建入口。
 - 当前 v4 侧边栏在分组标题与会话行之间加入 L 型树连接线；会话继续保持当前单行／双行 Git 信息布局，不恢复旧的 Agent 双层结构。
+- 分组标题及其分支信息字号调整为 13px；会话行 Git 元信息继续保持 11.5px，避免整列会话文字同步放大。
+- 分组名称使用青色 `added_ink`，分组标题中的 Git 分支与变更计数使用主题红色 `danger`；会话行其他颜色保持不变。
+- 分组 Git Diff 中的新增行数 `+N` 单独使用青色 `added_ink`，删除行数 `−N` 继续使用红色 `danger`。
 - 侧边栏品牌区标题文字已从 tty7 改为 xview，仅改品牌区渲染文案，未动测试 fixture 与注释。
 - 侧边栏分组标题（当前任务、Repo、Scratch 共用）文字与文件夹图标从 12px 调大到 13px，向 Agent 名称的 14px 靠近一档。
 - 侧边栏分组标题文字颜色从 muted 灰改为 Git Diff 新增色 added_ink（青色），文件夹图标与 hover 变色行为保持不变。
@@ -50,6 +53,11 @@
 
 ## 最近验证
 
+- 2026-09-27 分组 Git Diff 新增行数青色版 26.9.3 Apple Silicon DMG：重新执行 release 主程序构建（3m18s）、updater 构建（5.87s）和 `bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`；生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28468204 bytes，SHA-256 `f4c898a613fd4b22aacabd78796326a2ef166d81ab1cb4f47fca782d34465396`）与 updater ZIP（24370419 bytes，SHA-256 `1e38e02435fc9e9d5fcd0db4343e091506714bed02d22f344fa5800313480e6f`）。DMG CRC、只读挂载、`CFBundleShortVersionString=26.9.3`、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件和 `codesign --verify --deep --strict` 均通过；采用 ad-hoc 签名。
+- 2026-09-27 分组 Git Diff 新增行数颜色调整：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
+- 2026-09-27 分组名青色、Git 分支红色版 26.9.3 Apple Silicon DMG：重新执行 release 主程序构建（3m15s）、updater 构建（5.98s）和 `bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`；生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28467976 bytes，SHA-256 `edf98d15b26e14efba80bc38b69daef53b2ab8083a382641e862d44a28ed7d1e`）与 updater ZIP（24369992 bytes，SHA-256 `5272c1868f362e221257f0924eca5cc56da43a987e9c1bd54427068904b9ec51`）。DMG CRC、只读挂载、`CFBundleShortVersionString=26.9.3`、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件和 `codesign --verify --deep --strict` 均通过；采用 ad-hoc 签名。
+- 2026-09-27 分组标题颜色调整：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
+- 2026-09-27 分组标题字号调整：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
 - 2026-09-27 分组到会话 L 型连接线版 26.9.3 Apple Silicon DMG：重新执行 `cargo build --release --locked --target aarch64-apple-darwin`（3m19s）、updater 构建（5.79s）和 `bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`；生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28468163 bytes，SHA-256 `f40e957adf4a1415ec829a173876ed2659161e056e7c22b816ea4ea8df4d7cde`）与 updater ZIP（24370372 bytes，SHA-256 `56df33f5cf74e96f281dfb5f40ec6abc9dba27f8b314151c5834a2b56837f0f4`）。DMG CRC、只读挂载、`CFBundleShortVersionString=26.9.3`、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件和 `codesign --verify --deep --strict` 均通过；采用 ad-hoc 签名。
 - 2026-09-27 分组到会话连接线：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
 - 2026-09-27 26.9.3 Apple Silicon DMG：`cargo build --release --locked --target aarch64-apple-darwin`（5m04s）与 updater 构建（6.47s）通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28467755 bytes，SHA-256 `73557ca99f26f564e050f711d9b6625bc9a85ea825a5df517b712690e9296a8d`）与 updater ZIP（24368365 bytes，SHA-256 `01da8263980cf814f88843cc4c53aadf7618972d631d788fad4549440b71c757`）。DMG CRC VALID，只读挂载含 `tty7.app` 与 `/Applications` 入口，`CFBundleShortVersionString=26.9.3`，包内三个可执行文件均为 thin arm64，`codesign --verify --deep --strict` 通过；采用 ad-hoc 签名，旧 dist 已备份至 `/private/tmp/tty7-dist-backup-dmg-20260927`。
