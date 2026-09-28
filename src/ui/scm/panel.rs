@@ -42,6 +42,10 @@ use crate::ui::scm::status::{status_color, status_glyph};
 use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
 
 /// Shared compact pitch for working-tree and commit-detail file rows.
+///
+/// A height, not a floor to pad past: the rows used to add 3px above and
+/// below a 23px line box, so a file row stood 29 tall beside the 26px
+/// directory rows of the same tree and the Files tab's 26px rows.
 pub(super) const ROW_H: f32 = 26.;
 
 /// The status letter's column, from `git_badge`. The group chevron sits in a
@@ -279,8 +283,18 @@ impl Tty7App {
             ),
             None => {
                 // Pinned with the rest, so the filter stays in reach however
-                // far down the list has been scrolled.
-                pinned.push(self.scm_filter_row(window, cx));
+                // far down the list has been scrolled. The blocks above carry
+                // their own spacing and the list starts flush ("none above
+                // the first" group), so the filter brings the pause under it
+                // itself — the Files tab's 10 between its search and the tree.
+                // Without it the first group header sat on the field's edge
+                // while 14 stood above it.
+                pinned.push(
+                    div()
+                        .pb(px(PINNED_GAP))
+                        .child(self.scm_filter_row(window, cx))
+                        .into_any_element(),
+                );
                 self.scm_groups(&repo, &status, cx)
             }
         };
@@ -1708,7 +1722,6 @@ impl Tty7App {
             .when_some(depth, |row, depth| {
                 row.pl(px(ROW_INSET + depth as f32 * TREE_INDENT))
             })
-            .py(px(3.))
             .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))

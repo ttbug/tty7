@@ -17,11 +17,34 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
         return None;
     }
 
+    // Every place the first letter occurs is a place the match could begin,
+    // and the best of them is the score. Matching greedily from the left
+    // alone let an early stray letter decide the alignment: `worktree`
+    // against `New Worktree Tab…` spent its `w` on "New" and scattered the
+    // rest, scoring the title as a poor match of the very word it contains.
+    let best = (0..hay.len())
+        .filter(|&i| hay[i] == needle[0])
+        .filter_map(|start| align(&needle, &hay, start))
+        .max()?;
+
+    let mut score = best;
+    if hay == needle {
+        score += 120;
+    } else if hay.starts_with(&needle) {
+        score += 50;
+    }
+    score -= (hay.len() as i32) / 6;
+    Some(score)
+}
+
+/// `needle` as a subsequence of `hay` beginning at `start`, taken greedily
+/// from there; `None` when the rest of it does not fit.
+fn align(needle: &[char], hay: &[char], start: usize) -> Option<i32> {
     let mut qi = 0usize;
     let mut score = 0i32;
     let mut run = 0i32;
     let mut prev_hit = false;
-    for (i, ch) in hay.iter().enumerate() {
+    for (i, ch) in hay.iter().enumerate().skip(start) {
         if qi >= needle.len() {
             break;
         }
@@ -47,17 +70,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
         prev_hit = true;
         qi += 1;
     }
-    if qi < needle.len() {
-        return None;
-    }
-
-    if hay == needle {
-        score += 120;
-    } else if hay.starts_with(&needle) {
-        score += 50;
-    }
-    score -= (hay.len() as i32) / 6;
-    Some(score)
+    (qi == needle.len()).then_some(score)
 }
 
 /// How far behind the visible label an alias hit lands. An alias *is* the
@@ -115,6 +128,15 @@ mod tests {
             "frecency is a tiebreak, not a ranking"
         );
         assert_eq!(frecency_bonus(1_000.0), frecency_bonus(10_000.0));
+    }
+
+    #[test]
+    fn a_whole_word_is_found_past_an_earlier_stray_letter() {
+        // The `w` of "New" used to claim the match and scatter the rest.
+        let whole = fuzzy_score("worktree", "New Worktree Tab…").expect("matches");
+        let scattered = fuzzy_score("worktree", "New work on tree").expect("matches");
+        assert!(whole > scattered, "{whole} should beat {scattered}");
+        assert_eq!(whole, 88);
     }
 
     #[test]

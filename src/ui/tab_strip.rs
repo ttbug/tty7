@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, FontWeight, MouseButton,
     Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint, linear_color_stop,
-    linear_gradient, prelude::*, px, relative,
+    linear_gradient, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -618,56 +618,52 @@ pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> But
     chrome_tile_sized(button, TILE_SIZE, TILE_GLYPH, selected, cx)
 }
 
-/// The right panel's tabs, left to right: which pane, what its tooltip calls
-/// it, and the glyph the row draws for it. Info leads as the default and the
-/// pane's overview; then two pairs — the project's files (Files, Search) and
-/// its version control, local to remote (Changes, GitHub). GitHub is last so
-/// that hiding it for a repository without a GitHub remote moves nothing.
-const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey, &str); 5] = [
-    (
-        RightPanelTab::Info,
-        L10nKey::PanelInfoTitle,
-        "icons/info.svg",
-    ),
-    (
-        RightPanelTab::Files,
-        L10nKey::PanelFilesTitle,
-        "icons/folder.svg",
-    ),
-    (
-        RightPanelTab::Search,
-        L10nKey::PanelSearchTitle,
-        "icons/search.svg",
-    ),
-    (
-        RightPanelTab::Scm,
-        L10nKey::PanelChangesTitle,
-        "icons/git-branch.svg",
-    ),
-    (
-        RightPanelTab::GitHub,
-        L10nKey::PanelGitHubTitle,
-        "icons/github.svg",
-    ),
+/// The right panel's tabs, left to right, by name. Info leads as the default
+/// and the pane's overview; then the project's files, and its version
+/// control, local to remote (Changes, GitHub). GitHub is last so that hiding
+/// it for a repository without a GitHub remote moves nothing. Search is not
+/// among them: the Files tab searches names and contents in one field.
+const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
+    (RightPanelTab::Info, L10nKey::PanelInfoTitle),
+    (RightPanelTab::Files, L10nKey::PanelFilesTitle),
+    (RightPanelTab::Scm, L10nKey::PanelChangesTitle),
+    (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
 ];
 
-/// The glyph each tab draws, in px.
-const RIGHT_PANEL_TAB_ICON: f32 = 15.;
+fn right_panel_tab_size(window: &Window) -> f32 {
+    window.rem_size().as_f32() * crate::ui::right_panel::TAB_TEXT
+}
 
-/// What the bare tab glyphs take, padding included. The panel's floor is
+fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
+    gpui::Font {
+        family: cx.theme().font_family.clone(),
+        features: Default::default(),
+        fallbacks: None,
+        // The current tab's weight, which is the widest any label is drawn at.
+        weight: FontWeight::MEDIUM,
+        style: Default::default(),
+    }
+}
+
+/// What the bare tab labels take, padding included. The panel's floor is
 /// built on it, so the chrome tiles beside them always fit.
-pub(crate) fn right_panel_tab_labels_w(_window: &Window, _cx: &gpui::App) -> f32 {
-    RIGHT_PANEL_TABS.len() as f32 * (RIGHT_PANEL_TAB_ICON + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD))
+pub(crate) fn right_panel_tab_labels_w(window: &Window, cx: &gpui::App) -> f32 {
+    let size = right_panel_tab_size(window);
+    let font = right_panel_tab_font(cx);
+    RIGHT_PANEL_TABS
+        .iter()
+        .map(|(_, key)| {
+            measure_text(window.text_system(), &font, size, t(*key))
+                + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
+        })
+        .sum()
 }
 
 /// Right panel tab geometry: each tab's click target reaches this far past
 /// its pill, so neighbouring pills sit twice this apart.
 pub(crate) const TAB_OUTER_PAD: f32 = 2.;
-/// The selected tab's pill reaches this far past its glyph.
-const TAB_INNER_PAD: f32 = 5.;
-/// The pill's height and corner.
-const TAB_PILL_H: f32 = 24.;
-const TAB_PILL_RADIUS: f32 = 6.;
+/// A label's hover target reaches this far past its word.
+const TAB_INNER_PAD: f32 = 4.;
 
 /// How wide the two chrome tiles at the trailing end of the title bar are, with
 /// the padding around them.
@@ -1005,10 +1001,19 @@ fn menu_hosts(
 /// Both halves are cut rather than allowed to push: the panel stops at
 /// [`MENU_W`], and a descriptive host name next to a long `user@host:port`
 /// asks for more than that. Which half gives way is the whole point — the name
-/// is what the reader is picking by, so the endpoint is capped at half the row
-/// and elides first, and the name takes everything left over. Sized the other
-/// way round (name growing from nothing, endpoint at its natural width) a long
-/// address squeezes the name down to `..` and the row names nothing at all.
+/// is what the reader is picking by, so it keeps its width up to
+/// [`MENU_NAME_W`], and the endpoint takes whatever is left and elides first.
+/// Sized the other way round (name growing from nothing, endpoint at its
+/// natural width) a long address squeezes the name down to `..` and the row
+/// names nothing at all.
+///
+/// Both caps are fixed lengths, never a share of the row. The panel is sized
+/// to fit its content, so while the text is laid out no row has a width yet:
+/// anything capped by `relative(..)` or by flex shrinking measures at full
+/// length, is squeezed afterwards, and is clipped mid-glyph at the panel edge
+/// (`git@ssh.github.con`) instead of ending in an ellipsis. A pixel cap is
+/// known up front, so the text elides against it. The two caps and the row's
+/// insets add up to [`MENU_W`].
 ///
 /// An empty note drops the right half entirely rather than leaving a zero-width
 /// child to hold the `gap_3` open — the name is then free to use the full row,
@@ -1020,18 +1025,42 @@ fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl Int
         .items_center()
         .justify_between()
         .gap_3()
-        .child(div().flex_1().min_w_0().truncate().child(label))
+        .child(
+            div()
+                .flex_shrink_0()
+                .max_w(match note.is_empty() {
+                    true => MENU_W - MENU_ROW_INSET,
+                    false => MENU_NAME_W,
+                })
+                .truncate()
+                .child(label),
+        )
         .when(!note.is_empty(), |this| {
+            // Pushed right by the cell, not by `text_right`: a line set
+            // with `truncate` ignores its alignment and hugs the name.
             this.child(
-                div()
-                    .flex_shrink_0()
-                    .max_w(relative(0.5))
-                    .truncate()
-                    .text_color(muted)
-                    .child(note),
+                h_flex().flex_1().justify_end().child(
+                    div()
+                        .max_w(MENU_NOTE_W)
+                        .truncate()
+                        .text_color(muted)
+                        .child(note),
+                ),
             )
         })
 }
+
+/// The most of a [`menu_row`] its name keeps before it elides — the larger
+/// share, since the name is what the row is picked by.
+const MENU_NAME_W: Pixels = px(172.);
+
+/// The most the endpoint beside a name gets: room for `user@host:port` on a
+/// typical host, and the gap and the insets take the rest of [`MENU_W`].
+const MENU_NOTE_W: Pixels = px(150.);
+
+/// What the panel spends on either side of a row's content: its own 5px
+/// inset and the row's 8px padding, twice.
+const MENU_ROW_INSET: Pixels = px(26.);
 
 /// The words behind the status dot's colour.
 pub(crate) fn agent_status_label(
@@ -1278,27 +1307,21 @@ impl Tty7App {
             )
     }
 
-    /// The right panel's tabs: a glyph each, named in a tooltip.
-    ///
-    /// No count on Changes: a number beside one glyph of five read as a badge
-    /// on that tab alone, and the Changes tab itself leads with the same count
-    /// under its own heading.
+    /// The right panel's tabs: words, the current one in body ink and medium
+    /// weight — v5's inspector row. Four names fit the panel's resting width
+    /// once Search folded into Files; this is secondary navigation, not an
+    /// action, so it gets neither a pill nor a bar.
     pub(crate) fn right_panel_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let active_tab = self.right_panel_tab;
         let body_ink = cx.theme().foreground;
-        let selected_fill = cx.global::<crate::ui::presets::Surfaces>().sidebar.selected;
+        let muted = cx.theme().muted_foreground;
         RIGHT_PANEL_TABS
             .into_iter()
-            .map(|(tab, label_key, icon)| {
+            .map(|(tab, label_key)| {
                 let current = active_tab == tab;
-                // Glyphs, not words: five names do not fit the panel's 280px
-                // resting width, so each tab is an icon and says its name in a
-                // tooltip. Ink alone could not carry "this one" between five
-                // glyphs of one weight, so the current tab also sits on the
-                // sidebar's selected fill.
                 let ink = match current {
                     true => body_ink,
-                    false => cx.theme().muted_foreground,
+                    false => muted,
                 };
                 div()
                     .id(("right-panel-tab", tab as usize))
@@ -1312,24 +1335,18 @@ impl Tty7App {
                     .px(px(TAB_OUTER_PAD))
                     .cursor_pointer()
                     .child(
-                        h_flex()
+                        div()
                             .flex_shrink_0()
-                            .h(px(TAB_PILL_H))
                             .px(px(TAB_INNER_PAD))
-                            .rounded(px(TAB_PILL_RADIUS))
-                            .when(current, |pill| pill.bg(gpui::rgb(selected_fill)))
-                            .items_center()
+                            .text_size(gpui::rems(crate::ui::right_panel::TAB_TEXT))
+                            .font_weight(match current {
+                                true => FontWeight::MEDIUM,
+                                false => FontWeight::NORMAL,
+                            })
                             .text_color(ink)
                             .hover(move |s| s.text_color(body_ink))
-                            .child(
-                                gpui::svg()
-                                    .flex_shrink_0()
-                                    .path(icon)
-                                    .size(px(RIGHT_PANEL_TAB_ICON))
-                                    .text_color(ink),
-                            ),
+                            .child(t(label_key)),
                     )
-                    .tooltip(move |window, cx| Tooltip::new(t(label_key)).build(window, cx))
                     // Another tab switches to it; the current one puts the panel
                     // away, the way an activity bar behaves everywhere else.
                     // (These only exist while the panel is open, so
@@ -2428,6 +2445,26 @@ impl Tty7App {
         // that opens the search where it stands. The rail beside it already
         // names every tab, so the bar has no title of its own to repeat. The
         // box alone takes the pointer; the rest of the bar still drags.
+        //
+        // Centred over the terminal column, not the bar. Off macOS the bar
+        // spans the workspace while a document or the detail panel is docked,
+        // and centred on all of it the box landed under the document's
+        // hoisted header, which has no fill to hide it. The strip already
+        // stops short of the window controls, so they come off the columns'
+        // share.
+        let search_right = match cfg!(target_os = "macos") {
+            true => 0.,
+            false => {
+                let panel = match self.right_panel_open(cx) {
+                    true => self.right_panel_px(window, cx),
+                    false => 0.,
+                };
+                match panel + document_w > 0. {
+                    true => (panel + document_w - controls_w).max(0.),
+                    false => 0.,
+                }
+            }
+        };
         let centre_search = (!show_chips).then(|| {
             // The chord as text, not caps: a cap's fill is this box's own
             // grey, so on it a cap is only a gap between two letters.
@@ -2435,7 +2472,10 @@ impl Tty7App {
                 .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
             div()
                 .absolute()
-                .inset_0()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .right(px(search_right))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2444,14 +2484,23 @@ impl Tty7App {
                         .id("titlebar-search")
                         .occlude()
                         .w(px(TITLEBAR_SEARCH_W))
-                        .max_w(gpui::relative(0.5))
+                        // Enough of the bar that the label and its chord still
+                        // fit with a document docked beside the terminal; at a
+                        // half it read `Search Everywhe…` in exactly the
+                        // layout people search from most.
+                        .max_w(gpui::relative(0.6))
                         .h(px(TITLEBAR_SEARCH_H))
                         .items_center()
                         .gap(px(7.))
                         .pl(px(10.))
                         .pr(px(10.))
                         .rounded(px(7.))
-                        .bg(cx.theme().muted)
+                        // The left rail's fill (`Surfaces::rail`, #f5f5f3 /
+                        // #1e1e20 on the default pair) — not `sidebar`, which
+                        // is the window's own fill and vanished into the bar.
+                        .bg(gpui::rgb(
+                            cx.global::<crate::ui::presets::Surfaces>().rail.base,
+                        ))
                         .cursor_pointer()
                         .text_size(window.rem_size() * 0.8125)
                         .text_color(cx.theme().muted_foreground)
@@ -2468,9 +2517,12 @@ impl Tty7App {
                             row.child(div().flex_shrink_0().child(chord))
                         })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_search(SearchTab::All, "", window, cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| match this.search.is_some() {
+                                true => this.close_search(window, cx),
+                                false => this.open_search(SearchTab::All, "", window, cx),
+                            }),
+                        ),
                 )
         });
 

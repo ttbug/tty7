@@ -162,6 +162,13 @@ pub(crate) fn key_stroke(action: &str, cx: &App) -> Option<Keystroke> {
     Keystroke::parse(first).ok()
 }
 
+/// The first stroke of `action`'s binding, one token per key.
+fn key_tokens(action: &str, cx: &App) -> Option<Vec<String>> {
+    let spec = crate::ui::keymap::effective_key(action, cx)?;
+    let first = spec.split_whitespace().next()?;
+    Some(crate::ui::keymap::key_tokens(first))
+}
+
 pub(crate) fn key_hint(action: &str, cx: &App) -> Option<String> {
     Some(Kbd::format(&key_stroke(action, cx)?))
 }
@@ -243,10 +250,7 @@ impl Tty7App {
                         row.text_color(foreground)
                     })
                     .child(div().min_w_0().truncate().child(label))
-                    .children(
-                        key_stroke(action, cx)
-                            .map(|stroke| crate::ui::dialog::keycap(Kbd::format(&stroke), cx)),
-                    )
+                    .children(key_tokens(action, cx).map(|keys| crate::ui::dialog::chord(keys, cx)))
                     .on_click(move |_, window, cx| {
                         let command: Box<dyn gpui::Action> = match action {
                             "NewTab" => Box::new(NewTab),

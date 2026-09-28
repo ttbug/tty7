@@ -123,13 +123,26 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FilterHosts => "ホストを絞り込み…",
         L10nKey::SearchTheme => "検索…",
         L10nKey::SearchTabAll => "すべて",
-        L10nKey::SearchTabActions => "アクション",
+        L10nKey::SearchTabActions => "コマンド",
         L10nKey::SearchTabTerminals => "ターミナル",
         L10nKey::SearchTabHosts => "ホスト",
-        L10nKey::SearchPlaceholderAll => "アクション、ターミナル、ホストを検索…",
-        L10nKey::SearchPlaceholderActions => "アクションを検索…",
+        L10nKey::SearchPlaceholderAll => "ファイル、アクション、ターミナル、ホストを検索…",
+        L10nKey::SearchPlaceholderActions => "コマンドを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",
+        L10nKey::SearchTabFiles => "ファイル",
+        L10nKey::SearchPlaceholderFiles => "名前でファイルに移動（:行番号 でその行へ）…",
+        L10nKey::SearchFilesNoRoots => "検索するプロジェクトがありません",
+        L10nKey::SearchFilesNoRootsHint => {
+            "ファイルはターミナルのいるプロジェクトから探します。プロジェクトに cd すると検索できます。"
+        }
+        L10nKey::SearchFilesIndexing => "ファイルをインデックス中…",
+        L10nKey::SearchFilesFailed => "このプロジェクトのファイルを一覧できませんでした。",
+        L10nKey::SearchFilesGoToLine => "{line} 行目",
+        L10nKey::SearchFilesCapped => {
+            "大きなプロジェクトのため、最初の {count} 件のファイルのみ検索します"
+        }
+        L10nKey::CmdGoToFile => "ファイルに移動…",
         L10nKey::SearchTabSessions => "セッション",
         L10nKey::SearchPlaceholderSessions => "過去のエージェントセッションを検索…",
         L10nKey::SearchSessionsEmptyHint => {
@@ -513,7 +526,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsOn => "オン",
         L10nKey::SettingsOff => "オフ",
         L10nKey::SettingsShell => "シェル",
-        L10nKey::SettingsShellIntro => "新しいターミナルで起動するプログラム。空欄なら {default}",
+        L10nKey::SettingsShellIntro => {
+            "新しいターミナルで起動するプログラム。空欄なら{default}を使います。"
+        }
         L10nKey::SettingsProgram => "シェルプログラム",
         L10nKey::SettingsProgramDesc => "PATH 上の名前か絶対パス。例: zsh、fish",
         L10nKey::SettingsArguments => "シェル引数",
@@ -1155,8 +1170,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
         L10nKey::FileTreePlaceholderNewName => "新しい名前",
         L10nKey::FileTreeDeleteTitle => "「{name}」を削除しますか？",
-        L10nKey::FileTreeDeleteFolderBody => "フォルダとその中のすべての項目が削除されます",
-        L10nKey::FileTreeDeleteFileBody => "ファイルが削除されます",
+        L10nKey::FileTreeDeleteFolderBody => {
+            "フォルダとその中のすべての項目が削除されます。この操作は元に戻せません。"
+        }
+        L10nKey::FileTreeDeleteFileBody => "この操作は元に戻せません。",
         L10nKey::SftpDeleteFolderBody => {
             "{host} 上でフォルダとその中身がすべて削除されます。リモート側にゴミ箱はありません。"
         }
@@ -1220,6 +1237,33 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOff => "折り返し: オフ",
         L10nKey::EditorFileTooLarge => "「{path}」はエディタで開くには大きすぎます（{size} MB）",
         L10nKey::EditorBinaryFile => "「{path}」はバイナリファイルのようです",
+        L10nKey::EditorUntitled => "無題-{n}",
+        L10nKey::EditorUnsavedChangesMany => "{count} 個のファイルに未保存の変更があります",
+        L10nKey::EditorSaveAll => "すべて保存",
+        L10nKey::EditorSaveConflictTitle => "「{name}」はディスク上で変更されました",
+        L10nKey::EditorSaveConflictBody => {
+            "ここで開いた後に別のプログラムが変更しました。上書きすると、その変更はあなたの内容で置き換えられます。"
+        }
+        L10nKey::EditorOverwrite => "上書き",
+        L10nKey::EditorEncodeFailedTitle => "「{name}」を {encoding} で保存できません",
+        L10nKey::EditorEncodeFailedBody => {
+            "{encoding} で表せない文字「{ch}」が含まれています。代わりに UTF-8 で保存しますか？"
+        }
+        L10nKey::EditorSaveAsUtf8 => "UTF-8 で保存",
+        L10nKey::EditorAlreadyOpen => "「{path}」はすでにエディタで開かれています",
+        L10nKey::EditorGoToLine => "行へ移動",
+        L10nKey::EditorGoToLineAction => "行へ移動…",
+        L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
+        L10nKey::EditorSaveAs => "名前を付けて保存",
+        L10nKey::EditorSaveAsAction => "名前を付けて保存…",
+        L10nKey::EditorSaveAsPlaceholder => "保存先のフルパス",
+        L10nKey::EditorReplaceExisting => "「{path}」はすでに存在します。置き換えますか？",
+        L10nKey::EditorReplace => "置き換え",
+        L10nKey::EditorNewFile => "新規ファイル",
+        L10nKey::EditorOrphanAdopted => "閉じたタブから未保存の「{name}」をここに移しました",
+        L10nKey::EditorFileDeletedOnDisk => "このファイルはディスク上で削除されました",
+        L10nKey::EditorIndentSpaces => "スペース: {n}",
+        L10nKey::EditorIndentTabs => "タブ幅: {n}",
         L10nKey::PanelInfoTitle => "情報",
         L10nKey::PanelChangesTitle => "変更",
         L10nKey::PanelScmTitle => "変更",
@@ -1565,6 +1609,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherTabToCrossColumns => "Tab で列を移動",
         L10nKey::SwitcherHintNavigate => "移動",
         L10nKey::SwitcherHintOpen => "開く",
+        L10nKey::SearchHintNextScope => "次のスコープ",
+        L10nKey::PanelFilesNameMatches => "ファイル名",
+        L10nKey::PanelSearchInContents => "ファイルの内容",
         L10nKey::SwitcherHintNewWindow => "新しいウィンドウ",
         L10nKey::SwitcherLocalHost => "ローカル",
         L10nKey::SwitcherConnectingTo => "{machine} に接続中…",
@@ -1587,7 +1634,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptConnect => "接続",
         L10nKey::SshPromptUnlock => "ロック解除",
         L10nKey::SshPromptSubmit => "送信",
-        L10nKey::HostOpsError => "{context}: {error}",
+        L10nKey::GitOpFailed => "git {op} に失敗しました",
         L10nKey::IoDenied => "権限がありません。",
         L10nKey::IoGone => "もう存在しません。",
         L10nKey::IoNoSpace => "ディスクに空き容量がありません。",

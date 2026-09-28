@@ -4,7 +4,7 @@
 //! the key binding, the palette entry and the button on the row — cannot drift
 //! into meaning different things.
 
-use gpui::{Context, PromptLevel, Window};
+use gpui::{Context, PromptButton, PromptLevel, Window};
 
 use tty7_core::core::git::ops::{Destructive, GitOp, PullMode};
 
@@ -133,7 +133,7 @@ impl Tty7App {
             PromptLevel::Warning,
             &confirm_question(&op, loss),
             None,
-            &[t(L10nKey::Cancel), confirm_verb(&op, loss)],
+            &guarded_answers(confirm_verb(&op, loss)),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
@@ -320,7 +320,7 @@ impl Tty7App {
             PromptLevel::Warning,
             &t(L10nKey::ScmDiscardAllConfirm).to_string(),
             None,
-            &[t(L10nKey::Cancel), t(L10nKey::ScmDiscard)],
+            &guarded_answers(t(L10nKey::ScmDiscard)),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
@@ -513,6 +513,18 @@ fn confirm_verb(op: &GitOp, loss: Destructive) -> &'static str {
     }
 }
 
+/// Cancel first, so Return lands on it and not on the loss, then the action.
+///
+/// Cancel is marked as one rather than passed as a bare label: gpui only
+/// recognises a cancel by its label when that label is the English word, so
+/// in any other language Escape had nothing to answer and the dialog could
+/// not tell which button was the safe one.
+fn guarded_answers(action: &str) -> [PromptButton; 2] {
+    [
+        PromptButton::cancel(t(L10nKey::Cancel)),
+        PromptButton::new(action),
+    ]
+}
 #[cfg(test)]
 mod tests {
     use super::*;

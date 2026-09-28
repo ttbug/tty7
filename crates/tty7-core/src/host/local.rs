@@ -266,9 +266,13 @@ impl Host for LocalHost {
         crate::host::content_search::search(roots, query, limits)
     }
 
+    /// Replaces `p` with `bytes` atomically where it can, so a crash, a full
+    /// disk or a killed process halfway through a save leaves either the old
+    /// file or the new one and never a truncated mix — see [`write_replacing`]
+    /// for when it cannot and writes in place instead.
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta> {
         guard_off_ui();
-        fs::write(p, bytes)?;
+        write_replacing(p, bytes, &mut |f| io::Write::write_all(f, bytes))?;
         self.stat(p)
     }
 
@@ -357,6 +361,149 @@ impl Host for LocalHost {
         guard_off_ui();
         local_watch(dirs, Arc::clone(&self.gitignore))
     }
+}
+
+/// Writes `bytes` to `p` by filling a hidden sibling temp file and renaming it
+/// over `p`, which is what makes a save atomic: `fs::write` truncates first, so
+/// anything that stops it before the last byte lands destroys the user's file.
+///
+/// A rename swaps in a new inode, though, and that is not always invisible.
+/// Wherever it would change something the user can see, this writes in place
+/// exactly as `fs::write` did and gives up atomicity instead:
+///
+/// - `p` is not a regular file. A symlink must keep pointing where it points
+///   and have its target written, not be replaced by a plain file; a
+///   directory or a FIFO has to fail or be written the way it always was.
+/// - `p` is read-only. The rename only needs the directory to be writable, so
+///   it would quietly overwrite a file its owner protected; writing in place
+///   fails with the same `PermissionDenied` it always did.
+/// - (Unix) `p` has more than one hard link. The other names would keep the
+///   old content, while an in-place write reaches all of them.
+/// - (Unix) `p` belongs to another user. The new file would belong to us, so
+///   a root-run save of someone else's file would hand it to root.
+/// - The temp file cannot be created, typically because the directory is not
+///   writable while the file is. If the directory is missing altogether the
+///   in-place write fails too, with the same `NotFound` as before.
+///
+/// `fill` writes the content into the temp file; it is a parameter only so the
+/// tests can make it fail halfway.
+fn write_replacing(
+    p: &Path,
+    bytes: &[u8],
+    fill: &mut dyn FnMut(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let existing = match fs::symlink_metadata(p) {
+        Ok(md) => Some(md),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|md| !replace_is_invisible(md))
+    {
+        return fs::write(p, bytes);
+    }
+    let Some((tmp_path, mut tmp)) = create_temp_beside(p) else {
+        return fs::write(p, bytes);
+    };
+    // From here on every early return must take the temp file with it, or a
+    // failed save would litter the user's directory with `.tty7-….tmp` files.
+    let staged = (|| {
+        // A new file keeps the umask-derived mode it was created with, which
+        // is what `fs::write` would have given it; an existing one keeps its
+        // own.
+        if let Some(md) = &existing {
+            tmp.set_permissions(md.permissions())?;
+        }
+        fill(&mut tmp)?;
+        // Without this the rename can reach the disk before the data does,
+        // and a power cut leaves an empty file under the old name.
+        tmp.sync_all()
+    })();
+    drop(tmp);
+    // Staging failed — a full disk, say. The original is untouched and must
+    // stay that way: writing it in place now would truncate it into exactly
+    // the half-written file this function exists to prevent.
+    if let Err(e) = staged {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_path, p) {
+        let _ = fs::remove_file(&tmp_path);
+        // Windows refuses to rename over a file another program holds open,
+        // where the in-place write it used to get succeeds, so there a failed
+        // swap is not yet a failed save. Only the swap: the content was just
+        // written out in full, so the disk has room for it.
+        #[cfg(not(unix))]
+        {
+            let _ = e;
+            return fs::write(p, bytes);
+        }
+        #[cfg(unix)]
+        return Err(e);
+    }
+    sync_parent_dir(p);
+    Ok(())
+}
+
+/// Whether swapping a new inode in for the file `md` describes would go
+/// unnoticed — see [`write_replacing`] for why each of these matters.
+fn replace_is_invisible(md: &fs::Metadata) -> bool {
+    if !md.file_type().is_file() || md.permissions().readonly() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `geteuid` takes nothing, touches no memory and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        // Being the owner, the owner's write bit is the one that decides
+        // whether an in-place write is allowed; `readonly` above only catches
+        // a file with no write bit at all.
+        md.nlink() == 1 && md.uid() == euid && md.mode() & 0o200 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Creates a fresh hidden file next to `p` to stage its new content in. It has
+/// to be in the same directory, since a rename across filesystems is not
+/// atomic (and fails outright), and it must be new, so two saves racing each
+/// other — or a leftover from a crash — can never share one.
+fn create_temp_beside(p: &Path) -> Option<(PathBuf, fs::File)> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = p.parent()?;
+    let name = p.file_name()?.to_string_lossy();
+    for _ in 0..8 {
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.tty7-{}-{n}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(f) => return Some((tmp, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Flushes the directory entry the rename just changed, so the new name
+/// survives a power cut too. Best effort: the content is already safe on disk,
+/// and not every filesystem lets a directory be opened or synced.
+fn sync_parent_dir(p: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = p.parent()
+        && let Ok(d) = fs::File::open(dir)
+    {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = p;
 }
 
 #[derive(Default)]
@@ -718,5 +865,166 @@ mod tests {
             cleared,
             "a `.gitignore` change seen by the watcher must drop the compiled matchers"
         );
+    }
+
+    /// The names in `dir`, sorted — for spotting a temp file a save left behind.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_and_leaves_nothing_beside_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("doc.txt");
+        let h = LocalHost::new();
+        h.write_file(&f, b"first, and longer").unwrap();
+        #[cfg(unix)]
+        let before = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&f).unwrap());
+        let meta = h.write_file(&f, b"second").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"second");
+        assert_eq!(meta.len, 6);
+        assert_eq!(names_in(tmp.path()), vec!["doc.txt"]);
+        #[cfg(unix)]
+        assert_ne!(
+            std::os::unix::fs::MetadataExt::ino(&fs::metadata(&f).unwrap()),
+            before,
+            "the save must swap in a new file rather than truncate the old one"
+        );
+    }
+
+    #[test]
+    fn a_new_file_is_created_like_fs_write_would() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("fresh.txt");
+        let control = tmp.path().join("control.txt");
+        fs::write(&control, b"").unwrap();
+        LocalHost::new().write_file(&f, b"hello").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"hello");
+        assert_eq!(
+            fs::metadata(&f).unwrap().permissions(),
+            fs::metadata(&control).unwrap().permissions(),
+            "a new file takes the umask's mode, as `fs::write` gives it"
+        );
+        assert_eq!(names_in(tmp.path()), vec!["control.txt", "fresh.txt"]);
+    }
+
+    #[test]
+    fn a_save_into_a_missing_directory_fails_and_creates_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("gone").join("doc.txt");
+        let err = LocalHost::new().write_file(&f, b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(names_in(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_old_file_and_cleans_up() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("doc.txt");
+        fs::write(&f, b"precious").unwrap();
+        let err = write_replacing(&f, b"new content", &mut |file| {
+            io::Write::write_all(file, b"new")?;
+            Err(io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+        assert_eq!(fs::read(&f).unwrap(), b"precious");
+        assert_eq!(names_in(tmp.path()), vec!["doc.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("run.sh");
+        fs::write(&f, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o750)).unwrap();
+        LocalHost::new()
+            .write_file(&f, b"#!/bin/sh\necho hi\n")
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o750
+        );
+        assert_eq!(fs::read(&f).unwrap(), b"#!/bin/sh\necho hi\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_file_is_written_in_place_so_every_name_sees_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("doc.txt");
+        let other = tmp.path().join("alias.txt");
+        fs::write(&f, b"old").unwrap();
+        fs::hard_link(&f, &other).unwrap();
+        LocalHost::new().write_file(&f, b"new").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"new");
+        assert_eq!(fs::read(&other).unwrap(), b"new");
+        assert_eq!(names_in(tmp.path()), vec!["alias.txt", "doc.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_written_through_not_replaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("real.txt");
+        let link = tmp.path().join("link.txt");
+        fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        LocalHost::new().write_file(&link, b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(names_in(tmp.path()), vec!["link.txt", "real.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_file_still_refuses_the_save() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root writes through any mode, so there is nothing to refuse.
+        // SAFETY: `geteuid` takes nothing and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("locked.txt");
+        fs::write(&f, b"keep").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o444)).unwrap();
+        let err = LocalHost::new().write_file(&f, b"clobber").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(fs::read(&f).unwrap(), b"keep");
+        assert_eq!(names_in(tmp.path()), vec!["locked.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_writable_file_in_a_read_only_directory_is_written_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` takes nothing and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("ro");
+        fs::create_dir(&dir).unwrap();
+        let f = dir.join("doc.txt");
+        fs::write(&f, b"old").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let wrote = LocalHost::new().write_file(&f, b"new");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        wrote.unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"new");
+        assert_eq!(names_in(&dir), vec!["doc.txt"]);
     }
 }

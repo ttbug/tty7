@@ -279,7 +279,8 @@ fn steals_a_control_code(chord: &str) -> bool {
 
 /// The bindings allowed to sit on a control code anyway.
 ///
-/// `EditorSave` stays on Ctrl+S because its handler in `app.rs` calls
+/// `EditorSave` stays on Ctrl+S — and `EditorGoToLine` on Ctrl+G, as in
+/// every other code editor — because its handler in `app.rs` calls
 /// `cx.propagate()` whenever the editor does not have focus, so the keystroke
 /// reaches the terminal as XOFF instead of dying at the window. Ctrl+V is the
 /// paste chord every Windows and Linux desktop trains its users on; tty7
@@ -290,7 +291,8 @@ fn steals_a_control_code(chord: &str) -> bool {
 /// Anything else added here needs a fall-through of its own; a binding that
 /// simply swallows the byte does not belong on this list.
 fn control_code_binding_allowed(action: &str, chord: &str) -> bool {
-    action == "EditorSave" || (cfg!(not(target_os = "macos")) && chord == "ctrl-v")
+    matches!(action, "EditorSave" | "EditorGoToLine")
+        || (cfg!(not(target_os = "macos")) && chord == "ctrl-v")
 }
 
 fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
@@ -441,6 +443,14 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             "TogglePalette",
             per_platform("secondary-p", "secondary-shift-p"),
         ),
+        // VS Code's ⌘P, which here is already Search Everywhere. ⌘O instead:
+        // it is "Open…" in every Mac app, and nothing in the table or the
+        // terminal holds it. Off macOS the obvious chords are gone — Ctrl+P
+        // and Ctrl+O are bytes the shell is owed, Ctrl+Shift+P is Search
+        // Everywhere and Ctrl+Shift+O the workspace switcher — so it ships
+        // unbound there, like `NewWindow`, rather than on a chord nobody would
+        // guess. The Files tab is a Tab press away inside the search either way.
+        ("QuickOpenFile", per_platform("secondary-o", "")),
         (
             "ReopenClosedTab",
             per_platform("secondary-shift-t", "alt-shift-t"),
@@ -578,6 +588,10 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ShowRightPanelChanges", ""),
         ("ShowRightPanelGitHub", ""),
         ("EditorSave", "secondary-s"),
+        ("EditorSaveAs", "secondary-shift-s"),
+        ("EditorGoToLine", "ctrl-g"),
+        // Unbound: ⌘N is New Window, and the editor's header has a + for it.
+        ("EditorNewFile", ""),
         ("OpenSshProfiles", ""),
         ("RestartSshSession", "secondary-shift-r"),
         ("Quit", per_platform("secondary-q", "secondary-shift-q")),
@@ -856,6 +870,18 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::KeybindInsertNewline).to_string(),
         ),
         "EditorSave" => (CommandGroup::Terminal, t(L10nKey::Save).to_string()),
+        "EditorSaveAs" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorSaveAsAction).to_string(),
+        ),
+        "EditorGoToLine" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGoToLineAction).to_string(),
+        ),
+        "EditorNewFile" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorNewFile).to_string(),
+        ),
         "OpenSshProfiles" => (
             CommandGroup::Ssh,
             t(L10nKey::CmdSshManageProfiles).to_string(),
@@ -892,6 +918,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Application,
             t(L10nKey::AppMenuSearchEverywhere).to_string(),
         ),
+        "QuickOpenFile" => (CommandGroup::View, t(L10nKey::CmdGoToFile).to_string()),
         "NewWindow" => (
             CommandGroup::Application,
             t(L10nKey::CmdNewWindow).to_string(),
@@ -1360,13 +1387,26 @@ pub(crate) fn key_tokens(spec: &str) -> Vec<String> {
         }
         break;
     }
+    // macOS names modifiers in one fixed order — ⌃ ⌥ ⇧ ⌘ — whatever order a
+    // binding was written in; `secondary-shift-o` read `⌘ ⇧ O` here while the
+    // menu bar said `⇧⌘O` for the same key.
+    #[cfg(target_os = "macos")]
+    tokens.sort_by_key(|glyph| {
+        ["fn", "⌃", "⌥", "⇧", "⌘"]
+            .iter()
+            .position(|g| g == glyph)
+            .unwrap_or(usize::MAX)
+    });
     tokens.push(key_glyph(rest));
     tokens
 }
 
 fn key_glyph(key: &str) -> String {
     match key {
-        "enter" | "return" => "⏎".into(),
+        // The glyph every hint in the app already draws for Return; this one
+        // alone said `⏎`, so the same key looked different in a row's
+        // shortcut and in the footer under it.
+        "enter" | "return" => "↵".into(),
         "tab" => "⇥".into(),
         "space" => "Space".into(),
         "escape" | "esc" => "⎋".into(),
@@ -1474,6 +1514,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DecreaseFontSize" => KeyBinding::new(keystroke, DecreaseFontSize, None),
         "ResetFontSize" => KeyBinding::new(keystroke, ResetFontSize, None),
         "TogglePalette" => KeyBinding::new(keystroke, TogglePalette, None),
+        "QuickOpenFile" => KeyBinding::new(keystroke, QuickOpenFile, None),
         "ReopenClosedTab" => KeyBinding::new(keystroke, ReopenClosedTab, None),
         "ToggleMaximizePane" => KeyBinding::new(keystroke, ToggleMaximizePane, None),
         "ToggleFullscreen" => KeyBinding::new(keystroke, ToggleFullscreen, None),
@@ -1529,6 +1570,9 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleDocumentPreview" => KeyBinding::new(keystroke, ToggleDocumentPreview, None),
         "ToggleDocumentWrap" => KeyBinding::new(keystroke, ToggleDocumentWrap, None),
         "EditorSave" => KeyBinding::new(keystroke, EditorSave, None),
+        "EditorSaveAs" => KeyBinding::new(keystroke, EditorSaveAs, None),
+        "EditorGoToLine" => KeyBinding::new(keystroke, EditorGoToLine, None),
+        "EditorNewFile" => KeyBinding::new(keystroke, EditorNewFile, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
         "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
@@ -1720,8 +1764,11 @@ mod tests {
     #[test]
     fn key_tokens_maps_modifiers_to_glyphs() {
         assert_eq!(key_tokens("secondary-t"), vec![SECONDARY, "T"]);
+        #[cfg(target_os = "macos")]
+        assert_eq!(key_tokens("secondary-shift-d"), vec![SHIFT, SECONDARY, "D"]);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(key_tokens("secondary-shift-d"), vec![SECONDARY, SHIFT, "D"]);
-        assert_eq!(key_tokens("secondary-enter"), vec![SECONDARY, "⏎"]);
+        assert_eq!(key_tokens("secondary-enter"), vec![SECONDARY, "↵"]);
     }
 
     #[test]
@@ -1820,7 +1867,7 @@ mod tests {
                 "{key} does not reach InsertNewline in a terminal"
             );
         }
-        assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "⏎"]);
+        assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "↵"]);
     }
 
     #[test]
@@ -2175,6 +2222,7 @@ mod tests {
         );
         assert!(!control_code_binding_allowed("PasteText", "ctrl-d"));
         assert!(control_code_binding_allowed("EditorSave", "secondary-s"));
+        assert!(control_code_binding_allowed("EditorGoToLine", "ctrl-g"));
     }
 
     #[test]

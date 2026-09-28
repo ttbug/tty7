@@ -91,11 +91,6 @@ pub(crate) struct GitHubPanelState {
     pub(crate) remotes: HashMap<RepoKey, RemoteLookup>,
     /// The remote the user picked per repository, by remote name.
     pub(crate) remote_pick: HashMap<RepoKey, String>,
-    /// Each checked-out branch's upstream (`origin/feat/x`, or `None` for a
-    /// branch never pushed), for the Info tab's link. Keyed by branch, so a
-    /// checkout of another branch asks again.
-    pub(crate) upstreams: HashMap<(RepoKey, String), Option<String>>,
-    pub(crate) upstream_lookups: std::collections::HashSet<(RepoKey, String)>,
     pub(crate) kind: Kind,
     pub(crate) state: StateFilter,
     pub(crate) label: Option<String>,
@@ -408,7 +403,6 @@ impl Tty7App {
         if let Some(repo) = repo {
             self.github.remotes.remove(&repo);
         }
-        self.github.upstreams.clear();
         for entry in self.github.lists.values_mut() {
             entry.error = None;
             entry.fetched = None;
@@ -453,68 +447,6 @@ impl Tty7App {
     pub(crate) fn github_close_detail(&mut self, cx: &mut Context<Self>) {
         self.github.open = None;
         cx.notify();
-    }
-
-    /// The GitHub page for the active pane's checkout, for the Info tab: the
-    /// branch on the remote it tracks, or the repository when it was never
-    /// pushed. `None` until the lookups land, and for a tree with no GitHub
-    /// remote.
-    pub(crate) fn github_info_link(
-        &mut self,
-        branch: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<(String, String)> {
-        let GhTarget::Ready {
-            repo,
-            remotes,
-            chosen,
-        } = self.github_target(window, cx)
-        else {
-            return None;
-        };
-        let key = (repo.clone(), branch.to_string());
-        let upstream = match self.github.upstreams.get(&key) {
-            Some(upstream) => upstream.clone(),
-            None => {
-                self.github_load_upstream(key, cx);
-                None
-            }
-        };
-        let (slug, url) =
-            tty7_core::core::github::remote::checkout_url(&remotes, &chosen, upstream.as_deref());
-        Some((slug.full(), url))
-    }
-
-    fn github_load_upstream(&mut self, key: (RepoKey, String), cx: &mut Context<Self>) {
-        if !self.github.upstream_lookups.insert(key.clone()) {
-            return;
-        }
-        let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, key.0.host) else {
-            return;
-        };
-        let root = key.0.root.clone();
-        crate::ui::host_ops::HostOps::run(
-            host,
-            cx,
-            move |h| {
-                tty7_core::core::git::git(
-                    h,
-                    &root,
-                    &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                )
-            },
-            move |this, out, cx| {
-                this.github.upstream_lookups.remove(&key);
-                let upstream = out
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                this.github.upstreams.insert(key, upstream);
-                cx.notify();
-            },
-        );
     }
 }
 

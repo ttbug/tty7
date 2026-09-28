@@ -119,7 +119,10 @@ impl Tty7App {
                         p.busy = false;
                     }
                     window.push_notification(
-                        t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]),
+                        crate::ui::host_ops::failure(
+                            t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]),
+                            &e,
+                        ),
                         cx,
                     );
                     cx.notify();
@@ -170,7 +173,7 @@ impl Tty7App {
                                 div()
                                     .truncate()
                                     .text_size(rems(META_MONO))
-                                    .font_family("monospace")
+                                    .font_family(cx.theme().mono_font_family.clone())
                                     .text_color(muted)
                                     .child(preview),
                             ),

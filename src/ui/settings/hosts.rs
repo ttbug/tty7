@@ -419,6 +419,11 @@ impl Tty7App {
             (false, None) => (t(L10nKey::SettingsNewHost).to_string(), String::new()),
         };
         let blank_title = editing && p.is_none() && title == t(L10nKey::SettingsNewHost);
+        // A host saved under its own address is titled with that address, and
+        // a second line saying it again is noise — the rule the New Tab menu
+        // already keeps. While editing, the line is the form's live preview
+        // and stays.
+        let echo = !editing && address == title;
         let (meta, meta_color) = if dirty {
             (t(L10nKey::SettingsUnsaved).to_string(), tk.warn_text)
         } else if live {
@@ -463,15 +468,17 @@ impl Tty7App {
                             .text_color(if blank_title { tk.k4 } else { tk.fg })
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .font_family(Tk::mono(cx))
-                            .text_size(fs(11.))
-                            .line_height(px(15.))
-                            .text_color(tk.k45)
-                            .truncate()
-                            .child(address),
-                    ),
+                    .when(!echo, |col| {
+                        col.child(
+                            div()
+                                .font_family(Tk::mono(cx))
+                                .text_size(fs(11.))
+                                .line_height(px(15.))
+                                .text_color(tk.k45)
+                                .truncate()
+                                .child(address),
+                        )
+                    }),
             )
             .child(
                 div()

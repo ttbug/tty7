@@ -318,6 +318,11 @@ impl RenderOnce for Btn {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tk = Tk::of(cx);
         let kind = self.kind;
+        // A primary with nothing to do yet — disabled, or dimmed with nothing
+        // to save — falls to the faint fill with secondary text, the way v4's
+        // Commit button and the dialogs' Create do. Faded to half opacity it
+        // stayed a black button that still looked like the thing to press.
+        let resting_primary = kind == BtnKind::Primary && (self.disabled || self.dimmed);
         let base = h_flex()
             .id(self.id)
             .flex_shrink_0()
@@ -342,11 +347,14 @@ impl RenderOnce for Btn {
                 .h(px(26.))
                 .px(px(12.))
                 .rounded(px(6.))
-                .bg(tk.fg)
+                .bg(if resting_primary { tk.k05 } else { tk.fg })
                 .text_size(self.size.unwrap_or(fs(12.5)))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(tk.page)
-                .when(!self.disabled, |b| b.hover(|s| s.opacity(0.88))),
+                .text_color(if resting_primary { tk.k45 } else { tk.page })
+                .when(!resting_primary, |b| b.hover(|s| s.opacity(0.88)))
+                .when(resting_primary && !self.disabled, |b| {
+                    b.hover(move |s| s.bg(tk.k08))
+                }),
             BtnKind::Link | BtnKind::Danger => base
                 .text_size(self.size.unwrap_or(fs(12.)))
                 .text_color(if kind == BtnKind::Danger {
@@ -364,8 +372,9 @@ impl RenderOnce for Btn {
                     })
                 }),
         };
-        el.when(self.disabled, |b| b.opacity(0.45))
-            .when(self.dimmed && !self.disabled, |b| b.opacity(0.55))
+        let fades = kind != BtnKind::Primary;
+        el.when(fades && self.disabled, |b| b.opacity(0.45))
+            .when(fades && self.dimmed && !self.disabled, |b| b.opacity(0.55))
             .when_some(self.icon, |b, path| {
                 b.child(Icon::empty().path(path).size(px(10.)).text_color(tk.k6))
             })
@@ -409,6 +418,29 @@ pub(crate) fn search_glass(size: f32, tk: &Tk) -> Icon {
         .text_color(tk.k35)
 }
 
+/// A hairline: one device pixel. The design draws field edges at half a
+/// point, which is exactly one pixel on a Retina panel — and on a 1x display
+/// half a pixel at 15% ink is anti-aliased to nothing, so the shell and proxy
+/// fields read as loose monospace text beside the boxed dropdowns.
+///
+/// Read from the scale the settings window last rendered at: the page's
+/// controls are built from `cx` alone, and threading a `Window` through every
+/// row to reach two fields would be a lot of signature for one number. A
+/// thread-local rather than a global, because setting a global from `render`
+/// queues an observer effect on every frame.
+pub(crate) fn hairline() -> f32 {
+    (1. / SCALE.with(std::cell::Cell::get)).max(0.5)
+}
+
+/// Record the scale the page is being drawn at, once per frame.
+pub(crate) fn note_scale(window: &Window) {
+    SCALE.with(|s| s.set(window.scale_factor().max(1.)));
+}
+
+thread_local! {
+    static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(2.) };
+}
+
 /// A search field with a hairline ring, for filtering a list on the page.
 pub(crate) fn search_field(input: &gpui::Entity<InputState>, tk: &Tk) -> Div {
     h_flex()
@@ -417,14 +449,19 @@ pub(crate) fn search_field(input: &gpui::Entity<InputState>, tk: &Tk) -> Div {
         .gap(px(6.))
         .items_center()
         .rounded(px(6.))
-        .shadow(vec![ring(tk.k15, 0.5, true)])
+        .shadow(vec![ring(tk.k15, hairline(), true)])
         .child(search_glass(10., tk))
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(fs(12.5))
-                .child(Input::new(input).appearance(false).px_0().py_0().h(px(24.))),
+            // On the input, not around it: `Input` sets its own `text_sm`
+            // and only a size given to it directly outranks that.
+            div().flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .px_0()
+                    .py_0()
+                    .h(px(24.))
+                    .text_size(fs(12.5)),
+            ),
         )
 }
 
@@ -452,17 +489,23 @@ pub(crate) fn text_field(
         .rounded(px(6.))
         .shadow(vec![ring(
             ring_color,
-            if focused || invalid { 1. } else { 0.5 },
+            if focused || invalid { 1. } else { hairline() },
             true,
         )])
         .font_family(Tk::mono(cx))
-        .text_size(fs(12.))
         .text_color(tk.fg)
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(Input::new(input).appearance(false).px_0().py_0().h(px(24.))),
+            div().flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .px_0()
+                    .py_0()
+                    .h(px(24.))
+                    // The input's own `text_sm` beat the 12px set on this
+                    // box, so the value stood a size above every dropdown
+                    // label in the same column.
+                    .text_size(fs(12.)),
+            ),
         )
 }
 
@@ -489,8 +532,16 @@ pub(crate) fn section_head(title: &str, desc: Option<String>, tk: &Tk) -> Div {
         })
 }
 
+/// The width of a control in the page's right-hand column — dropdown or text
+/// field alike. The column used to size each dropdown to its value (anything
+/// from 148 to 260) beside fields fixed at 180, so its left edge zig-zagged
+/// down the page. One width, and a value too long for it elides. Only fields
+/// that hold a path or a command line are wider, because those are unreadable
+/// cut short.
+pub(crate) const CONTROL_W: f32 = 180.;
+
 /// The trigger of a dropdown: a raised button with the current value, an
-/// optional mark before it, and a chevron.
+/// optional mark before it, and a chevron, [`CONTROL_W`] wide.
 pub(crate) fn select_trigger(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -501,8 +552,8 @@ pub(crate) fn select_trigger(
     h_flex()
         .id(id)
         .h(px(26.))
-        .min_w(px(148.))
-        .max_w(px(260.))
+        .w(px(CONTROL_W))
+        .flex_shrink_0()
         .pl(px(if leading.is_some() { 8. } else { 10. }))
         .pr(px(7.))
         .gap(px(8.))

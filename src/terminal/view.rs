@@ -3589,9 +3589,12 @@ impl TerminalView {
         let path = path.display().to_string();
         let reason = reason.to_string();
         window.push_notification(
-            crate::ui::i18n::t_fmt(
-                crate::ui::i18n::L10nKey::LinkFileOpenFailed,
-                &[("path", path.as_str()), ("error", reason.as_str())],
+            crate::ui::host_ops::failure(
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::LinkFileOpenFailed,
+                    &[("path", path.as_str()), ("error", reason.as_str())],
+                ),
+                &reason,
             ),
             cx,
         );

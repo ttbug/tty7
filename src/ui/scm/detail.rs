@@ -723,7 +723,6 @@ impl Tty7App {
             .w_full()
             .min_w_0()
             .px(px(ROW_INSET))
-            .py(px(3.))
             .rounded(PILL_RADIUS)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))

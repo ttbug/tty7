@@ -8,6 +8,7 @@ use gpui::{App, SharedString};
 
 use super::SearchTab;
 use super::command::{CommandGroup, CommandKind, Item};
+use super::files::{FileList, Files};
 use super::score::{frecency_bonus, item_score};
 use crate::core::config::Config;
 use crate::core::ssh_profile::parse_quick_connect;
@@ -57,6 +58,12 @@ pub(crate) trait Source {
     /// typed. Empty is fine: the tab then shows only once a query finds it.
     fn highlights(&self, cx: &App) -> Vec<Item>;
 
+    /// Whether the All tab shows this tab before anything is typed. Every tab
+    /// with anything in it does, unless what it would show is only filler.
+    fn on_the_empty_all_tab(&self) -> bool {
+        true
+    }
+
     /// Rows answering `query`, best first, each with the score that put it
     /// there. The All tab compares these scores across tabs, so every source
     /// scores with [`item_score`] and only nudges it.
@@ -80,6 +87,9 @@ pub(crate) struct Catalog {
     pub sessions: Vec<Item>,
     /// How many of `sessions` lead the list because they ran here.
     pub sessions_here: usize,
+    /// The project's files, from the window's last walk of it. A fresh walk
+    /// may land after the search opens (`Tty7App::refresh_file_index`).
+    pub files: FileList,
 }
 
 impl Catalog {
@@ -98,6 +108,7 @@ impl Catalog {
             hosts,
             sessions: Vec::new(),
             sessions_here: 0,
+            files: FileList::default(),
         }
     }
 
@@ -111,6 +122,7 @@ impl Catalog {
                 here: self.sessions_here,
             })),
             SearchTab::Hosts => Some(Box::new(Hosts(&self.hosts))),
+            SearchTab::Files => Some(Box::new(Files(&self.files))),
         }
     }
 
@@ -138,7 +150,7 @@ impl Catalog {
         if query.is_empty() {
             // Terminals first: before anything is typed the likeliest thing
             // wanted is the tab you were just in.
-            let mut sources: Vec<_> = tabs.collect();
+            let mut sources: Vec<_> = tabs.filter(|s| s.on_the_empty_all_tab()).collect();
             sources.sort_by_key(|s| s.tab() != SearchTab::Terminals);
             return sources
                 .into_iter()
@@ -154,7 +166,7 @@ impl Catalog {
         let mut found: Vec<(i32, Section)> = tabs
             .filter_map(|s| {
                 let hits = s.search(query, cx);
-                let best = hits.first()?.0;
+                let best = hits.first()?.0 - section_bias(s.tab());
                 let hidden = hits.len().saturating_sub(ALL_TAB_ROWS);
                 let mut rows: Vec<Row> = hits
                     .into_iter()
@@ -178,6 +190,25 @@ impl Catalog {
             .collect();
         found.sort_by_key(|(best, _)| std::cmp::Reverse(*best));
         found.into_iter().map(|(_, section)| section).collect()
+    }
+}
+
+/// How far a past session's best row stands back when the All tab orders its
+/// sections — a little more than a prefix match is worth.
+///
+/// A session is titled with the first thing someone typed to an agent, and
+/// people start those with the words the commands are named after:
+/// `Worktree cleanup` took the prefix bonus from `New Worktree Tab…`, so
+/// `worktree` then Return resumed an agent instead of opening the dialog —
+/// the heaviest thing on the page picked by a two-word guess. A session
+/// still leads when it is plainly the better answer; the Sessions tab itself
+/// ranks untouched.
+const SESSION_SECTION_BIAS: i32 = 64;
+
+fn section_bias(tab: SearchTab) -> i32 {
+    match tab {
+        SearchTab::Sessions => SESSION_SECTION_BIAS,
+        _ => 0,
     }
 }
 
@@ -609,7 +640,7 @@ mod tests {
 
             let sections = catalog.sections(SearchTab::All, "split", cx);
             assert_eq!(sections.len(), 1);
-            assert_eq!(sections[0].title.as_deref(), Some("Actions"));
+            assert_eq!(sections[0].title.as_deref(), Some("Commands"));
         });
     }
 
@@ -681,6 +712,66 @@ mod tests {
         });
     }
 
+    fn with_files(paths: &[&str]) -> Catalog {
+        let mut catalog = Catalog::new(
+            vec![Item::new("Split Right", CommandKind::SplitRight)],
+            vec![terminal("main shell", "here")],
+            Vec::new(),
+        );
+        let root = std::path::PathBuf::from("/repo");
+        let files = paths.iter().map(|p| root.join(p)).collect();
+        catalog.files = FileList::Ready(std::sync::Arc::new(super::super::files::build_index(
+            &[root],
+            files,
+            false,
+        )));
+        catalog
+    }
+
+    /// Files stay off the All tab, typed or not: the right panel's Files tab
+    /// searches the project, and Go to File has the search to itself.
+    #[gpui::test]
+    fn files_are_only_on_their_own_tab(cx: &mut TestAppContext) {
+        with_config(cx);
+        let catalog = with_files(&["src/main.rs", "src/ui/app.rs"]);
+        cx.update(|cx| {
+            for query in ["", "ui/app"] {
+                let sections = catalog.sections(SearchTab::All, query, cx);
+                let headers: Vec<_> = sections.iter().filter_map(|s| s.title.clone()).collect();
+                assert!(
+                    !headers.iter().any(|h| h == "Files"),
+                    "no files on the All tab for {query:?}: {headers:?}"
+                );
+            }
+
+            let own = catalog.sections(SearchTab::Files, "", cx);
+            assert_eq!(own[0].rows.len(), 2);
+            let found = catalog.sections(SearchTab::Files, "ui/app", cx);
+            assert_eq!(row_titles(&found[0]), vec!["app.rs"]);
+        });
+    }
+
+    /// `name:line:column` opens the file there, and says so on the row.
+    #[gpui::test]
+    fn a_file_query_with_a_line_opens_on_that_line(cx: &mut TestAppContext) {
+        with_config(cx);
+        let catalog = with_files(&["src/main.rs"]);
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::Files, "main.rs:120:4", cx);
+            let item = sections[0].rows[0].item().expect("a file row");
+            assert_eq!(
+                item.kind,
+                CommandKind::OpenFile {
+                    path: "/repo/src/main.rs".into(),
+                    line: Some(120),
+                    column: Some(4),
+                }
+            );
+            assert_eq!(item.subtitle.as_deref(), Some("src"));
+            assert_eq!(item.note.as_deref(), Some("line 120"));
+        });
+    }
+
     fn session(title: &str, section: &str) -> Item {
         Item::new(
             title,
@@ -691,6 +782,26 @@ mod tests {
             },
         )
         .in_section(section.to_string())
+    }
+
+    #[gpui::test]
+    fn a_session_named_like_a_command_does_not_take_return_from_it(cx: &mut TestAppContext) {
+        with_config(cx);
+        let mut catalog = Catalog::new(
+            vec![Item::new("New Worktree Tab…", CommandKind::NewWorktreeTab)],
+            Vec::new(),
+            Vec::new(),
+        );
+        catalog.sessions = vec![session("Worktree cleanup", "Recent")];
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::All, "worktree", cx);
+            let headers: Vec<_> = sections.iter().filter_map(|s| s.title.clone()).collect();
+            assert_eq!(headers, vec!["Commands", "Sessions"]);
+
+            // Typed out, the session is the answer, and it leads.
+            let sections = catalog.sections(SearchTab::All, "worktree cleanup", cx);
+            assert_eq!(sections[0].title.as_deref(), Some("Sessions"));
+        });
     }
 
     /// Before anything is typed, the All tab offers to pick up where you left

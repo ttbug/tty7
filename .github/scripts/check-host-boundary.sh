@@ -53,6 +53,10 @@ src/ui/presets.rs|std::fs::
 src/ui/presets.rs|.is_absolute()
 src/ui/app.rs|std::fs::create_dir_all
 
+# The editor's record of which files each tab had open is app state under the
+# local config dir, like the themes above — not a file in any workspace.
+src/ui/editor_session.rs|std::fs::read
+
 # Reading a private key off *this* machine to hash it into a keychain account
 # (`core::keychain`). The key is the client's credential; the far side never
 # sees the file, only the resulting auth.

@@ -107,6 +107,15 @@ pub enum CommandKind {
     OpenThemePicker,
     /// Moves the search to its Hosts tab, where typing an address connects.
     SearchHosts,
+    /// Moves the search to its Files tab — quick open by name.
+    QuickOpenFile,
+    /// A file the Files tab found, opened in the editor — on `line` and
+    /// `column` when the query named them (`main.rs:120:5`).
+    OpenFile {
+        path: std::path::PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
     /// Connect with a typed `ssh` command line (`-p`, `-J`, an alias…).
     OpenSshConnect(String),
     SetTheme(usize),
@@ -254,11 +263,13 @@ impl CommandKind {
             SendGitDiffToAgent => "agent-send-diff",
             OpenThemePicker => "change-theme",
             SearchHosts => "ssh-add-connection",
+            QuickOpenFile => "go-to-file",
             OpenSshProfiles => "ssh-manage-profiles",
             SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
             | SetTheme(_)
             | GoToTab { .. }
+            | OpenFile { .. }
             | ResumeSession { .. }
             | ForkSession { .. }
             | CopySessionId(_)
@@ -377,6 +388,7 @@ impl CommandKind {
             ScmCreateBranch => "ScmCreateBranch",
             OpenBranchPicker => "ScmCheckoutBranch",
             ToggleDiffViewMode => "ToggleDiffViewMode",
+            QuickOpenFile => "QuickOpenFile",
             CopyText
             | CutText
             | PasteText
@@ -393,6 +405,7 @@ impl CommandKind {
             | OpenSshConnect(_)
             | SetTheme(_)
             | GoToTab { .. }
+            | OpenFile { .. }
             | ResumeSession { .. }
             | ForkSession { .. }
             | CopySessionId(_)
@@ -628,6 +641,7 @@ impl Item {
                 ToggleRightPanel,
             ),
             Item::localized(L10nKey::CmdShowCodePanel, ToggleCodePanel),
+            Item::localized(L10nKey::CmdGoToFile, QuickOpenFile),
             Item::localized(
                 if document_filled {
                     L10nKey::CmdDocumentDock

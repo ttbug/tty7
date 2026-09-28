@@ -884,15 +884,14 @@ impl Tty7App {
         if !code.visible {
             return None;
         }
-        let open = code.active_file()?;
         // The file's host, not the window's. They are the same for everything
         // the tree can open, but a buffer read over SFTP carries a path from
         // another machine, and pairing it with this one's host would resolve
         // it against a local repository that merely shares the path.
-        let host = open.host.id();
+        let (host, path) = self.editor_active_location()?;
         let root = cx
             .try_global::<crate::terminal::git_status::GitStatusCache>()?
-            .repo_root_for(host, open.path.parent()?)?;
+            .repo_root_for(host, path.parent()?)?;
         Some((host, root.to_path_buf()))
     }
 
@@ -1115,11 +1114,13 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         use crate::ui::i18n::{L10nKey, t_fmt};
-        let text = t_fmt(
-            L10nKey::HostOpsError,
-            &[("context", err.op), ("error", &err.message)],
-        );
-        gpui_component::WindowExt::push_notification(window, text, cx);
+        // A title that says which command failed, over git's own reason. As one
+        // bare line — `push: fatal: 'origin' does not appear to be a git
+        // repository` — it read as a stderr dump that had escaped onto the
+        // screen, with nothing to mark it as a failure at all.
+        let note = gpui_component::notification::Notification::error(git_reason(&err.message))
+            .title(t_fmt(L10nKey::GitOpFailed, &[("op", err.op)]));
+        gpui_component::WindowExt::push_notification(window, note, cx);
         if err.kind == GitOpErrorKind::AuthRequired {
             log::info!(
                 "git {} needs a credential; re-run in a pane: {}",
@@ -1130,6 +1131,21 @@ impl Tty7App {
     }
 }
 
+/// Git's one-line reason, without the `fatal:` / `error:` severity prefix the
+/// toast's icon and title already carry, and starting as a sentence.
+fn git_reason(message: &str) -> String {
+    let trimmed = message.trim();
+    let rest = ["fatal:", "error:"]
+        .iter()
+        .find_map(|p| trimmed.strip_prefix(p))
+        .unwrap_or(trimmed)
+        .trim_start();
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => trimmed.to_string(),
+    }
+}
 /// Ask a host where a repository's `.git` is, and what to watch inside it.
 ///
 /// Two round trips: `rev-parse` for the two directories, then one `read_dir`
@@ -1205,6 +1221,17 @@ mod tests {
 
     fn root() -> PathBuf {
         PathBuf::from("/repo")
+    }
+
+    #[test]
+    fn a_git_reason_drops_its_severity_prefix_and_reads_as_a_sentence() {
+        assert_eq!(
+            git_reason("fatal: 'origin' does not appear to be a git repository"),
+            "'origin' does not appear to be a git repository"
+        );
+        assert_eq!(git_reason("error: failed to push"), "Failed to push");
+        assert_eq!(git_reason("nothing to commit"), "Nothing to commit");
+        assert_eq!(git_reason("fatal:"), "fatal:");
     }
 
     #[test]

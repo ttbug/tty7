@@ -1,5 +1,6 @@
-//! The right panel's Search tab: find in files across the active tab's
-//! project, on whichever machine that project lives.
+//! Find in files for the right panel's Files tab: the "In file contents"
+//! half of its search, across the active tab's project, on whichever machine
+//! that project lives.
 //!
 //! The roots are the Files tab's own ([`Tty7App::project_roots`]), and the
 //! search runs through [`Host::search_content`](tty7_core::host::Host), so a
@@ -16,8 +17,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, HighlightStyle, MouseButton, ScrollHandle, SharedString,
-    StyledText, Subscription, Window, div, px, rems,
+    AnyElement, App, Context, Entity, HighlightStyle, MouseButton, SharedString, StyledText,
+    Subscription, Window, div, px, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, InputState};
@@ -26,21 +27,17 @@ use gpui_component::{
 };
 use tty7_core::host::{ContentHit, ContentLimits, ContentQuery};
 
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::Tty7App;
 use crate::ui::host_ops::HostOps;
 use crate::ui::host_registry::HostRegistry;
-use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT_MONO};
-use crate::ui::scrollbar::with_vertical_scrollbar;
 
 use model::{FileGroup, Outcome, SearchKey, SearchRun};
 
 /// How long typing has to pause before the search goes out. A little longer
 /// than the name search's: every keystroke that does get through reads files.
 const DEBOUNCE: Duration = Duration::from_millis(250);
-
-/// The pause between the search well and the results — the Files tab's.
-const SEARCH_GAP: f32 = 10.;
 
 const FILE_ROW_H: f32 = 26.;
 const HIT_ROW_H: f32 = 22.;
@@ -50,8 +47,6 @@ const ROW_GAP: f32 = 6.;
 /// Where a hit's excerpt starts: under its file's name, past the chevron and
 /// the icon.
 const HIT_LEAD: f32 = ROW_INSET + CHEVRON_W + ROW_GAP + ROW_GLYPH + ROW_GAP;
-
-const PAD_BOTTOM: f32 = 16.;
 
 pub(crate) struct PanelSearchState {
     pub(crate) input: Entity<InputState>,
@@ -65,18 +60,21 @@ pub(crate) struct PanelSearchState {
     /// The field takes focus on the next frame — set whenever the tab is
     /// brought forward, which happens where there is no `Window` to focus with.
     pub(crate) focus_pending: bool,
-    scroll: ScrollHandle,
     _input_sub: Subscription,
 }
 
 impl PanelSearchState {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
-        let input = cx
-            .new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::PanelSearchPlaceholder)));
-        let sub = cx.subscribe_in(&input, window, |app, _input, ev, _window, cx| match ev {
-            InputEvent::Change => cx.notify(),
-            InputEvent::PressEnter { .. } => app.panel_search_refresh(cx),
-            _ => {}
+    /// The search over `input` — the Files tab's field, which it shares
+    /// with the name search there.
+    pub(crate) fn new(
+        input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Tty7App>,
+    ) -> Self {
+        let sub = cx.subscribe_in(&input, window, |app, _input, ev, _window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                app.panel_search_refresh(cx)
+            }
         });
         PanelSearchState {
             input,
@@ -86,7 +84,6 @@ impl PanelSearchState {
             run: SearchRun::default(),
             collapsed: HashSet::new(),
             focus_pending: false,
-            scroll: ScrollHandle::new(),
             _input_sub: sub,
         }
     }
@@ -273,31 +270,41 @@ impl Tty7App {
             .is_some_and(|remote| remote.kind == RemoteKind::NativeSsh)
     }
 
-    pub(crate) fn render_panel_search(
+    /// The Files tab's "In file contents" section, for what its field holds:
+    /// a heading with the tally, then either the hits grouped by file or the
+    /// one line that says why there are none. Empty while nothing is typed —
+    /// the tree is showing then.
+    pub(crate) fn panel_search_section(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if std::mem::take(&mut self.panel_search.focus_pending) {
-            self.panel_search
-                .input
-                .update(cx, |input, cx| input.focus(window, cx));
-        }
-        let title = self.panel_title(t(L10nKey::PanelSearchTitle), None, None, window, cx);
-        let toggles = self.panel_search_toggles(cx);
-        let search = self.panel_search_with(&self.panel_search.input.clone(), Some(toggles), cx);
+    ) -> Vec<AnyElement> {
         let body = self.panel_search_body(window, cx);
-        let content = self.panel_search_content(body, cx);
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(title)
-            .child(div().flex_none().pb(px(SEARCH_GAP)).child(search))
-            .child(content)
-            .into_any_element()
+        if matches!(body, Body::Idle(_)) {
+            return Vec::new();
+        }
+        let tally = self.panel_search_tally(&body);
+        let mut rows = vec![crate::ui::file_tree::search_section_heading(
+            t(L10nKey::PanelSearchInContents),
+            tally,
+            cx,
+        )];
+        rows.extend(self.panel_search_rows(body, cx));
+        rows
     }
 
-    fn panel_search_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The heading's trailing count: hits, once there are some to count.
+    fn panel_search_tally(&self, body: &Body) -> Option<String> {
+        let landed = self.panel_search.run.landed()?;
+        match (body, &landed.outcome) {
+            (Body::Results, Outcome::Found(_)) => {
+                Some(model::hit_count(&landed.groups).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn panel_search_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = &self.panel_search;
         let muted = cx.theme().muted_foreground;
         let toggle = |id: &'static str,
@@ -346,7 +353,7 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn panel_search_content(&mut self, body: Body, cx: &mut Context<Self>) -> AnyElement {
+    fn panel_search_rows(&mut self, body: Body, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let danger = cx.theme().danger;
         let note = |text: String, hint: Option<String>, ink: Option<gpui::Hsla>, cx: &App| {
             let muted = cx.theme().muted_foreground;
@@ -415,16 +422,7 @@ impl Tty7App {
             )),
             Body::Results => rows.extend(self.panel_search_results(cx)),
         }
-        let column = v_flex()
-            .id("panel-search-results")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.panel_search.scroll)
-            .px(px(CONTENT_INSET))
-            .pb(px(PAD_BOTTOM))
-            .children(rows);
-        with_vertical_scrollbar("panel-search-scrollbar", column, &self.panel_search.scroll)
+        rows
     }
 
     fn panel_search_results(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -435,33 +433,21 @@ impl Tty7App {
             return Vec::new();
         };
         let muted = cx.theme().muted_foreground;
-        let hits = model::hit_count(&landed.groups);
-        let summary = match self.panel_search.run.running() {
-            true => t(L10nKey::PanelSearchSearching).to_string(),
-            false => t_fmt(
-                L10nKey::PanelSearchSummary,
-                &[
-                    (
-                        "results",
-                        &t_plural(L10nKey::PanelSearchResultCount, hits, &[]),
-                    ),
-                    (
-                        "files",
-                        &t_plural(L10nKey::PanelSearchFileCount, landed.groups.len(), &[]),
-                    ),
-                ],
-            ),
-        };
-        let mut rows: Vec<AnyElement> = vec![
-            div()
-                .flex_none()
-                .px(px(ROW_INSET))
-                .pb(px(4.))
-                .text_size(rems(META))
-                .text_color(muted)
-                .child(summary)
-                .into_any_element(),
-        ];
+        // The heading above carries the tally; the only thing left to say
+        // here is that a newer answer is on its way.
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if self.panel_search.run.running() {
+            rows.push(
+                div()
+                    .flex_none()
+                    .px(px(ROW_INSET))
+                    .pb(px(4.))
+                    .text_size(rems(META))
+                    .text_color(muted)
+                    .child(t(L10nKey::PanelSearchSearching))
+                    .into_any_element(),
+            );
+        }
         for (index, group) in landed.groups.iter().enumerate() {
             let collapsed = self.panel_search.collapsed.contains(&group.path);
             rows.push(self.panel_search_file_row(index, group, collapsed, cx));

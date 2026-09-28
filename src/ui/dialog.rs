@@ -124,6 +124,16 @@ pub(crate) fn label(text: impl IntoElement, cx: &App) -> Div {
         .child(text)
 }
 
+/// The fill of a well on a card: one rung up the card's own ladder.
+///
+/// Not the theme's `muted`. That one is a step off the *window*, and a card
+/// sits on the popover surface, which a dark theme lifts to about the same
+/// value — so in the dark every field on a dialog lost its shape and the
+/// labels floated over nothing.
+pub(crate) fn well_fill(cx: &App) -> Hsla {
+    gpui::rgb(popover_rungs(cx).hover).into()
+}
+
 /// A text field in its well. The input loses its own border and fill — the
 /// well is the shape — and keeps its padding, which is the text's inset.
 pub(crate) fn field(input: Input, cx: &App) -> Div {
@@ -131,7 +141,7 @@ pub(crate) fn field(input: Input, cx: &App) -> Div {
         .items_center()
         .h(px(FIELD_H))
         .rounded(crate::ui::rounding::ROW_RADIUS)
-        .bg(cx.theme().muted)
+        .bg(well_fill(cx))
         .child(
             div()
                 .flex_1()
@@ -156,7 +166,7 @@ pub(crate) fn well(cx: &App) -> Div {
         .px(px(10.))
         .py(px(8.))
         .rounded(crate::ui::rounding::ROW_RADIUS)
-        .bg(cx.theme().muted)
+        .bg(well_fill(cx))
 }
 
 /// A key named in a hint: a small faint cap, never a button outline. The same
@@ -172,11 +182,21 @@ pub(crate) fn keycap(label: impl Into<SharedString>, cx: &App) -> gpui::AnyEleme
         .items_center()
         .justify_center()
         .rounded(px(4.))
-        .bg(theme.muted)
+        .bg(well_fill(cx))
         .text_size(rems(11. / 16.))
         .text_color(theme.muted_foreground)
         .child(label.into())
         .into_any_element()
+}
+
+/// A key combination as one cap per key — `⌘` `T`, never `⌘T` in one. The
+/// way Search Everywhere and the shortcut editor spell a chord; the home page
+/// and the switcher's footer had each packed theirs into a single cap.
+pub(crate) fn chord(tokens: impl IntoIterator<Item = impl Into<SharedString>>, cx: &App) -> Div {
+    h_flex()
+        .flex_shrink_0()
+        .gap(px(3.))
+        .children(tokens.into_iter().map(|t| keycap(t, cx)))
 }
 
 /// What a button is asking for.
@@ -214,7 +234,13 @@ pub(crate) fn button(
     let surface: Hsla = gpui::rgb(rungs.base).into();
     let (fill, hover, ink): (Option<Hsla>, Option<Hsla>, Hsla) = match (tone, enabled) {
         (Tone::Secondary, false) => (None, None, theme.muted_foreground),
-        (_, false) => (Some(theme.muted), None, theme.muted_foreground),
+        // The surface's own next rung, like a well: `muted` is a step off the
+        // window, and on a dark popover it was the card's own colour.
+        (_, false) => (
+            Some(gpui::rgb(rungs.hover).into()),
+            None,
+            theme.muted_foreground,
+        ),
         (Tone::Primary, true) => {
             let fg = theme.foreground;
             (Some(fg), Some(fg.blend(surface.opacity(0.14))), surface)

@@ -143,7 +143,8 @@ impl Tty7App {
                 d.child(kit::popover_below(
                     true,
                     4.,
-                    self.settings_menu_panel(&id, entries, cx).min_w(px(148.)),
+                    self.settings_menu_panel(&id, entries, cx)
+                        .min_w(px(kit::CONTROL_W)),
                 ))
             })
             .into_any_element()
@@ -157,6 +158,12 @@ impl Tty7App {
     ) -> Div {
         let tk = Tk::of(cx);
         let mut panel = kit::menu_panel(&tk);
+        // A choice menu keeps a column for its tick so the labels line up
+        // whichever one is picked. A menu of actions ticks nothing, and the
+        // same empty column left its labels 24px in from a 12px right edge.
+        let ticks = entries
+            .iter()
+            .any(|e| matches!(e, MenuEntry::Item { checked: true, .. }));
         for (i, entry) in entries.into_iter().enumerate() {
             panel = match entry {
                 MenuEntry::Item {
@@ -172,7 +179,8 @@ impl Tty7App {
                         false,
                         &tk,
                     )
-                    .child(kit::check_mark(checked, &tk))
+                    .when(ticks, |r| r.child(kit::check_mark(checked, &tk)))
+                    .when(!ticks, |r| r.pl(px(12.)))
                     .child(
                         div()
                             .flex_1()
@@ -810,11 +818,14 @@ impl Tty7App {
             (t(section.title()).to_string(), None, content)
         };
 
+        // Up in the title-bar band, where the window's own chrome sits, and
+        // not in the page column. Pulled up into that band from the column
+        // with negative margins it landed above the scroll area's clip — the
+        // way back was never drawn — while what was left of its height pushed
+        // the title 16px below every other page's.
         let back = (!searching && section == SettingsSection::Keybindings).then(|| {
             h_flex()
                 .id("settings-back")
-                .mt(px(-20.))
-                .mb(px(-24.))
                 .ml(px(-2.))
                 .gap(px(4.))
                 .items_center()
@@ -861,7 +872,6 @@ impl Tty7App {
                         .w_full()
                         .max_w(px(READING_COLUMN * scale))
                         .gap(px(40.))
-                        .children(back)
                         .child(header)
                         .children(notices)
                         .child(content),
@@ -871,7 +881,14 @@ impl Tty7App {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(div().h(px(TITLE_BAR_HEIGHT)).flex_shrink_0())
+            .child(
+                h_flex()
+                    .h(px(TITLE_BAR_HEIGHT))
+                    .flex_shrink_0()
+                    .items_center()
+                    .px(px(56.))
+                    .children(back),
+            )
             .when_some(self.active_settings(), |pane, s| {
                 pane.child(crate::ui::scrollbar::with_inset_vertical_scrollbar(
                     "settings-content-scrollbar",

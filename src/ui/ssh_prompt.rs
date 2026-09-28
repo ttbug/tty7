@@ -797,10 +797,14 @@ impl Tty7App {
         let line =
             |text: String, ink: gpui::Hsla| div().text_size(rems(META)).text_color(ink).child(text);
         // A host line or a fingerprint, set in mono inside the detail well.
+        // The theme's mono family, not the CSS keyword: gpui resolves
+        // `"monospace"` as a family name, finds none, and falls back to the
+        // UI face — the fingerprint was being checked in proportional type.
+        let mono_family = cx.theme().mono_font_family.clone();
         let mono = |text: String, ink: gpui::Hsla| {
             div()
                 .text_size(rems(META_MONO))
-                .font_family("monospace")
+                .font_family(mono_family.clone())
                 .text_color(ink)
                 .child(text)
         };

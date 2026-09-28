@@ -5,7 +5,8 @@ use std::hash::Hash;
 use gpui::{App, Context, Window};
 use gpui_component::WindowExt as _;
 
-use crate::ui::i18n::{L10nKey, t_fmt};
+use crate::ui::i18n::L10nKey;
+use gpui_component::notification::Notification;
 
 #[allow(unused_imports)]
 pub use tty7_core::host::{
@@ -276,15 +277,40 @@ impl HostOps {
         );
     }
 
+    /// Every context handed here is already a sentence about what failed —
+    /// "Could not delete a.txt" — so it is the toast's title, and the reason
+    /// sits under it. Run together as `{context}: {error}` on one plain line
+    /// the two read as a log entry, with nothing to mark it as a failure.
     pub fn notify_err(window: &mut Window, cx: &mut App, context: &str, err: &std::io::Error) {
         window.push_notification(
-            t_fmt(
-                L10nKey::HostOpsError,
-                &[("context", context), ("error", &explain_io(err))],
-            ),
+            Notification::error(explain_io(err)).title(context.to_string()),
             cx,
         );
     }
+}
+
+/// A failure worded as one sentence — "Could not open a terminal: <why>" —
+/// as an error toast: what failed as the title, why under it.
+///
+/// The templates end in their `{error}`, after a colon or a dash, and some
+/// of them are also shown whole elsewhere (the home screen keeps the start-up
+/// one on screen), so the split is made here on the formatted text rather
+/// than by giving every language a second, error-less copy of each. When the
+/// reason is not at the end the sentence is left whole.
+pub fn failure(sentence: String, error: &impl std::fmt::Display) -> Notification {
+    let reason = error.to_string();
+    match split_reason(&sentence, &reason) {
+        Some(title) if !title.is_empty() => Notification::error(reason).title(title),
+        _ => Notification::error(sentence),
+    }
+}
+
+fn split_reason<'a>(sentence: &'a str, reason: &str) -> Option<&'a str> {
+    if reason.is_empty() {
+        return None;
+    }
+    let head = sentence.trim_end().strip_suffix(reason.trim_end())?;
+    Some(head.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '：' | '—' | '-')))
 }
 
 /// A sentence for the failures someone can act on, and the raw error for the
@@ -579,5 +605,36 @@ mod gpui_tests {
             0,
             "run is view-scoped and must not run against a dead view"
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::split_reason;
+
+    #[test]
+    fn the_reason_comes_off_the_end_with_its_separator() {
+        assert_eq!(
+            split_reason("Could not open a terminal: no pty", "no pty"),
+            Some("Could not open a terminal")
+        );
+        assert_eq!(
+            split_reason("Couldn't forward :3000 — refused", "refused"),
+            Some("Couldn't forward :3000")
+        );
+        assert_eq!(
+            split_reason("无法打开终端：no pty", "no pty"),
+            Some("无法打开终端")
+        );
+        assert_eq!(
+            split_reason("无法转发 :80——refused", "refused"),
+            Some("无法转发 :80")
+        );
+    }
+
+    #[test]
+    fn a_reason_mid_sentence_leaves_it_whole() {
+        assert_eq!(split_reason("x failed: boom, retrying", "boom"), None);
+        assert_eq!(split_reason("anything", ""), None);
     }
 }

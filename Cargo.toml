@@ -77,6 +77,14 @@ tempfile = "3"
 url = "2"
 percent-encoding = "2"
 
+# The code editor's file loading and saving (`ui::editor_text`). `encoding_rs`
+# decodes legacy-encoded text (GB18030, Windows-1252) and writes it back in the
+# same encoding, and `globset` matches `.editorconfig` section globs. Both are
+# already in the tree (via gpui's HTTP stack and its `ignore` walker), so they
+# pin no new code.
+encoding_rs = "0.8.35"
+globset = "0.4.20"
+
 # SSH profile ids in the connection manager UI (`ui::ssh_connect`,
 # `ui::settings`, the command palette). The profiles themselves — and the
 # secret-free `CredentialRef` they carry — live in `tty7-core`, which `Config`

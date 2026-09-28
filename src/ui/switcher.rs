@@ -1936,13 +1936,10 @@ impl Tty7App {
                 t(L10nKey::SwitcherHintOpen).to_string(),
             ));
             hints.push(hint(
-                vec![keycap(
-                    match cfg!(target_os = "macos") {
-                        true => format!("{}↵", crate::ui::keymap::secondary_glyph()),
-                        false => format!("{} ↵", crate::ui::keymap::secondary_glyph()),
-                    },
-                    cx,
-                )],
+                vec![
+                    keycap(crate::ui::keymap::secondary_glyph(), cx),
+                    keycap("↵", cx),
+                ],
                 t(L10nKey::SwitcherHintNewWindow).to_string(),
             ));
         }
@@ -2567,9 +2564,10 @@ impl Tty7App {
                     .gap(px(2.))
                     .text_size(gpui::rems(11.5 / 16.))
                     .text_color(muted)
-                    .when(!row.tabs.is_empty(), |c| {
-                        c.child(row.tabs.len().to_string())
-                    })
+                    // In words, the way the tab column's header says it: a
+                    // bare `1` here sat a few pixels from the slot number after
+                    // the name, and the two read as the same thing twice.
+                    .when(!row.tabs.is_empty(), |c| c.child(tab_count(row.tabs.len())))
                     .children(badge.map(|(label, _here)| {
                         div()
                             .text_size(gpui::rems(11. / 16.))
@@ -2973,10 +2971,7 @@ impl Tty7App {
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child(row.name.clone()),
                 )
-                .child(div().flex_shrink_0().child(match row.tabs.len() {
-                    1 => t(L10nKey::SwitcherTabCountOne).to_string(),
-                    n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
-                })),
+                .child(div().flex_shrink_0().child(tab_count(row.tabs.len()))),
         );
 
         for (nth, i) in hits.iter().enumerate() {
@@ -3428,25 +3423,15 @@ fn step(at: usize, n: usize, forward: bool) -> usize {
     }
 }
 
-/// A key named in a hint: a small faint cap, never a button outline.
-fn keycap(label: impl Into<gpui::SharedString>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    div()
-        .flex_shrink_0()
-        .min_w(px(18.))
-        .h(px(18.))
-        .px(px(4.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .bg(theme.muted)
-        .text_size(gpui::rems(11. / 16.))
-        .text_color(theme.muted_foreground)
-        .child(label.into())
-        .into_any_element()
-}
+use crate::ui::dialog::keycap;
 
+/// "1 tab", "3 tabs" — how both columns count a workspace's tabs.
+fn tab_count(n: usize) -> String {
+    match n {
+        1 => t(L10nKey::SwitcherTabCountOne).to_string(),
+        n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

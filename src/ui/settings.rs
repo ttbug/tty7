@@ -88,8 +88,13 @@ fn ui_scale(cx: &App) -> f32 {
     cx.global::<Config>().ui_font_size / UI_FONT_SIZE_DEFAULT
 }
 
-/// How wide a text field in the right-hand column is.
-const FIELD_W: f32 = 180.;
+/// How wide a text field in the right-hand column is — the dropdowns' width,
+/// so the column is one straight edge whichever control a row holds.
+const FIELD_W: f32 = crate::ui::settings::kit::CONTROL_W;
+
+/// A field for a path or a command line: the one kind of value unreadable cut
+/// short, so the one kind allowed past [`FIELD_W`].
+const PATH_FIELD_W: f32 = 240.;
 
 /// The host editor's label column, and how wide a field beside one grows to.
 const SSH_LABEL_W: f32 = 96.;
