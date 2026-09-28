@@ -279,6 +279,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Quick launch found only the agents in the GUI's own bare `PATH`.** The app
+  starts with the launchd environment (`/usr/bin:/bin:/usr/sbin:/sbin`) and
+  fills it in by running the login shell, but only as a *login* shell — which
+  reads `.zprofile` / `.bash_profile` and never `.zshrc` / `.bashrc`, where
+  most people export their `PATH`. Anything installed under
+  `$HOME/.../env/node/bin`, `~/.local/bin` or an `rc`-only directory was
+  invisible: `Agent:` rows for it disappeared from Search Everywhere and the
+  `NEW Agent Tab` menu, and a matching `agent_launch` entry did not help,
+  because the override's own program is looked up on the same `PATH`. The probe
+  now runs interactively (`-i -l`, fish unchanged — it reads its config in
+  every mode), reads the PATH between markers so an `rc` that prints cannot be
+  mistaken for it, and gives up after 5 seconds so a stuck `rc` cannot keep
+  the app from opening.
+
 - **Chinese UI copy reads like Chinese** (#980). Half-width `?` and `,` in the
   hard-reset confirmation, the passphrase, Finder and server naming used two
   words each, and three quote/dash styles were mixed; these are now one each,

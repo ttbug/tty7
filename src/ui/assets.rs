@@ -26,6 +26,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
     let bytes: &'static [u8] = match path {
         "icons/terminal.svg" => include_bytes!("../../assets/icons/terminal.svg"),
         "icons/git-branch.svg" => include_bytes!("../../assets/icons/git-branch.svg"),
+        "icons/pin.svg" => include_bytes!("../../assets/icons/pin.svg"),
         // Deliberately not `refresh.svg`: the panel header already carries a
         // refresh tile, and the same glyph meaning two different things one row
         // apart reads as a bug.
@@ -96,6 +97,10 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/qwen.svg" => include_bytes!("../../assets/icons/agents/qwen.svg"),
         "icons/agents/kimi.svg" => include_bytes!("../../assets/icons/agents/kimi.svg"),
         "icons/agents/qodercli.svg" => include_bytes!("../../assets/icons/agents/qodercli.svg"),
+        // The China build ships the same mark.
+        "icons/agents/qoderclicn.svg" => {
+            include_bytes!("../../assets/icons/agents/qoderclicn.svg")
+        }
         "icons/agents/crush.svg" => include_bytes!("../../assets/icons/agents/crush.svg"),
         "icons/agents/command-code.svg" => {
             include_bytes!("../../assets/icons/agents/command-code.svg")

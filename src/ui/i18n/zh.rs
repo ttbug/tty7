@@ -751,6 +751,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -908,6 +909,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchAntigravityKeywords => {
             "Antigravity agent 集成 钩子 安装 antigravity agy google"
+        }
+        L10nKey::SettingsSearchQoderCnKeywords => {
+            "Qoder CN CLI 国内版 agent 集成 钩子 安装 qodercn qoderclicn qoder-cn qoder"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"
@@ -1125,6 +1129,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorAlreadyOpen => "“{path}”已在编辑器中打开",
         L10nKey::EditorGoToLine => "跳转到行",
         L10nKey::EditorGoToLineAction => "跳转到行…",
+        L10nKey::EditorCopyRelativePath => "复制相对路径",
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorSaveAs => "另存为",
         L10nKey::EditorSaveAsAction => "另存为…",
@@ -1917,6 +1922,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarDeleteGroup => "删除分组",
         L10nKey::SidebarDropToPin => "拖到此处固定",
         L10nKey::TabContextCloseTab => "关闭标签页",
+        L10nKey::TerminalContextClear => "清屏",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",
         L10nKey::AppMenuEnterFullscreen => "进入全屏",
@@ -1948,7 +1954,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNoPulls => "没有匹配的拉取请求。",
         L10nKey::GitHubSignInHint => "在终端中运行 `gh auth login` 登录，然后刷新。",
         L10nKey::GitHubNotFoundSignedOut => "GitHub 找不到此仓库。如果它是私有仓库，请先登录。",
-        L10nKey::GitHubNotFoundSignedIn => "GitHub 找不到此仓库，或当前账户无权查看。",
+        L10nKey::GitHubNotFoundSignedIn => "GitHub 找不到此仓库，或 gh 登录的账户都无权查看。",
         L10nKey::GitHubUnauthorized => "GitHub 拒绝了已保存的登录凭据。",
         L10nKey::GitHubRateLimited => "GitHub 的请求额度已用完。",
         L10nKey::GitHubRateLimitResetIn => "{n} 分钟后重置。",

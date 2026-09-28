@@ -168,7 +168,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HomeNewTab => "New Tab",
         L10nKey::HomeReopenClosedTab => "Reopen Closed Tab",
         L10nKey::HomeSwitchWorkspace => "Switch Workspace…",
-        L10nKey::HomeSearchEverywhere => "Search Everywhere…",
+        L10nKey::HomeSearchEverywhere => "Search…",
         L10nKey::HomeSplitRight => "Split Right",
         L10nKey::HomeSplitDown => "Split Down",
         L10nKey::HomeSettings => "Settings…",
@@ -868,6 +868,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -985,6 +986,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchAntigravityKeywords => {
             "agent integration hooks install antigravity agy google"
+        }
+        L10nKey::SettingsSearchQoderCnKeywords => {
+            "agent integration hooks install qodercn qoderclicn qoder-cn qoder china"
         }
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
@@ -1205,6 +1209,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorAlreadyOpen => "\"{path}\" is already open in the editor",
         L10nKey::EditorGoToLine => "Go to line",
         L10nKey::EditorGoToLineAction => "Go to Line…",
+        L10nKey::EditorCopyRelativePath => "Copy Relative Path",
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorSaveAs => "Save as",
         L10nKey::EditorSaveAsAction => "Save As…",
@@ -1991,7 +1996,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuFind => "Find…",
         L10nKey::AppMenuFindNext => "Find Next",
         L10nKey::AppMenuFindPrevious => "Find Previous",
-        L10nKey::AppMenuSearchEverywhere => "Search Everywhere…",
+        L10nKey::AppMenuSearchEverywhere => "Search…",
         L10nKey::AppMenuIncreaseFontSize => "Increase Font Size",
         L10nKey::AppMenuDecreaseFontSize => "Decrease Font Size",
         L10nKey::AppMenuResetFontSize => "Reset Font Size",
@@ -2056,6 +2061,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarDeleteGroup => "Delete Group",
         L10nKey::SidebarDropToPin => "Drop here to pin",
         L10nKey::TabContextCloseTab => "Close Tab",
+        L10nKey::TerminalContextClear => "Clear",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
         L10nKey::AppMenuEnterFullscreen => "Enter Full Screen",
@@ -2090,7 +2096,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "GitHub did not find this repository. If it is private, sign in first."
         }
         L10nKey::GitHubNotFoundSignedIn => {
-            "GitHub did not find this repository, or this account cannot see it."
+            "GitHub did not find this repository, or none of your gh accounts can see it."
         }
         L10nKey::GitHubUnauthorized => "GitHub rejected the saved sign-in.",
         L10nKey::GitHubRateLimited => "GitHub's rate limit is used up.",

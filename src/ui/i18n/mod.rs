@@ -727,6 +727,7 @@ l10n_keys! {
     SettingsAgentCursorCli,
     SettingsAgentPrimeAgent,
     SettingsAgentAntigravity,
+    SettingsAgentQoderCn,
     SettingsSearchAppHttpProxyKeywords,
     SettingsSearchAboutKeywords,
     SettingsSearchAutoDownloadKeywords,
@@ -790,6 +791,7 @@ l10n_keys! {
     SettingsSearchCursorCliKeywords,
     SettingsSearchPrimeAgentKeywords,
     SettingsSearchAntigravityKeywords,
+    SettingsSearchQoderCnKeywords,
     SettingsSearchRememberWindowSizeKeywords,
     SettingsSearchReportMouseToAppsKeywords,
     SettingsSearchRestoreLastLayoutKeywords,
@@ -937,6 +939,7 @@ l10n_keys! {
     EditorAlreadyOpen,
     EditorGoToLine,
     EditorGoToLineAction,
+    EditorCopyRelativePath,
     EditorGoToLinePlaceholder,
     EditorSaveAs,
     EditorSaveAsAction,
@@ -1230,6 +1233,7 @@ l10n_keys! {
     SidebarDeleteGroup,
     SidebarDropToPin,
     TabContextCloseTab,
+    TerminalContextClear,
     TabContextCloseTabsBelow,
     TabContextMarkUnread,
     TabContextHibernate,
@@ -1850,6 +1854,7 @@ mod tests {
             L10nKey::SettingsAgentCursorCli,
             L10nKey::SettingsAgentPrimeAgent,
             L10nKey::SettingsAgentAntigravity,
+            L10nKey::SettingsAgentQoderCn,
             // Windows names its backdrop materials, and Japanese Windows keeps
             // those names in Latin script — so does this list. Chinese does
             // translate them (云母 / 亚克力), which is what Microsoft's own
