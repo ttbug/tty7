@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 已将 main（`4b1336b`）合并到 `feat/tmp`：处理 `agent_hooks.rs`、`terminal/view.rs` 和 `ui/file_tree.rs` 冲突，保留当前分支侧边栏布局、分组与拖拽改动，同时合入 main 的用户提问状态、Agent 完成状态过滤、右键选中和远程文件拖拽功能。
 - 已将 `main`（`d0e42fa`）合并到 `feat/tmp`：接入 Search Everywhere、v4 UI、固定分组、快捷启动、新 Agent 与终端改进；冲突处理中保留 xview 品牌区、底部 workspace 入口、Command Code／MiniMax Code 识别、恢复、Hook 和三语设置搜索。
 - 已解决 `feat/tmp` 合并 `main` 的冲突：保留当前分支的侧边栏视觉、Command Code、MiniMax Code 与 SSH 认证修复，同时合入 main 的 CodeBuddy、Cursor CLI、独立设置窗口、远程终端分片解析、Windows portable mode 等新改动。
 - 已将 `main`（`33d7da6`）最新提交合并到 `feat/tmp`：保留当前分支侧边栏品牌区、树连接线、底部 workspace 入口和颜色布局，同时合入 main 的 Qoder CN CLI、侧边栏 pin 图标、空白区新建菜单、分组间距、编辑器菜单、GitHub 多账号和其他 UI 改动。
@@ -54,6 +55,7 @@
 
 ## 最近验证
 
+- 2026-09-29 合并 `main`（`4b1336b`）：`cargo fmt --check`、`git diff --cached --check`、`cargo check -p tty7`、`cargo test -p tty7-core --lib agent_hooks --no-fail-fast`（57 passed）和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）全部通过。编译仅有项目既有 warning。
 - 2026-09-28 合并 `main`（`33d7da6`）：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7-core --lib cli_agent --no-fail-fast`（46 passed）、`cargo test -p tty7-core --lib agent_hooks --no-fail-fast`（55 passed）、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）全部通过。编译仅有项目既有 warning。
 - 2026-09-27 分组 Git Diff 新增行数青色版 26.9.3 Apple Silicon DMG：重新执行 release 主程序构建（3m18s）、updater 构建（5.87s）和 `bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`；生成 [dist/tty7-26.9.3-macos-arm64.dmg](/Users/ttbug/Projects/tty7/dist/tty7-26.9.3-macos-arm64.dmg)（28468204 bytes，SHA-256 `f4c898a613fd4b22aacabd78796326a2ef166d81ab1cb4f47fca782d34465396`）与 updater ZIP（24370419 bytes，SHA-256 `1e38e02435fc9e9d5fcd0db4343e091506714bed02d22f344fa5800313480e6f`）。DMG CRC、只读挂载、`CFBundleShortVersionString=26.9.3`、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件和 `codesign --verify --deep --strict` 均通过；采用 ad-hoc 签名。
 - 2026-09-27 分组 Git Diff 新增行数颜色调整：`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（50 passed）和 `cargo check -p tty7` 通过。编译仅有项目既有 warning。
