@@ -105,6 +105,12 @@ pub mod state {
     pub const SELECTED: f32 = 1.30;
     pub const PRESSED: f32 = 1.55;
     pub const CURSOR: f32 = 1.70;
+    /// The side panels' own, lighter rungs (see `Theme::panel_surface`).
+    /// A panel lists many rows at once, and at the window's 1.30 the current
+    /// one read as a dark slab; these land on #ededec / #e8e8e7 on the
+    /// default light rail (#f5f5f4).
+    pub const PANEL_HOVER: f32 = 1.07;
+    pub const PANEL_SELECTED: f32 = 1.12;
     pub const TEXT_RESTING: f32 = 4.6;
     pub const TEXT_STEP: f32 = 1.4;
 
@@ -257,7 +263,7 @@ impl Theme {
             divider,
             secondary: mix(bg, fg, 0.09),
             muted: mix(bg, fg, 0.06),
-            muted_foreground: dim(fg, bg, state::TEXT_RESTING),
+            muted_foreground,
             popover,
             caret: legible_ink(bg, self.caret.unwrap_or(self.accent), ACCENT_FLOOR),
             selection: self.selection.unwrap_or_else(|| mix(bg, fg, 0.20)),
@@ -298,6 +304,24 @@ impl Theme {
     pub(crate) fn navigation_colors(&self) -> (u32, u32) {
         let colors = self.interactions();
         (colors.navigation, colors.navigation_ink)
+    }
+
+    /// A side panel's surface — the tab rail on the left, the docked panel on
+    /// the right. Both list many rows at once, so they step on the lighter
+    /// `PANEL_*` rungs, and toward the panel's own shade rather than `fg`: a
+    /// cool foreground (the default light's #1c1c1e) bleaches a warm panel's
+    /// tint out of a rung this faint, and the row reads as a grey patch on
+    /// cream.
+    fn panel_surface(&self, base: u32, text_resting: u32, fg: u32) -> Surface {
+        let shade = shade_of(base, fg);
+        let selected = raise(base, shade, state::PANEL_SELECTED);
+        Surface {
+            hover: raise(base, shade, state::PANEL_HOVER),
+            selected,
+            text_resting,
+            text_selected: stepped_ink(selected, base, fg, text_resting),
+            ..self.surface(base)
+        }
     }
 
     pub(crate) fn interactions(&self) -> Interactions {
@@ -419,14 +443,19 @@ impl Theme {
     pub fn surfaces(&self) -> Surfaces {
         let m = self.neutrals();
         let fg = legible_foreground(self.background_color(), self.foreground);
-        let mut sidebar = self.surface(m.sidebar);
+        let mut sidebar = self.panel_surface(m.sidebar, m.sidebar_fg, fg);
+        sidebar.hover = raise(sidebar.base, fg, state::HOVER);
         sidebar.selected = raise(sidebar.base, fg, state::SIDEBAR_SELECTED);
         sidebar.pressed = raise(sidebar.base, fg, state::SIDEBAR_PRESSED);
         sidebar.cursor = raise(sidebar.base, fg, state::SIDEBAR_CURSOR);
         sidebar.text_resting = m.sidebar_fg;
         sidebar.text_selected =
             stepped_ink(sidebar.selected, sidebar.base, fg, sidebar.text_resting);
-        let mut rail = self.surface(m.rail);
+        let mut rail = self.panel_surface(m.rail, m.rail_fg, fg);
+        rail.hover = raise(rail.base, fg, state::HOVER);
+        rail.selected = raise(rail.base, fg, state::SELECTED);
+        rail.pressed = raise(rail.base, fg, state::PRESSED);
+        rail.cursor = raise(rail.base, fg, state::CURSOR);
         rail.text_resting = m.rail_fg;
         rail.text_selected = stepped_ink(rail.selected, rail.base, fg, rail.text_resting);
         Surfaces {
@@ -519,6 +548,18 @@ fn bisect_contrast(from: u32, toward: u32, against: u32, target: f32) -> u32 {
 
 fn raise(base: u32, toward: u32, target: f32) -> u32 {
     bisect_contrast(base, toward, base, target)
+}
+
+/// The darkest (or, on a dark surface, lightest) colour that keeps every
+/// channel of `base` the same distance apart, so blending toward it only
+/// changes lightness: #f5f5f3 steps to #e8e8e6, never to #e8e8e8.
+fn shade_of(base: u32, fg: u32) -> u32 {
+    let ch = [base >> 16 & 0xff, base >> 8 & 0xff, base & 0xff];
+    let shift = match relative_luminance(fg) < relative_luminance(base) {
+        true => ch.map(|c| c - ch.iter().min().unwrap()),
+        false => ch.map(|c| c + (0xff - ch.iter().max().unwrap())),
+    };
+    (shift[0] << 16) | (shift[1] << 8) | shift[2]
 }
 
 fn dim(ink: u32, surface: u32, target: f32) -> u32 {
@@ -1764,12 +1805,9 @@ mod tests {
     fn state_ladder_is_separable_on_every_surface() {
         for t in builtins() {
             let s = t.surfaces();
-            for (name, sf) in [
-                ("window", s.window),
-                ("sidebar", s.sidebar),
-                ("rail", s.rail),
-                ("popover", s.popover),
-            ] {
+            // The side panels run their own lighter rungs;
+            // `panel_state_ladder_…` holds those apart instead.
+            for (name, sf) in [("window", s.window), ("popover", s.popover)] {
                 let sel_base = contrast(sf.selected, sf.base);
                 let sel_hover = contrast(sf.selected, sf.hover);
                 let hover_base = contrast(sf.hover, sf.base);
@@ -1792,6 +1830,32 @@ mod tests {
                 assert!(
                     hover_base >= 1.1,
                     "{}/{name}: hover is only {hover_base:.2}:1 from the surface",
+                    t.id
+                );
+                assert!(
+                    contrast(sf.pressed, sf.base) > sel_base,
+                    "{}/{name}: pressed must read past selected",
+                    t.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn panel_state_ladder_is_separable_in_every_theme() {
+        for t in builtins() {
+            let s = t.surfaces();
+            for (name, sf) in [("sidebar", s.sidebar), ("rail", s.rail)] {
+                let hover_base = contrast(sf.hover, sf.base);
+                let sel_base = contrast(sf.selected, sf.base);
+                assert!(
+                    hover_base >= state::PANEL_HOVER - 0.02,
+                    "{}/{name}: hover is only {hover_base:.2}:1 from the surface",
+                    t.id
+                );
+                assert!(
+                    sel_base >= state::PANEL_SELECTED - 0.02 && sel_base > hover_base,
+                    "{}/{name}: selected is only {sel_base:.2}:1 from the surface",
                     t.id
                 );
                 assert!(
@@ -2280,10 +2344,10 @@ mod tests {
                 m.caret
             );
         }
-        // The default theme is the one that used to fail: an orange caret on
-        // pure white read at 2.07:1.
+        // The default theme used to ship an orange caret that read at 2.07:1
+        // on pure white. It now takes the accent, like the focus ring.
         let light = builtins().into_iter().find(|t| t.id == DEFAULT_ID).unwrap();
-        assert_ne!(light.neutrals().caret, light.caret.unwrap());
+        assert_eq!(light.neutrals().caret, light.neutrals().accent);
     }
 
     #[test]

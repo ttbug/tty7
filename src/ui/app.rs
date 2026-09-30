@@ -5448,9 +5448,12 @@ impl Tty7App {
             self.activate(index, window, cx);
         }
 
+        // The directory the source runs in, on whichever host it runs on: an
+        // agent keys its history by directory, and a fork started anywhere
+        // else finds nothing to branch.
         let (cwd, shell) = {
             let view = source.read(cx);
-            (view.local_cwd(), view.shell_spec())
+            (view.spawnable_cwd(), view.shell_spec())
         };
         let group = self.spawn_group(cwd.as_deref(), cx);
         let new = match new_terminal(
@@ -5476,12 +5479,9 @@ impl Tty7App {
                 return;
             }
         };
-        let Some(terminal) = new.terminal() else {
-            log::error!("fork spawn produced a pane that is still connecting");
-            window.push_notification(t(L10nKey::AppForkStillConnecting), cx);
-            return;
-        };
-        terminal.read(cx).run_command_line(&cmd);
+        // A remote workspace's pane is still dialling here; the fork runs
+        // the moment it lands.
+        crate::ui::agent_launch::run_when_ready(&new, cmd, cx);
 
         match placement {
             ForkPlacement::NewTab => {
@@ -6992,6 +6992,10 @@ impl Tty7App {
             ssh_show_all: false,
             ssh_confirm_remove: false,
             ssh_copied: None,
+            mobile_pairing: None,
+            mobile_paired: None,
+            mobile_copied: false,
+            mobile_starting: false,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
@@ -8573,6 +8577,51 @@ impl Tty7App {
         )
     }
 
+    /// One pill per pane in the active tab that a phone is running at its own
+    /// size. The window keeps its grid meanwhile and shows the pane's output
+    /// laid out for the phone, so it says why, and offers the pane back.
+    fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        use gpui_component::Sizable as _;
+        use gpui_component::button::ButtonVariants as _;
+        let Some(tab) = self.tabs.get(self.active) else {
+            return Vec::new();
+        };
+        let theme = cx.theme();
+        let (info, foreground, popover) = (theme.info, theme.foreground, theme.popover);
+        tab.pane
+            .terminals()
+            .into_iter()
+            .filter_map(|leaf| {
+                let by = leaf.read(cx).terminal.leased_by()?;
+                let id = leaf.entity_id().as_u64();
+                Some(
+                    crate::ui::notice::pill(info, cx)
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(foreground)
+                                .child(crate::ui::i18n::t_fmt(
+                                    crate::ui::i18n::L10nKey::PaneLeasedBy,
+                                    &[("by", &by)],
+                                )),
+                        )
+                        .child(
+                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
+                                "lease-take-back-{id}"
+                            )))
+                            .label(crate::ui::i18n::t(
+                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
+                            ))
+                            .custom(crate::ui::theme::inverted_button(popover, cx))
+                            .small()
+                            .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
     fn render_remote_input_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.tabs.is_empty() {
             return None;
@@ -8951,6 +9000,7 @@ impl Render for Tty7App {
                     [self.render_remote_input_notice(cx), ssh_status]
                         .into_iter()
                         .flatten()
+                        .chain(self.render_lease_notices(cx))
                         .collect(),
                 ),
                 |this, el| this.child(el),
@@ -10034,6 +10084,19 @@ fn redial_native_ssh(layout: &SessionPane) -> SessionPane {
     }
 }
 
+/// Whether a native SSH pane can be attached to by its old id: only when the
+/// server lists it. A failed attach falls through to a fresh *local* shell,
+/// and after a server restart that put the user's own machine behind a tab
+/// that had been — and still looked like — a session on another one. Without
+/// a listing the host is dialled again: a second connection is recoverable,
+/// typing into the wrong machine is not.
+fn native_ssh_pane_alive(
+    alive: Option<&std::collections::HashMap<u64, Option<String>>>,
+    id: u64,
+) -> bool {
+    alive.is_some_and(|alive| alive.contains_key(&id))
+}
+
 fn leaf_shares_the_window_daemon(window_is_remote: bool, leaf_is_native_ssh: bool) -> bool {
     !(window_is_remote && leaf_is_native_ssh)
 }
@@ -10064,7 +10127,11 @@ fn session_to_pane(
                 // Not `pane_attachable`: a dead pane's id is what the restore
                 // is keyed on, so it has to survive being dead. The attach is
                 // still attempted first and still gives way to a fresh spawn.
-                false => (*pane_id).filter(|id| same_daemon && pane_free_for(alive, *id, owner)),
+                false => (*pane_id).filter(|id| {
+                    same_daemon
+                        && pane_free_for(alive, *id, owner)
+                        && (ssh_spec.is_none() || native_ssh_pane_alive(alive, *id))
+                }),
             };
             if restore.is_none() {
                 if let Some(spec) = ssh_spec.clone() {
@@ -10887,9 +10954,10 @@ mod tests {
     use super::{
         CloseReason, DOCUMENT_MIN_W, Dir, Pane, Rename, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
         TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
-        join_shell_args, leaf_shares_the_window_daemon, mru_order, one_slot_move, pane_free_for,
-        parse_ssh_connect_input, parse_ssh_option_words, rename_outcome, side_panel_max,
-        split_shell_args, step_in_order, strip_band, wd_path_saveable,
+        join_shell_args, leaf_shares_the_window_daemon, mru_order, native_ssh_pane_alive,
+        one_slot_move, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words,
+        rename_outcome, side_panel_max, split_shell_args, step_in_order, strip_band,
+        wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -11378,6 +11446,21 @@ mod tests {
         assert!(leaf_shares_the_window_daemon(true, false));
         assert!(leaf_shares_the_window_daemon(false, true));
         assert!(leaf_shares_the_window_daemon(false, false));
+    }
+
+    #[test]
+    fn a_native_ssh_pane_the_server_no_longer_has_is_dialled_again() {
+        let mut alive = std::collections::HashMap::new();
+        alive.insert(4u64, None);
+        assert!(native_ssh_pane_alive(Some(&alive), 4));
+        assert!(
+            !native_ssh_pane_alive(Some(&alive), 9),
+            "gone: dial, don't attach"
+        );
+        assert!(
+            !native_ssh_pane_alive(None, 4),
+            "no listing: dial, don't guess"
+        );
     }
 
     #[test]

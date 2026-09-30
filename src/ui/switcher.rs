@@ -405,8 +405,12 @@ fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
     }
     nav.sort_by(|&(ga, ra), &(gb, rb)| {
         let (a, b) = (&groups[ga].rows[ra], &groups[gb].rows[rb]);
-        b.current
-            .cmp(&a.current)
+        // How a row matched comes before which one is current: "qa" is the
+        // workspace named qa, not this window's one whose tabs sit in
+        // `/tmp/t7qa`, and Enter takes the top row.
+        a.name_match(query)
+            .cmp(&b.name_match(query))
+            .then_with(|| b.current.cmp(&a.current))
             .then_with(|| b.last_active.cmp(&a.last_active))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -1227,6 +1231,8 @@ impl Tty7App {
             },
         );
         name.update(cx, |state, cx| state.focus(window, cx));
+        // The name is a suggestion to replace, not text to type in front of.
+        crate::ui::prefill::select_all_when_drawn(&name, window, cx);
         if let Some(sw) = self.switcher.as_mut() {
             sw.page = Page::Create(CreateForm {
                 name,
@@ -1336,6 +1342,9 @@ impl Tty7App {
             }
             host.update(cx, |state, cx| state.set_value("", window, cx));
             name.update(cx, |state, cx| state.focus(window, cx));
+            if untouched {
+                crate::ui::prefill::select_all_when_drawn(&name, window, cx);
+            }
         }
         cx.notify();
     }
@@ -3122,6 +3131,22 @@ fn visible_tabs(row: &Row, query: &str) -> Vec<usize> {
 }
 
 impl Row {
+    /// How closely the workspace's own name answers `query`, best first: the
+    /// name itself, the start of it, anywhere in it, then not at all (the row
+    /// is listed for its path or a tab). Every row ties on an empty query.
+    fn name_match(&self, query: &str) -> u8 {
+        if query.is_empty() {
+            return 0;
+        }
+        let name = self.name.to_lowercase();
+        match () {
+            _ if name == query => 0,
+            _ if name.starts_with(query) => 1,
+            _ if name.contains(query) => 2,
+            _ => 3,
+        }
+    }
+
     /// A workspace stays in the list when its own name or path matches, and
     /// also when any of its tabs does — searching "claude" should surface the
     /// workspaces running one.
@@ -3801,6 +3826,18 @@ mod tests {
         let groups = vec![group(vec![aged(row("busy", vec![]), 99), here])];
         let first = flatten(&groups, "")[0];
         assert_eq!(groups[first.0].rows[first.1].name, "here");
+    }
+
+    #[test]
+    fn a_workspace_named_by_the_query_outranks_one_matched_by_its_tabs() {
+        // This window's workspace has its tabs under `/tmp/t7qa`, so "qa"
+        // lists it — but the workspace called qa is what was asked for, and
+        // Enter takes the top row.
+        let mut here = aged(row("keen-crane", vec![tab("zsh", "/tmp/t7qa/fixture")]), 50);
+        here.current = true;
+        let groups = vec![group(vec![here, aged(row("qa", vec![]), 10)])];
+        let first = flatten(&groups, "qa")[0];
+        assert_eq!(groups[first.0].rows[first.1].name, "qa");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
+use crate::terminal::prompt_reflow::{PromptBreak, PromptMark};
 
 use std::collections::VecDeque;
 
@@ -107,6 +108,7 @@ struct ReaderSignals {
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
     clipboard_write_busy: Arc<AtomicBool>,
+    lease: Arc<Mutex<Option<String>>>,
     /// Whether this pane's pty is one a conhost renders into, and so whether
     /// the reader puts back the cursor a repaint parked. Decided per pane from
     /// its [`PtySource`], and shared rather than copied because the reader can
@@ -166,6 +168,10 @@ pub struct PaneWorkspace {
     /// `false` whenever the answer is unknown (link down, server too old to
     /// advertise), which keeps the safe reflow-at-request behavior.
     pub resize_echo: bool,
+    /// Whether that daemon knows size leases — a phone running the pane at
+    /// its own size — so this client can ask to hear about them. Read off the
+    /// same hello, `false` when unknown, like `resize_echo`.
+    pub size_lease: bool,
 }
 
 impl PaneWorkspace {
@@ -222,6 +228,8 @@ pub enum PaneRoute {
         /// answer everywhere a route is assigned — spawn, attach, relink —
         /// and a relink builds its route fresh, so a reconnect re-answers it.
         resize_echo: bool,
+        /// As [`PaneWorkspace::size_lease`].
+        size_lease: bool,
     },
     Unroutable(String),
 }
@@ -234,6 +242,7 @@ impl PaneRoute {
                 Ok(header) => PaneRoute::Remote {
                     header: Box::new(header),
                     resize_echo: ws.resize_echo,
+                    size_lease: ws.size_lease,
                 },
                 Err(e) => PaneRoute::Unroutable(e.to_string()),
             },
@@ -615,6 +624,9 @@ pub struct RemoteTerminal {
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
     clipboard_write_busy: Arc<AtomicBool>,
+    /// Who runs this pane at their own size — a phone, by the name it paired
+    /// under — while the daemon says so. See [`Self::take_back`].
+    lease: Arc<Mutex<Option<String>>>,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -788,6 +800,7 @@ impl RemoteTerminal {
             Self::from_stream_with(stream, size, Vec::new(), PtySource::for_route(route))?;
         term.route = route.clone();
         term.seed_cwd(spawned_in);
+        term.watch_leases();
         Ok((term, pane_id))
     }
 
@@ -858,6 +871,7 @@ impl RemoteTerminal {
         let mut term =
             Self::from_stream_parts(stream, size, buffered, PtySource::for_route(route), true)?;
         term.route = route.clone();
+        term.watch_leases();
         Ok(term)
     }
 
@@ -953,6 +967,7 @@ impl RemoteTerminal {
                 images: self.images.clone(),
                 clipboard_writes: self.clipboard_writes.clone(),
                 clipboard_write_busy: self.clipboard_write_busy.clone(),
+                lease: self.lease.clone(),
                 // Deliberately the pane's existing answer rather than one
                 // rebuilt from `route`: the pty on the far side is the same pty
                 // it was before the link dropped, and only this value still
@@ -967,6 +982,12 @@ impl RemoteTerminal {
         // `LinkWriter` through its `Drop`, which is what closes the old socket.
         self.link = LinkWriter::new(stream, self.input_loss())?;
         self.route = route.clone();
+        // The new link has told us nothing yet; the daemon repeats a lease
+        // that still stands when we ask again.
+        if let Ok(mut guard) = self.lease.lock() {
+            *guard = None;
+        }
+        self.watch_leases();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
         Ok(())
@@ -1049,6 +1070,7 @@ impl RemoteTerminal {
         let images = crate::terminal::images::ImageStore::new();
         let clipboard_writes = Arc::new(Mutex::new(VecDeque::new()));
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
+        let lease = Arc::new(Mutex::new(None));
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
@@ -1075,6 +1097,7 @@ impl RemoteTerminal {
                 images: images.clone(),
                 clipboard_writes: clipboard_writes.clone(),
                 clipboard_write_busy: clipboard_write_busy.clone(),
+                lease: lease.clone(),
                 local_conpty: local_conpty.clone(),
             },
         );
@@ -1113,6 +1136,7 @@ impl RemoteTerminal {
             images,
             clipboard_writes,
             clipboard_write_busy,
+            lease,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -1188,6 +1212,7 @@ impl RemoteTerminal {
                     images,
                     clipboard_writes,
                     clipboard_write_busy,
+                    lease,
                     local_conpty,
                 } = signals;
                 let mut awaiting_replay = awaiting_replay;
@@ -1215,6 +1240,7 @@ impl RemoteTerminal {
                 // against the bytes before its `D`, not the whole batch.
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
+                let mut prompt_break = PromptBreak::default();
                 let mut pending: Vec<u8> = buffered;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
@@ -1310,6 +1336,9 @@ impl RemoteTerminal {
                                             }
                                             ReaderCut::Command(mark) => {
                                                 command_cursor.apply(term, mark)
+                                            }
+                                            ReaderCut::Prompt(mark) => {
+                                                prompt_break.apply(term, mark)
                                             }
                                         },
                                     ) else {
@@ -1448,8 +1477,14 @@ impl RemoteTerminal {
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
                                 let fed =
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
-                                        if let ReaderCut::Command(mark) = cut {
-                                            command_cursor.apply(term, mark);
+                                        match cut {
+                                            ReaderCut::Command(mark) => {
+                                                command_cursor.apply(term, mark)
+                                            }
+                                            ReaderCut::Prompt(mark) => {
+                                                prompt_break.apply(term, mark)
+                                            }
+                                            ReaderCut::Parked(_) => {}
                                         }
                                     });
                                 if fed.is_none() {
@@ -1689,6 +1724,12 @@ impl RemoteTerminal {
                                 }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
+                            DaemonMsg::Lease(by) => {
+                                if let Ok(mut guard) = lease.lock() {
+                                    *guard = by;
+                                }
+                                proxy.send_event(AlacEvent::Wakeup);
+                            }
                             DaemonMsg::Exited { .. } => {
                                 flush_batch!();
                                 child_exited.store(true, Ordering::SeqCst);
@@ -1822,6 +1863,41 @@ impl RemoteTerminal {
             PaneRoute::Remote { resize_echo, .. } => *resize_echo,
             PaneRoute::Unroutable(_) => false,
         }
+    }
+
+    /// Whether the daemon behind this pane knows size leases, asked the way
+    /// [`Self::resize_echoed`] asks: never over the network from here.
+    fn leases_supported(&self) -> bool {
+        match &self.route {
+            PaneRoute::Local => crate::daemon::spawn::local_daemon_supports(
+                crate::daemon::protocol::FEATURE_SIZE_LEASE,
+            ),
+            PaneRoute::Remote { size_lease, .. } => *size_lease,
+            PaneRoute::Unroutable(_) => false,
+        }
+    }
+
+    /// Asks to be told when a phone runs this pane at its own size. Only
+    /// where the daemon knows leases: an older one drops a link that sends it.
+    fn watch_leases(&self) {
+        if self.leases_supported() {
+            self.link.send(ClientMsg::Lease(
+                crate::daemon::protocol::LeaseRequest::Watch,
+            ));
+        }
+    }
+
+    /// Who runs this pane at their own size right now, if anyone.
+    pub fn leased_by(&self) -> Option<String> {
+        self.lease.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Ends a phone's lease: the pane goes back to this window's size. The
+    /// daemon confirms with the lease ending, which clears [`Self::leased_by`].
+    pub fn take_back(&self) {
+        self.link.send(ClientMsg::Lease(
+            crate::daemon::protocol::LeaseRequest::TakeBack,
+        ));
     }
 
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
@@ -3436,6 +3512,7 @@ mod chunking_tests {
 enum ReaderCut {
     Parked(CursorCut),
     Command(CommandMark),
+    Prompt(PromptMark),
 }
 
 /// Adds the batch's command marks to `cuts`, keeping them in stream order
@@ -3445,6 +3522,8 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
     tok.feed_at(bytes, |off, payload| {
         if let Some(mark) = CommandMark::parse(payload) {
             cuts.push((off, ReaderCut::Command(mark)));
+        } else if let Some(mark) = PromptMark::parse(payload) {
+            cuts.push((off, ReaderCut::Prompt(mark)));
         }
     });
     if before > 0 && cuts.len() > before {
@@ -4002,6 +4081,7 @@ mod replay_tests {
         PaneRoute::Remote {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
+            size_lease: false,
         }
     }
 
@@ -4435,6 +4515,7 @@ mod route_header_tests {
             spec: None,
             label: label.map(str::to_string),
             resize_echo: false,
+            size_lease: false,
         }
     }
 
@@ -4559,6 +4640,7 @@ mod parked_cursor_tests {
             let route = PaneRoute::Remote {
                 header: Box::new(header),
                 resize_echo: false,
+                size_lease: false,
             };
             assert_eq!(PtySource::for_route(&route), PtySource::Raw);
         }
@@ -4798,6 +4880,7 @@ mod tests {
             )),
             label: None,
             resize_echo: false,
+            size_lease: false,
         }
     }
 
@@ -4827,6 +4910,7 @@ mod tests {
                 PaneRoute::for_workspace(Some(&ws)),
                 PaneRoute::Remote {
                     resize_echo: true,
+                    size_lease: false,
                     ..
                 }
             ),
@@ -4844,6 +4928,7 @@ mod tests {
             spec: None,
             label: None,
             resize_echo: false,
+            size_lease: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("WSL is routed");
@@ -4862,6 +4947,7 @@ mod tests {
             spec: None,
             label: None,
             resize_echo: false,
+            size_lease: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("a local child is routable");
@@ -4885,6 +4971,7 @@ mod tests {
             spec: None,
             label: None,
             resize_echo: false,
+            size_lease: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         assert!(matches!(route, PaneRoute::Unroutable(_)));
@@ -6042,6 +6129,7 @@ mod tests {
         term.route = PaneRoute::Remote {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
+            size_lease: false,
         };
 
         term.resize(TermSize::new(120, 30), 8, 17);
@@ -6106,6 +6194,7 @@ mod tests {
         term.route = PaneRoute::Remote {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
+            size_lease: false,
         };
         daemon_side
             .set_read_timeout(Some(std::time::Duration::from_millis(150)))
@@ -6277,6 +6366,7 @@ mod tests {
         term.route = PaneRoute::Remote {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: false,
+            size_lease: false,
         };
 
         term.resize(TermSize::new(120, 30), 8, 17);

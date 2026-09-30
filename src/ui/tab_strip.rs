@@ -471,6 +471,38 @@ pub(crate) fn elide_label(
     }
 }
 
+/// Keeps the longest head of `text` that fits before a trailing ellipsis —
+/// the plain cut a reader expects, for a string read left to right like a
+/// branch name.
+pub(crate) fn elide_end_clusters(
+    text_system: &gpui::WindowTextSystem,
+    font: &gpui::Font,
+    size: f32,
+    text: &str,
+    max_width: f32,
+) -> SharedString {
+    if measure_text(text_system, font, size, text) <= max_width {
+        return SharedString::from(text.to_string());
+    }
+    let budget = max_width - measure_text(text_system, font, size, "…");
+    if budget <= 0. {
+        return SharedString::from("…");
+    }
+    let cells = clusters(text);
+    let (mut lo, mut hi) = (0usize, cells.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if measure_text(text_system, font, size, &cells[..mid].concat()) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out = cells[..lo].concat();
+    out.push('…');
+    SharedString::from(out)
+}
+
 /// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
 /// by the path and token elisions as their last resort.
 pub(crate) fn elide_tail_clusters(
@@ -1317,6 +1349,7 @@ impl Tty7App {
                     .w_full()
                     .h(px(28.))
                     .rounded(px(7.))
+                    .accessible_label(t(L10nKey::HomeSwitchWorkspace))
                     .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
                         "ToggleSwitcher",
@@ -1366,6 +1399,10 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
+                    .accessible_label(match panel_open {
+                        true => t(L10nKey::TabTooltipHideDetailPanel),
+                        false => t(L10nKey::TabTooltipShowDetailPanel),
+                    })
                     .tooltip_element(chord_tooltip(
                         match panel_open {
                             true => t(L10nKey::TabTooltipHideDetailPanel),
@@ -1409,6 +1446,9 @@ impl Tty7App {
                 };
                 div()
                     .id(("right-panel-tab", tab as usize))
+                    .role(gpui::Role::Tab)
+                    .aria_label(t(label_key))
+                    .aria_selected(current)
                     // The press must not start a window drag from the title bar
                     // the tabs sit in.
                     .occlude()
@@ -1794,6 +1834,7 @@ impl Tty7App {
         // come through here were the ones left silent. The chord is worth
         // more here than anywhere else in the row: it is the way back to
         // opening a tab without reading a menu first.
+        .accessible_label(t(L10nKey::AppMenuNewTab))
         .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
         // Built when the menu opens, not when the strip draws: this
         // closure runs once per press, and again after each dismissal.
@@ -2514,6 +2555,7 @@ impl Tty7App {
                             cx,
                         )
                         .rounded_lg()
+                        .accessible_label(t(L10nKey::TabTooltipShowSidebar))
                         .tooltip_element(chord_tooltip(
                             t(L10nKey::TabTooltipShowSidebar),
                             "ToggleLeftPanel",
@@ -3221,6 +3263,19 @@ mod tests {
         assert!(out.contains('…'));
         assert!(measure_text(&ts, &font, size, &out) <= max);
         assert!(out.chars().count() < branch.chars().count());
+    }
+
+    #[gpui::test]
+    fn elide_end_keeps_the_head_of_a_branch(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let branch = "fix/rpc-proxy-and-error-classification";
+        let max = 140.;
+        let out = elide_end_clusters(&ts, &font, size, branch, max);
+        assert!(out.starts_with("fix/rpc-"), "head survives: {out}");
+        assert!(out.ends_with('…') && out.matches('…').count() == 1, "{out}");
+        assert!(measure_text(&ts, &font, size, &out) <= max);
+        let fits = measure_text(&ts, &font, size, branch);
+        assert_eq!(elide_end_clusters(&ts, &font, size, branch, fits), branch);
     }
 
     #[gpui::test]
