@@ -56,6 +56,7 @@
 
 ## 最近验证
 
+- 2026-09-30 `26.9.4` Apple Silicon DMG／ZIP：release 主程序与 updater 构建通过；`bundle-macos.sh` 生成 [dist/tty7-26.9.4-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.dmg)（约 36M，SHA-256 `cc22de984e28767ac0b761135752ddb59c9937343ead7cd7a0aa090aa19aeb79`）和 [dist/tty7-26.9.4-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.zip)（约 31M，SHA-256 `ad7720d8f9f0c9a62e64092d841eb19b36914ccf8325f192a2ed2275a1d880d5`）。DMG CRC、只读挂载、版本、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release UUID 比对均通过；ZIP 完整性通过。
 - 2026-09-30 合并 `main`（`ef20382`）：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）通过；主题预设测试 45 项通过，`dracula_selection_matches_the_signed_off_greys` 仍失败，该断言及其依赖值未被本次合并改动触及，待后续单独校准。
 - 2026-09-29 合并 `main`（`4b1336b`）：`cargo fmt --check`、`git diff --cached --check`、`cargo check -p tty7`、`cargo test -p tty7-core --lib agent_hooks --no-fail-fast`（57 passed）和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）全部通过。编译仅有项目既有 warning。
 - 2026-09-28 合并 `main`（`33d7da6`）：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7-core --lib cli_agent --no-fail-fast`（46 passed）、`cargo test -p tty7-core --lib agent_hooks --no-fail-fast`（55 passed）、`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）全部通过。编译仅有项目既有 warning。
