@@ -24,6 +24,8 @@ export interface PaneView {
   title: string;
   cwd?: string | null;
   agent?: AgentView | null;
+  /** Nothing runs in it: the machine's server restarted since. */
+  stopped?: boolean;
 }
 
 export interface TabView {
@@ -37,6 +39,19 @@ export interface WorkspaceView {
   id: string;
   name: string;
   tabs: TabView[];
+  /** The desktop sidebar's groups, in its order; absent from an older desktop. */
+  groups?: GroupView[];
+  /** The tab the desktop last had in front here. */
+  active_tab?: string;
+}
+
+/** One of the desktop sidebar's groups: pinned, per repository or SSH host,
+ * or the tabs in none (unnamed when it is the only group). */
+export interface GroupView {
+  name?: string;
+  pinned?: boolean;
+  collapsed?: boolean;
+  tabs: string[];
 }
 
 export interface Tree {
@@ -86,6 +101,22 @@ export const forget = (hostId: string) => invoke<void>("forget", { hostId });
 /** Sets the style of what the page does not draw: status bar, keyboard. */
 export const appearance = (style: "system" | "light" | "dark") => invoke<void>("appearance", { style });
 
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/** What the system bars cover, in CSS pixels. Android only: zero elsewhere. */
+export const insets = () => invoke<Insets>("insets");
+
+/** The `tty7pair:` link the app was opened with and has not handled, once. */
+export const openedLink = () => invoke<string | null>("opened_link");
+
+/** Sends the app to the background, as Back from the first screen does. */
+export const toBackground = () => invoke<void>("to_background");
+
 export function watch(hostId: string, onMsg: (msg: TreeMsg) => void) {
   const onEvent = new Channel<TreeMsg>();
   onEvent.onmessage = onMsg;
@@ -126,6 +157,15 @@ export const tabNew = (
   cwd: string | null,
   size: { cols: number; rows: number } | null,
 ) => invoke<TabCreated>("tab_new", { hostId, machine, workspaceId, cwd, size });
+
+/** Closes a tab and its panes; the machine keeps it to reopen where it can. */
+export const tabClose = (hostId: string, machine: string | null, workspaceId: string, tabId: string) =>
+  invoke<void>("tab_close", { hostId, machine, workspaceId, tabId });
+
+/** Closes a pane on the machine, ending what runs in it. Not `paneClose`,
+ * which only stops this phone watching one. */
+export const paneKill = (hostId: string, machine: string | null, paneId: number) =>
+  invoke<void>("pane_kill", { hostId, machine, paneId });
 
 export const paneInput = (handle: number, data: string) =>
   invoke<void>("pane_input", { handle, data });

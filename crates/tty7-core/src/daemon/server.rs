@@ -109,6 +109,10 @@ impl crate::host::server::PaneDirectory for Registry {
         hibernate_pane(self, pane_id);
     }
 
+    fn close_pane(&self, pane_id: u64) {
+        kill_pane(self, pane_id);
+    }
+
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
         let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();
@@ -121,6 +125,33 @@ impl crate::host::server::PaneDirectory for Registry {
 /// [`crate::daemon::pane::AGENT_STALE_AFTER`]. The threshold is half an hour,
 /// so being up to a minute late to notice costs nothing.
 const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The pane a Codex or jcode hook's report is about, found from the report
+/// itself — where a hook runs says nothing for an agent that runs its hooks in
+/// a shared server (see [`crate::daemon::pane::codex_report_target`]). `None`
+/// for any other agent's report, which goes to the pane the hook named.
+fn codex_report_pane(
+    registry: &Registry,
+    named: u64,
+    body: &str,
+) -> Option<(Arc<DaemonPane>, crate::core::cli_agent::AgentEvent)> {
+    let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())?;
+    use crate::core::cli_agent::CLIAgent;
+    let agent = event
+        .agent
+        .filter(|a| matches!(a, CLIAgent::Codex | CLIAgent::Jcode))?;
+    let panes = registry.all();
+    let candidates: Vec<_> = panes.iter().map(|p| p.codex_candidate(agent)).collect();
+    let target = crate::daemon::pane::codex_report_target(
+        &candidates,
+        named,
+        event.session_id.as_deref(),
+        event.cwd.as_deref(),
+        event.source.as_deref() == Some("clear"),
+    )?;
+    let pane = panes.into_iter().find(|p| p.id == target)?;
+    Some((pane, event))
+}
 
 fn spawn_agent_stale_sweep(registry: Arc<Registry>) {
     let spawned = std::thread::Builder::new()
@@ -233,6 +264,14 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                     let (segments, title, mark) = pane.scrollback_snapshot();
                     crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
                     marks.insert(pane.id, mark);
+                }
+                // Before the sweep, so a closed tab that has aged out takes its
+                // screens with it on this pass rather than the next.
+                if let Some(store) = crate::core::machine::observed_store() {
+                    let now = crate::core::machine::unix_now();
+                    for pane in store.expire_closed_tabs(now) {
+                        kill_pane(&registry, pane);
+                    }
                 }
                 let restorable = restorable_pane_ids(&registry);
                 crate::daemon::scrollback::sweep(&restorable);
@@ -830,8 +869,13 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             )
         }
 
-        ClientMsg::SpawnNativeSsh { cwd: _, size, spec } => {
+        ClientMsg::SpawnNativeSsh { cwd, size, spec } => {
             let allow_remote_clipboard_write = spec.remote_clipboard_write;
+            // A far-host path that only travels as a `PathBuf`: taken as the
+            // text it was sent as, never resolved against this machine. One
+            // that is not UTF-8 could only reach the far shell mangled, so it
+            // is dropped and the shell starts where it would have anyway.
+            let remote_start_dir = cwd.and_then(|p| p.into_os_string().into_string().ok());
             let id = registry.alloc_id();
             let on_dead = {
                 let registry = registry.clone();
@@ -844,7 +888,8 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, on_dead) {
+            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, remote_start_dir, on_dead)
+            {
                 Ok(p) => p,
                 Err(e) => {
                     let mut w = write_stream;
@@ -1130,6 +1175,26 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                     DaemonMsg::Error(format!("pane {pane_id} is not running")).encode(&mut w)?
                 }
                 None => DaemonMsg::Error(format!("no such pane {pane_id}")).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
+        ClientMsg::AgentEvent {
+            pane_id,
+            pid,
+            event,
+        } => {
+            let mut w = write_stream;
+            let applied = match codex_report_pane(&registry, pane_id, &event) {
+                Some((pane, parsed)) => pane.apply_reported_agent_event(parsed),
+                None => match registry.get(pane_id) {
+                    Some(pane) => pane.report_agent_event(pid, &event),
+                    None => Err(format!("no such pane {pane_id}")),
+                },
+            };
+            match applied {
+                Ok(()) => DaemonMsg::InputAck { pane_id }.encode(&mut w)?,
+                Err(message) => DaemonMsg::Error(message).encode(&mut w)?,
             }
             Ok(())
         }

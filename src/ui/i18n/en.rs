@@ -63,7 +63,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMobilePairDesc => "Shows a one-time code for the tty7 app on your phone.",
         L10nKey::SettingsMobilePairNeedsAccess => "Turn on phone access first.",
         L10nKey::SettingsMobilePairScan => {
-            "Scan this with the tty7 app on your phone, or copy the code and paste it there."
+            "Point your phone's camera at this, or scan it in the tty7 app, or copy the code and paste it there."
         }
         L10nKey::SettingsMobilePairValid => "Expires in {time}. Works for one phone.",
         L10nKey::SettingsMobileNewCode => "New code",
@@ -257,6 +257,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CloseTabBusyTitle => "Close this tab?",
         L10nKey::CloseBusyCommandBody => "{what} is still running. Closing ends it.",
         L10nKey::CloseBusyAgentBody => "{agent} is still working. Closing ends its turn.",
+        L10nKey::CloseIdleBody => "Its shell ends with it.",
+        L10nKey::CloseTabsTitle => "Close {count} tabs?",
+        L10nKey::CloseTabsBody => "The shells in them end too.",
         L10nKey::Keep => "Keep",
         L10nKey::SettingsNavAppearance => "Appearance",
         L10nKey::SettingsNavTerminal => "Terminal",
@@ -305,6 +308,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => "language, locale, english, chinese",
         L10nKey::SettingsTransparency => "Transparency",
         L10nKey::SettingsOpacity => "Opacity",
@@ -333,6 +337,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDimInactivePanes => "Dim inactive panes",
         L10nKey::SettingsDimInactivePanesDesc => {
             "Fade unfocused panes so the active one stands out."
+        }
+        L10nKey::SettingsAutoHideTitlebarButtons => "Show title bar buttons on hover",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "Keep the new tab and sidebar buttons out of sight until the pointer is over the title bar."
         }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",
@@ -730,6 +738,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTabs => "Tabs",
         L10nKey::SettingsNewTabPosition => "New tab position",
         L10nKey::SettingsNewTabPositionDesc => "Where a freshly opened tab is inserted.",
+        L10nKey::SettingsConfirmClose => "Confirm before closing",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "When closing a tab or pane asks first. SSH hosts set to warn before closing are always asked about."
+        }
+        L10nKey::ConfirmCloseNever => "Never",
+        L10nKey::ConfirmCloseWhenBusy => "When busy",
+        L10nKey::ConfirmCloseAlways => "Always",
         L10nKey::SettingsTabBarPosition => "Tab bar position",
         L10nKey::SettingsTabBarPositionDesc => "A strip on top or a sidebar on the left.",
         L10nKey::SettingsSidebarGrouping => "Auto grouping",
@@ -751,6 +766,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::NotifyModeNever => "Never",
         L10nKey::NotifyModeUnfocused => "When unfocused",
         L10nKey::NotifyModeAlways => "Always",
+        L10nKey::ProgramNotesDropped => "More notifications from this pane weren't shown",
         L10nKey::SettingsStartupNormal => "Normal",
         L10nKey::SettingsStartupMaximized => "Maximized",
         L10nKey::SettingsStartupFullscreen => "Fullscreen",
@@ -910,6 +926,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "Manual install required",
+        L10nKey::AppAgentHooksMuseManualInstall => "Run on the remote host: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
@@ -953,6 +974,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "fade unfocused inactive split pane focus opacity highlight active dimming"
         }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "auto hide autohide title bar titlebar buttons chrome hover pointer minimal clean new tab sidebar toggle"
+        }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",
         L10nKey::SettingsSearchFontLigaturesKeywords => "typography glyph fira",
@@ -983,6 +1007,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "interface font family ui typeface typography chrome sidebar tab"
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => "tabs order end after current",
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "confirm close closing tab pane ask prompt warn busy running idle always never"
+        }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "notification alert done osc desktop banner long command"
         }
@@ -1026,6 +1053,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "agent integration extension install prime prime-agent primeintellect"
         }
+        L10nKey::SettingsSearchEmpryoKeywords => "agent integration hooks install empryo",
+        L10nKey::SettingsSearchJcodeKeywords => "agent integration hooks install jcode",
+        L10nKey::SettingsSearchMuseKeywords => "agent integration hooks plugins install muse meta",
         L10nKey::SettingsSearchAntigravityKeywords => {
             "agent integration hooks install antigravity agy google"
         }
@@ -1366,6 +1396,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelNoChangesHint => "The working tree is clean.",
         L10nKey::PanelSessionSubtitle => "Session",
         L10nKey::PanelProcessesSubtitle => "Processes",
+        L10nKey::PanelProcessesTotal => "Total",
         L10nKey::PanelPortsSubtitle => "Ports",
         L10nKey::PanelPortsUnsupported => "That machine's tty7-server is too old to list ports.",
         L10nKey::PanelPortsProbeFailed => "Couldn't check what this pane is listening on.",
@@ -1840,6 +1871,29 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdGitToggleGraph => "Git: Toggle Commit History",
         L10nKey::CmdClearScrollback => "Clear Scrollback",
         L10nKey::CmdFindInTerminal => "Find in Terminal…",
+        L10nKey::CmdToggleComposer => "Toggle Message Composer",
+        L10nKey::ComposerModeDefault => "Ask before edits",
+        L10nKey::ComposerModeAcceptEdits => "Accept edits",
+        L10nKey::ComposerModePlan => "Plan mode",
+        L10nKey::ComposerModeBypass => "Bypass permissions",
+        L10nKey::ComposerModeAuto => "Auto mode",
+        L10nKey::ComposerModeTip => "Permission mode  ·  Shift+Tab to cycle",
+        L10nKey::ComposerModel => "Model",
+        L10nKey::ComposerModelTip => "Switch model",
+        L10nKey::ComposerModelDefault => "Default (recommended)",
+        L10nKey::ComposerEffort => "Effort",
+        L10nKey::ComposerEffortTip => "Reasoning effort  ·  click to change",
+        L10nKey::ComposerPlaceholder => "Message {agent}   ·   @ files   / commands",
+        L10nKey::ComposerPlaceholderFiles => "Message {agent}   ·   @ files",
+        L10nKey::ComposerSendTip => "Send (Enter)  ·  Shift+Enter for a new line",
+        L10nKey::ComposerAttach => "Attach files or images",
+        L10nKey::ComposerMenuCommands => "Commands",
+        L10nKey::ComposerMenuFiles => "Files",
+        L10nKey::ComposerCmdProject => "Project command",
+        L10nKey::ComposerCmdUser => "User command",
+        L10nKey::ComposerAgentAsking => {
+            "{agent} is asking something. Answer it in the terminal, then send."
+        }
         L10nKey::CmdFindNext => "Find Next",
         L10nKey::CmdFindPrevious => "Find Previous",
         L10nKey::CmdCopy => "Copy",
@@ -2203,6 +2257,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarUngroupedGroup => "Ungrouped",
         L10nKey::SidebarMoveToGroup => "Move to Group",
         L10nKey::SidebarNewGroup => "New Group…",
+        L10nKey::SidebarRemoveFromGroup => "Remove from Group",
         L10nKey::SidebarNewGroupName => "New Group",
         L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::SidebarPinGroup => "Pin Group",
@@ -2378,6 +2433,8 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => {
             "{names} already exist in this folder. Uploading overwrites them."
         }
+        (L10nKey::CloseTabsTitle, "one") => "Close 1 tab?",
+        (L10nKey::CloseTabsTitle, "other") => "Close {count} tabs?",
         (L10nKey::AppTabsNotRestored, "one") => "1 tab from last time could not be reopened",
         (L10nKey::AppTabsNotRestored, "other") => {
             "{count} tabs from last time could not be reopened"

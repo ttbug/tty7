@@ -30,13 +30,13 @@ use crate::core::actions::{
     OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
     SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
-const GRID_PAD_X: f32 = 8.;
-const GRID_PAD_Y: f32 = 4.;
+pub(super) const GRID_PAD_X: f32 = 8.;
+pub(super) const GRID_PAD_Y: f32 = 4.;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputCaretPaint {
@@ -124,7 +124,8 @@ actions!(
         FindPrevious,
         ClearScrollback,
         InsertNewline,
-        InsertNewlineFallback
+        InsertNewlineFallback,
+        ToggleComposer
     ]
 );
 
@@ -320,6 +321,9 @@ pub struct TerminalView {
     pub line_height_mul: f32,
     pub cell_width: Pixels,
     pub(super) line_height: Pixels,
+    /// What the grid's height leaves under its last whole row: rows are
+    /// drawn from the top, so this is empty space above the bottom padding.
+    pub(super) grid_slack: Pixels,
     /// The grid the last frame painted, and the snapshot that went with it.
     /// A frame that cannot have the terminal lock repaints this rather than
     /// waiting on the pane's reader — see [`TerminalElement::build_grid`].
@@ -387,7 +391,7 @@ pub struct TerminalView {
     /// mouse-down, latched so the menu builder — which gpui-component runs on a
     /// deferred callback, one turn after the click — can still see the
     /// modifiers the user actually held.
-    context_menu_allowed: bool,
+    pub(super) context_menu_allowed: bool,
     /// The file link the most recent right mouse-down landed on, latched for
     /// the same reason [`context_menu_allowed`](Self::context_menu_allowed)
     /// is: by the time the menu is built the pointer is only a memory.
@@ -405,6 +409,10 @@ pub struct TerminalView {
     pub search: Option<SearchState>,
     pub cursor_visible: bool,
     pub(super) search_focused: bool,
+    /// The message box docked under an agent, once it has been asked for —
+    /// see [`super::composer`].
+    pub(super) composer: Option<super::composer::Composer>,
+    pub(super) composer_focused: bool,
     pub(super) search_case_sensitive: bool,
     pub(super) search_regex: bool,
     pub(super) search_regex_error: bool,
@@ -828,6 +836,59 @@ impl TerminalView {
         super::remote::notify_desktop_for_pane(Some(&title), body, Some(cx.entity_id()));
     }
 
+    /// Desktop notifications the program wrote (OSC 9, 99, 777), such as
+    /// Claude Code's with its Notifications setting on `ghostty`, `kitty` or
+    /// `iterm2`. The agent's Waiting mark on the tab is the daemon's doing.
+    ///
+    /// `Unfocused` holds a note back only while the reader is looking at this
+    /// very pane. A pane whose agent reports through tty7's hooks already gets
+    /// its Waiting and Done notices from `poll_agent_status` whenever
+    /// `hooks_notify`, so the program's own copy would be a duplicate there.
+    ///
+    /// At most a few per pane every few seconds reach the desktop (pane output
+    /// is untrusted), with one note saying the rest were not shown.
+    fn show_program_notes(&self, hooks_notify: bool, window: &Window, cx: &mut Context<Self>) {
+        let notes = self.terminal.take_osc_notes();
+        let watched = window.is_window_active() && self.focus_handle.is_focused(window);
+        let hooked = self.terminal.agent_session().is_some_and(|s| s.rich);
+        let show = cx
+            .global::<Config>()
+            .notify_on_command_finish
+            .allows(watched)
+            && !(hooked && hooks_notify);
+        if !notes.is_empty() {
+            log::debug!(
+                "{} program notification(s) {}",
+                notes.len(),
+                if show { "shown" } else { "held back" }
+            );
+        }
+        // Asked on every poll, so the rest are said once a flood stops too,
+        // and while notes are held back, so a stale count never surfaces
+        // minutes later.
+        let (notes, dropped) = self.terminal.pace_osc_notes(
+            if show { notes } else { Vec::new() },
+            std::time::Instant::now(),
+        );
+        if !show {
+            return;
+        }
+        let agent = self.terminal.foreground_agent().map(|a| a.display_name());
+        if dropped {
+            self.notify_pane(agent, t(L10nKey::ProgramNotesDropped), cx);
+        }
+        for (title, body) in notes {
+            match title {
+                Some(title) => super::remote::notify_desktop_for_pane(
+                    Some(&title),
+                    &body,
+                    Some(cx.entity_id()),
+                ),
+                None => self.notify_pane(agent, &body, cx),
+            }
+        }
+    }
+
     fn notification_title(&self, lead: Option<&str>, cx: &App) -> String {
         let host = self
             .workspace
@@ -904,7 +965,7 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// — shows no penalty this harness can resolve. Halving the bound would halve
 /// the worst case; the number is a judgement about how much latency a long
 /// typed line may pay, not something the curve picks out.
-fn types_cleanly(line: &str) -> bool {
+pub(super) fn types_cleanly(line: &str) -> bool {
     line.len() <= 512 && !line.chars().any(char::is_control)
 }
 
@@ -971,9 +1032,14 @@ fn clipboard_paths(item: &ClipboardItem) -> Vec<std::path::PathBuf> {
 
 /// Paths as one line of shell words, trailing space included so whatever is
 /// typed next starts a word of its own.
-fn pasted_paths_text(paths: &[String], shell: Option<&str>) -> String {
+pub(super) fn pasted_paths_text(paths: &[String], shell: Option<&str>) -> String {
     let words: Vec<String> = paths.iter().map(|p| quote_for_shell(p, shell)).collect();
     format!("{} ", words.join(" "))
+}
+
+/// Whether the clipboard carries files rather than (only) text.
+pub(super) fn clipboard_has_paths(item: &ClipboardItem) -> bool {
+    !clipboard_paths(item).is_empty()
 }
 
 fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
@@ -1577,18 +1643,18 @@ impl TerminalView {
         self.owner_workspace
     }
 
+    /// Dials `spec` through the local daemon. `remote_start_dir` is a
+    /// directory on the far host — see [`ClientMsg::SpawnNativeSsh`]'s `cwd`
+    /// — and never a local one.
+    ///
+    /// [`ClientMsg::SpawnNativeSsh`]: crate::daemon::protocol::ClientMsg::SpawnNativeSsh
     pub fn spawn_native_ssh_terminal(
         spec: Box<crate::daemon::protocol::NativeSshSpec>,
-        working_directory: Option<std::path::PathBuf>,
+        remote_start_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<NativeSshParts> {
         let persist = Box::new(spec.without_secrets());
-        let (terminal, pane_id) = RemoteTerminal::spawn_native_ssh(
-            TermSize::new(80, 24),
-            8,
-            17,
-            working_directory,
-            spec,
-        )?;
+        let (terminal, pane_id) =
+            RemoteTerminal::spawn_native_ssh(TermSize::new(80, 24), 8, 17, remote_start_dir, spec)?;
         Ok(NativeSshParts {
             terminal,
             pane_id,
@@ -1748,6 +1814,8 @@ impl TerminalView {
         })
         .detach();
 
+        super::color_scheme::watch(cx);
+
         let displayed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let entity_id = cx.entity().entity_id();
         cx.default_global::<DisplayedRegistry>()
@@ -1795,6 +1863,7 @@ impl TerminalView {
             line_height_mul,
             cell_width: px(8.),
             line_height: px(17.),
+            grid_slack: px(0.),
             grid_buf: Vec::new(),
             grid_snap: None,
             frame_alt_screen: false,
@@ -1829,6 +1898,8 @@ impl TerminalView {
             cursor_visible: true,
             dim: 1.,
             search_focused: false,
+            composer: None,
+            composer_focused: false,
             search_case_sensitive: false,
             search_regex: false,
             search_regex_error: false,
@@ -2038,7 +2109,13 @@ impl TerminalView {
     }
 
     fn accepts_input(&self, cx: &gpui::App) -> bool {
-        let Some(ws) = self.workspace().map(|w| w.workspace) else {
+        // A local pane has no `PaneWorkspace`, but the window that owns it can
+        // still have been taken over by a remote client.
+        let Some(ws) = self
+            .workspace()
+            .map(|w| w.workspace)
+            .or(self.owner_workspace)
+        else {
             return true;
         };
         crate::ui::remote_workspace::workspace_accepts_input(cx, ws)
@@ -2291,7 +2368,7 @@ impl TerminalView {
     /// answers from the platform — PowerShell on Windows, POSIX elsewhere.
     /// The one pane that guess is wrong for is a cmd.exe pane that has not
     /// reported in yet.
-    fn shell_program(&self) -> Option<String> {
+    pub(super) fn shell_program(&self) -> Option<String> {
         self.shell_spec.as_ref().map(|s| s.program.clone())
     }
 
@@ -2541,6 +2618,17 @@ impl TerminalView {
         };
         let ks = reshaped.as_ref().unwrap_or(&ev.keystroke);
         let m = &ks.modifiers;
+
+        if self.composer_focused {
+            if ks.key == "escape" {
+                self.composer_escape(window, cx);
+                cx.stop_propagation();
+            } else if ks.key == "c" && m.control && !m.platform && !m.alt && !m.shift {
+                self.composer_interrupt(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
 
         if self.search.is_some() && self.search_focused {
             if ks.key == "escape" {
@@ -3257,7 +3345,7 @@ impl TerminalView {
         self.scroll_frac = 0.;
     }
 
-    fn send_to_pty(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+    pub(super) fn send_to_pty(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         if self.terminal.exited || !self.accepts_input(cx) {
             return;
         }
@@ -3290,6 +3378,11 @@ impl TerminalView {
 
     pub fn paste(&mut self, text: String, cx: &mut Context<Self>) {
         if !self.accepts_input(cx) {
+            return;
+        }
+        // The agent's input is under the box, so a paste meant for it goes
+        // into the box — out of sight under it, it would be sent unseen.
+        if self.composer_takes_typing(&text, cx) {
             return;
         }
         // Same reason as `commit_text`: what is pasted lands on the prompt, so
@@ -3554,29 +3647,42 @@ impl TerminalView {
         }
     }
 
-    fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+    pub(super) fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         self.paste_local_paths(paths.paths().to_vec(), cx);
     }
 
     /// A row dragged out of a remote Files tree names a file on that remote,
     /// not here: there is nothing to upload, and the path is pasted as the
     /// tree spells it.
-    fn drop_remote_path(
+    pub(super) fn drop_remote_path(
         &mut self,
         drag: &crate::ui::file_tree::RemotePathDrag,
         cx: &mut Context<Self>,
     ) {
-        let text = pasted_paths_text(
-            &[drag.path.to_string_lossy().into_owned()],
-            self.shell_program().as_deref(),
-        );
+        self.paste_paths(vec![drag.path.to_string_lossy().into_owned()], cx);
+    }
+
+    /// Paste paths already spelled the way the pane's host reads them: into
+    /// the composer as attachments when it has the keyboard, and as shell
+    /// words onto the line otherwise. Every route that turns files into
+    /// something to paste — a drop, a copied file, a screenshot, an upload to
+    /// a remote pane — ends here.
+    fn paste_paths(&mut self, spelled: Vec<String>, cx: &mut Context<Self>) {
+        let Some(spelled) = self.composer_takes_paths(spelled, cx) else {
+            return;
+        };
+        let text = pasted_paths_text(&spelled, self.shell_program().as_deref());
         self.paste(text, cx);
     }
 
     /// Paste files that live on this machine so the pane's program can open
     /// them: uploaded first when the pane runs on an SSH host, renamed for a
     /// WSL pane, and pasted as they are everywhere else.
-    fn paste_local_paths(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn paste_local_paths(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -3597,11 +3703,19 @@ impl TerminalView {
             .iter()
             .map(|p| local_path_for_pane(&p.to_string_lossy(), shares_localhost))
             .collect();
-        let text = pasted_paths_text(&spelled, self.shell_program().as_deref());
-        self.paste(text, cx);
+        self.paste_paths(spelled, cx);
     }
 
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
+        // A screenshot pasted into the composer is one of its attachments,
+        // shown as a chip like a copied file. Forwarded as SYN it would land
+        // in the agent's own input, hidden under the box.
+        if self.composer_takes_files()
+            && let Some(path) = write_clipboard_image(img)
+        {
+            self.paste_local_paths(vec![path], cx);
+            return;
+        }
         if self.paste_clipboard_image_as_path(img, cx) {
             return;
         }
@@ -3706,8 +3820,7 @@ impl TerminalView {
                 })
                 .collect();
             let pasted = this.update_in(cx, |view, window, cx| {
-                let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
-                view.paste(text, cx);
+                view.paste_paths(spelled, cx);
                 for u in &uploads {
                     if let Err(reason) = &u.started {
                         view.warn_paste_upload_failed(&u.local, &host, reason, window, cx);
@@ -3744,8 +3857,7 @@ impl TerminalView {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         let _ = this.update_in(cx, |view, window, cx| {
-            let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
-            view.paste(text, cx);
+            view.paste_paths(spelled, cx);
             if let Some(first) = sources.first() {
                 view.warn_paste_upload_failed(first, host, reason, window, cx);
             }
@@ -3960,6 +4072,13 @@ impl TerminalView {
     }
 
     fn poll_foreground(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let notify_allowed = cx
+            .global::<Config>()
+            .notify_on_command_finish
+            .allows(window.is_window_active());
+        // Ahead of the exit check: what a program said just before its shell
+        // exited is still shown.
+        self.show_program_notes(notify_allowed, window, cx);
         if self.terminal.exited {
             return;
         }
@@ -3989,12 +4108,6 @@ impl TerminalView {
             self.last_at_prompt = at_prompt;
             cx.notify();
         }
-
-        let notify_allowed = match cx.global::<Config>().notify_on_command_finish {
-            NotifyMode::Never => false,
-            NotifyMode::Unfocused => !window.is_window_active(),
-            NotifyMode::Always => true,
-        };
 
         let running = !at_prompt;
         if running && self.running_agent.is_none() {
@@ -5699,6 +5812,9 @@ impl TerminalView {
 
     pub fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.terminal.exited || text.is_empty() || !self.accepts_input(cx) {
+            return;
+        }
+        if self.composer_takes_typing(text, cx) {
             return;
         }
         // Typing goes to the prompt, so the view has to be looking at it.
@@ -7453,6 +7569,7 @@ impl Render for TerminalView {
         self.sync_frame_facts();
         self.sync_typeahead_owner();
         self.sync_scrollbar();
+        self.sync_composer(window, cx);
         if self.shell_owns_prompt() {
             if let Some((_net, bytes)) = self.hold.release() {
                 self.terminal.write(bytes);
@@ -7482,6 +7599,11 @@ impl Render for TerminalView {
             .input_active()
             .then(|| self.render_reverse_search_menu(cx))
             .flatten();
+        let (composer_docked, composer_over) = match self.render_composer(window, cx) {
+            Some((el, true)) => (Some(el), None),
+            Some((el, false)) => (None, Some(el)),
+            None => (None, None),
+        };
         let integration_notice = self.render_integration_notice(cx);
         let remote_completion_notice = self.render_remote_completion_notice(cx);
 
@@ -7500,6 +7622,10 @@ impl Render for TerminalView {
             .key_context(self.key_context())
             .size_full()
             .relative()
+            // A column so the composer docks under the grid and takes its rows
+            // from it: the grid's laid-out height is what sizes the pty.
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .px(px(GRID_PAD_X))
             .py(px(GRID_PAD_Y))
@@ -7596,6 +7722,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &InsertNewlineFallback, _w, cx| {
                 this.insert_newline_fallback_action(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleComposer, window, cx| {
+                this.toggle_composer(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SendTab, _w, cx| {
                 this.tab_pressed(true, cx);
             }))
@@ -7603,6 +7732,7 @@ impl Render for TerminalView {
                 this.tab_pressed(false, cx);
             }))
             .child(TerminalElement::new(entity))
+            .children(composer_docked)
             .child(self.render_scrollbar())
             .children(search_bar)
             .children(input_bar)
@@ -7610,6 +7740,7 @@ impl Render for TerminalView {
             .children(reverse_search_menu)
             .children(integration_notice)
             .children(remote_completion_notice)
+            .children(composer_over)
             .context_menu(move |menu, window, cx| {
                 // Suppressing the popup means handing back an item-less menu:
                 // gpui-component's `ContextMenu` element skips rendering the
@@ -10800,6 +10931,7 @@ mod gpui_tests {
                 activity: 0,
                 turns: 0,
                 inferred: false,
+                readout: Default::default(),
             }))
             .encode(daemon)
             .unwrap();
@@ -10857,6 +10989,7 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            readout: Default::default(),
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10925,6 +11058,7 @@ mod gpui_tests {
             activity: 0,
             turns,
             inferred: false,
+            readout: Default::default(),
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11410,6 +11544,7 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            readout: Default::default(),
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -12287,6 +12422,208 @@ mod gpui_tests {
                 Err(e) => panic!("client socket failed before Input: {e}"),
             }
         }
+    }
+
+    /// `next_input_until_timeout` with the executor run between reads: a reply
+    /// crosses the reader thread and the view before it is written.
+    fn pumped_input(cx: &mut TestAppContext, daemon: &mut Stream, tries: usize) -> Option<String> {
+        (0..tries)
+            .find_map(|_| {
+                cx.run_until_parked();
+                next_input_until_timeout(daemon)
+            })
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    #[gpui::test]
+    fn a_theme_change_reaches_only_the_panes_that_asked(cx: &mut TestAppContext) {
+        let set_background = |cx: &mut TestAppContext, bg: gpui::Hsla| {
+            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg)
+        };
+        let (_asked_window, mut asked) = harness(cx);
+        let (_plain_window, mut plain) = harness(cx);
+        set_background(cx, gpui::white());
+
+        DaemonMsg::Output(b"\x1b[?2031h\x1b[?996n".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;2n"),
+            "996 answers the current scheme"
+        );
+
+        set_background(cx, gpui::black());
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;1n")
+        );
+        DaemonMsg::Output(b"\x1b]11;?\x07".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert!(
+            pumped_input(cx, &mut asked, 20)
+                .is_some_and(|reply| reply.contains("11;rgb:0000/0000/0000")),
+            "OSC 11 answers with the background the flip left"
+        );
+
+        set_background(cx, gpui::white());
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;2n")
+        );
+        assert_eq!(
+            pumped_input(cx, &mut plain, 2),
+            None,
+            "a pane that never set 2031 is not written to"
+        );
+
+        DaemonMsg::Output(b"\x1b[?2031l".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert_eq!(pumped_input(cx, &mut asked, 1), None);
+        set_background(cx, gpui::black());
+        assert_eq!(pumped_input(cx, &mut asked, 2), None, "2031 switched off");
+    }
+
+    #[gpui::test]
+    fn a_reattach_that_replays_2031_reports_the_scheme_once(cx: &mut TestAppContext) {
+        let (_window, mut daemon) = harness(cx);
+        cx.update(|cx| gpui_component::Theme::global_mut(cx).background = gpui::black());
+        // What a replay sends: the modes ahead of the ring, then each ring
+        // segment behind its size, then the shell's state. Nothing live
+        // follows: an idle pane still hears once.
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        };
+        let mut replay = Vec::new();
+        for frame in [
+            DaemonMsg::Snapshot(b"\x1b[?2031h".to_vec()),
+            DaemonMsg::Size(size),
+            DaemonMsg::Snapshot(b"\x1b[?996n".to_vec()),
+            DaemonMsg::Snapshot(b"$ ".to_vec()),
+            DaemonMsg::Prompt {
+                active: true,
+                at_prompt: false,
+                last_exit: None,
+            },
+        ] {
+            frame.encode(&mut replay).unwrap();
+        }
+        std::io::Write::write_all(&mut daemon, &replay).unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 20).as_deref(),
+            Some("\x1b[?997;1n"),
+            "the theme may have flipped while detached"
+        );
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 2),
+            None,
+            "one report for the whole replay, and the replayed 996 is not answered"
+        );
+    }
+
+    /// A program that switched 2031 on and died without `?2031l` leaves a
+    /// replay whose last word is still `?2031h`. The shell that owns the pane
+    /// now never asked, so neither a reattach nor a theme flip may type a
+    /// report into its command line.
+    #[gpui::test]
+    fn a_dead_programs_2031_never_reaches_the_shell(cx: &mut TestAppContext) {
+        let set_background = |cx: &mut TestAppContext, bg: gpui::Hsla| {
+            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg)
+        };
+        let dead = b"\x1b]133;C;claude\x07\x1b[?2031hclaude output\r\n";
+        let prompt = b"\x1b]133;D;137\x07\x1b]133;A\x07$ \x1b]133;B\x07";
+        let restored = crate::daemon::pane::restore_preamble(Some("this shell is new"));
+
+        for tail in [&prompt[..], &restored[..]] {
+            let (_window, mut daemon) = harness(cx);
+            set_background(cx, gpui::white());
+            let mut replay = Vec::new();
+            for frame in [
+                DaemonMsg::Snapshot(dead.to_vec()),
+                DaemonMsg::Snapshot(tail.to_vec()),
+            ] {
+                frame.encode(&mut replay).unwrap();
+            }
+            std::io::Write::write_all(&mut daemon, &replay).unwrap();
+            assert_eq!(
+                pumped_input(cx, &mut daemon, 2),
+                None,
+                "a reattach reports nothing"
+            );
+            set_background(cx, gpui::black());
+            assert_eq!(pumped_input(cx, &mut daemon, 2), None, "nor does a flip");
+        }
+
+        // A ring takes many reads. One that ends after the segment holding
+        // `?2031h` and before the one holding the prompt is not the end of
+        // the replay.
+        let (_window, mut daemon) = harness(cx);
+        set_background(cx, gpui::white());
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        };
+        let mut head = Vec::new();
+        DaemonMsg::Size(size).encode(&mut head).unwrap();
+        DaemonMsg::Snapshot(dead.to_vec())
+            .encode(&mut head)
+            .unwrap();
+        std::io::Write::write_all(&mut daemon, &head).unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 2),
+            None,
+            "half a replay reports nothing"
+        );
+        let mut rest = Vec::new();
+        DaemonMsg::Size(size).encode(&mut rest).unwrap();
+        DaemonMsg::Snapshot(prompt.to_vec())
+            .encode(&mut rest)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(137),
+        }
+        .encode(&mut rest)
+        .unwrap();
+        std::io::Write::write_all(&mut daemon, &rest).unwrap();
+        assert_eq!(pumped_input(cx, &mut daemon, 2), None, "nor does the rest");
+
+        // Live, the same: the program's exit and the next prompt end it.
+        let (_window, mut live) = harness(cx);
+        set_background(cx, gpui::white());
+        DaemonMsg::Output(dead.to_vec()).encode(&mut live).unwrap();
+        assert_eq!(pumped_input(cx, &mut live, 1), None);
+        set_background(cx, gpui::black());
+        assert_eq!(
+            pumped_input(cx, &mut live, 20).as_deref(),
+            Some("\x1b[?997;1n")
+        );
+        DaemonMsg::Output(prompt.to_vec())
+            .encode(&mut live)
+            .unwrap();
+        assert_eq!(pumped_input(cx, &mut live, 1), None);
+        set_background(cx, gpui::white());
+        assert_eq!(
+            pumped_input(cx, &mut live, 2),
+            None,
+            "a shell at its prompt hears nothing"
+        );
+        DaemonMsg::Output(b"\x1b[?996n".to_vec())
+            .encode(&mut live)
+            .unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut live, 20).as_deref(),
+            Some("\x1b[?997;2n"),
+            "a live 996 is still answered"
+        );
     }
 
     #[gpui::test]
@@ -15369,6 +15706,270 @@ mod gpui_tests {
                     assert_eq!(
                         (still.line.0, still.column.0),
                         (after.line.0, after.column.0)
+                    );
+                });
+            })
+            .unwrap();
+    }
+
+    /// The composer end to end on a live pane: laid over the agent's input
+    /// once the input is on screen, a message leaves as one paste and then its
+    /// own Enter, the box steps aside — keyboard and all — while the agent
+    /// shows something else where its input goes, comes back when the input
+    /// does, and is gone when the agent quits.
+    #[gpui::test]
+    fn the_composer_stands_in_for_the_agents_input_and_steps_aside_for_its_prompts(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        let (window, view, mut daemon) = rooted_harness(cx);
+        let draw = |cx: &mut TestAppContext| {
+            window.update(cx, |_, window, _| window.refresh()).unwrap();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(400));
+            cx.run_until_parked();
+        };
+        let wait_for = |cx: &mut TestAppContext, want: &dyn Fn(&TerminalView) -> bool| {
+            for _ in 0..200 {
+                if cx.update(|cx| want(view.read(cx))) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the pane never got there");
+        };
+        let screen_has = |v: &TerminalView, needle: char| {
+            let term = v.terminal.term.lock();
+            let grid = term.grid();
+            (0..grid.screen_lines() as i32)
+                .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == needle))
+        };
+        // Let the window lay the grid out first: the agent draws for the size
+        // it is given, as Claude Code does after every resize.
+        draw(cx);
+        let (cols, lines) = cx.update(|cx| {
+            let term = view.read(cx).terminal.term.lock();
+            (term.columns(), term.screen_lines())
+        });
+        let rule = "─".repeat(cols);
+        // Claude Code's input, as it draws it: the prompt between two rules
+        // at the bottom of the screen, its status row under them.
+        let input = format!(
+            "\x1b[2J\x1b[H⏺ Ready.\x1b[{};1H{rule}\x1b[{};1H❯ \x1b[{};1H{rule}\x1b[{};1H  ? for shortcuts",
+            lines - 3,
+            lines - 2,
+            lines - 1,
+            lines,
+        );
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.toggle_composer(window, cx));
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| view.read(cx).composer.is_none()),
+            "a shell has nobody to compose for"
+        );
+
+        DaemonMsg::Agent(Some(CLIAgent::Claude))
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Output(format!("\x1b[?2004h{input}").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        wait_for(cx, &|v| {
+            v.agent() == Some(CLIAgent::Claude)
+                && screen_has(v, '❯')
+                && v.terminal
+                    .term
+                    .lock()
+                    .mode()
+                    .contains(TermMode::BRACKETED_PASTE)
+        });
+        let rows = cx.update(|cx| view.read(cx).terminal.size().rows);
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.toggle_composer(window, cx));
+            })
+            .unwrap();
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    assert!(
+                        v.composer_shown(),
+                        "the input is on screen, so the box is over it"
+                    );
+                    let input = v.composer.as_ref().unwrap().input.clone();
+                    assert!(
+                        input.read(cx).focus_handle(cx).is_focused(window),
+                        "opening the box puts the caret in it"
+                    );
+                    input.update(cx, |s, cx| s.set_value("one\ntwo", window, cx));
+                });
+            })
+            .unwrap();
+        assert_eq!(
+            cx.update(|cx| view.read(cx).terminal.size().rows),
+            rows,
+            "laid over the input, the box leaves the grid its rows"
+        );
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.submit_composer(window, cx));
+            })
+            .unwrap();
+        draw(cx);
+        assert_eq!(next_input(&mut daemon), b"\x1b[200~one\ntwo\x1b[201~");
+        assert_eq!(
+            next_input(&mut daemon),
+            b"\r",
+            "Enter goes as its own write"
+        );
+        assert_eq!(
+            cx.update(|cx| view
+                .read(cx)
+                .composer
+                .as_ref()
+                .unwrap()
+                .input
+                .read(cx)
+                .value()),
+            "",
+            "a sent message leaves the box"
+        );
+
+        // A click on the grid takes the keyboard out of the box, and it
+        // stays out: the box does not pull it back on the next frame.
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| window.focus(&v.focus_handle, cx));
+            })
+            .unwrap();
+        draw(cx);
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, _| {
+                    assert!(
+                        v.focus_handle.is_focused(window),
+                        "the keyboard stays where the click put it"
+                    );
+                    assert!(!v.composer_focused);
+                });
+            })
+            .unwrap();
+
+        // A paste at the grid is for the input under the box: it goes into
+        // the box, and the keyboard with it — never unseen into the agent.
+        view.update(cx, |v, cx| v.paste("pasted\nhere".into(), cx));
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    let input = v.composer.as_ref().unwrap().input.clone();
+                    assert_eq!(input.read(cx).value(), "pasted\nhere");
+                    assert!(input.read(cx).focus_handle(cx).is_focused(window));
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                });
+            })
+            .unwrap();
+
+        // A picker takes the input's place. Past the grace period the box
+        // steps aside and the keyboard goes to the TUI.
+        DaemonMsg::Output(
+            b"\x1b[2J\x1b[H Select model\r\n \xe2\x9d\xaf 1. Opus\r\n   2. Sonnet".to_vec(),
+        )
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|v| !screen_has(v, '─'));
+        draw(cx);
+        std::thread::sleep(super::super::composer::STEP_ASIDE_AFTER);
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, _| {
+                    assert!(!v.composer_shown(), "the picker is not covered");
+                    assert!(
+                        v.focus_handle.is_focused(window),
+                        "the picker has the keyboard"
+                    );
+                });
+            })
+            .unwrap();
+
+        // The input comes back, and so do the box and its caret.
+        DaemonMsg::Output(input.clone().into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        wait_for(cx, &|v| screen_has(v, '─'));
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    assert!(v.composer_shown());
+                    let input = v.composer.as_ref().unwrap().input.clone();
+                    assert!(input.read(cx).focus_handle(cx).is_focused(window));
+                });
+            })
+            .unwrap();
+
+        // A question the hooks report steps it aside at once, and nothing in
+        // the box is sent as the answer.
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Waiting,
+            rich: true,
+            ..Default::default()
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|v| {
+            v.agent_session()
+                .is_some_and(|s| s.status == AgentStatus::Waiting)
+        });
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    let input = v.composer.as_ref().unwrap().input.clone();
+                    input.update(cx, |s, cx| s.set_value("yes", window, cx));
+                    v.submit_composer(window, cx);
+                });
+            })
+            .unwrap();
+        draw(cx);
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "a question in the TUI is not answered from the box"
+        );
+        assert!(cx.update(|cx| !view.read(cx).composer_shown()));
+        assert_eq!(
+            cx.update(|cx| view
+                .read(cx)
+                .composer
+                .as_ref()
+                .unwrap()
+                .input
+                .read(cx)
+                .value()),
+            "yes",
+            "the held message stays in the box"
+        );
+
+        DaemonMsg::Agent(None).encode(&mut daemon).unwrap();
+        wait_for(cx, &|v| v.agent().is_none());
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, _| {
+                    assert!(!v.composer_shown(), "no agent, no box");
+                    assert!(
+                        v.focus_handle.is_focused(window),
+                        "the keyboard goes back to the terminal"
                     );
                 });
             })

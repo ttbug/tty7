@@ -54,6 +54,17 @@ enum Up {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn an_error_says_each_thing_once() {
+        let e = anyhow::anyhow!("aborted by peer: refused")
+            .context("aborted by peer: refused")
+            .context("could not reach studio");
+        assert_eq!(
+            super::err(e),
+            "could not reach studio: aborted by peer: refused"
+        );
+    }
+
+    #[test]
     fn names_come_back_from_their_header_encoding() {
         assert_eq!(
             super::percent_decode("%E6%88%AA%E5%9B%BE%201.png"),
@@ -65,8 +76,17 @@ mod tests {
 
 fn err(e: impl std::fmt::Display) -> String {
     // `{:#}` walks anyhow's chain, so "could not reach studio: no route"
-    // reaches the user rather than just the outermost context.
-    format!("{e:#}")
+    // reaches the user rather than just the outermost context. A chain can
+    // say the same thing at several layers — QUIC's close reason is repeated
+    // by each wrapper around it — and once is enough.
+    let full = format!("{e:#}");
+    let mut said: Vec<&str> = Vec::new();
+    for part in full.split(": ") {
+        if !said.contains(&part) {
+            said.push(part);
+        }
+    }
+    said.join(": ")
 }
 
 impl AppState {
@@ -285,6 +305,39 @@ async fn tab_new(
     let session = state.session(&host_id).await?;
     session
         .new_tab(machine.as_deref(), &workspace_id, cwd, size)
+        .await
+        .map_err(err)
+}
+
+/// Closes a pane on the machine for good, ending whatever runs in it — not
+/// [`pane_close`], which only stops this phone watching one. The tree drops
+/// it on its own.
+#[tauri::command]
+async fn pane_kill(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    pane_id: u64,
+) -> CmdResult<()> {
+    let session = state.session(&host_id).await?;
+    session
+        .close_pane(machine.as_deref(), pane_id)
+        .await
+        .map_err(err)
+}
+
+/// Closes a tab and its panes; the machine keeps it to reopen where it can.
+#[tauri::command]
+async fn tab_close(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    workspace_id: String,
+    tab_id: String,
+) -> CmdResult<()> {
+    let session = state.session(&host_id).await?;
+    session
+        .close_tab(machine.as_deref(), &workspace_id, &tab_id)
         .await
         .map_err(err)
 }
@@ -511,6 +564,8 @@ pub fn run() {
     // unless a process-wide provider is installed first. `ring` is the one
     // already in the tree. An `Err` means one is installed, which is fine.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    #[cfg(target_os = "ios")]
+    launch_link::catch();
 
     // Links tapped in a pane open in the phone's browser.
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
@@ -519,13 +574,15 @@ pub fn run() {
     #[cfg(mobile)]
     let builder = builder
         .plugin(tauri_plugin_barcode_scanner::init())
-        .plugin(tauri_plugin_biometric::init());
+        .plugin(tauri_plugin_biometric::init())
+        .plugin(tauri_plugin_haptics::init());
 
     builder
         .setup(|app| {
             #[cfg(target_os = "ios")]
             if let Some(window) = app.get_webview_window("main") {
                 edge_to_edge(&window);
+                keyboard(&window);
             }
             let dir = app.path().app_data_dir()?;
             app.manage(Arc::new(AppState {
@@ -540,11 +597,178 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            hosts, pair, forget, watch, unwatch, refresh, tab_new, upload, diff, pane_open,
-            pane_input, pane_lease, pane_close, appearance
+            hosts,
+            pair,
+            forget,
+            watch,
+            unwatch,
+            refresh,
+            tab_new,
+            tab_close,
+            pane_kill,
+            upload,
+            diff,
+            pane_open,
+            pane_input,
+            pane_lease,
+            pane_close,
+            appearance,
+            insets,
+            to_background,
+            opened_link
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tty7");
+        .build(tauri::generate_context!())
+        .expect("error while building tty7")
+        .run(|_app, _event| {
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                opened(_app, urls);
+            }
+        });
+}
+
+/// A link the app was opened with that the page has not taken yet: one that
+/// launched the app arrives before the page is there to hear it.
+static OPENED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The desktop's pairing code is a `tty7pair:` link, so a phone's camera
+/// pointed at its QR code opens the app with it (`Info.ios.plist`, the
+/// Android manifest). Kept for the page to ask for, and told to it if it is
+/// already listening.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn opened(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
+    use tauri::Emitter as _;
+    let Some(link) = urls
+        .into_iter()
+        .map(String::from)
+        .find(|u| u.starts_with("tty7pair:"))
+    else {
+        return;
+    };
+    *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(link.clone());
+    let _ = app.emit("opened-link", link);
+}
+
+/// A link that launches the app on iOS. UIKit hands it to the app's first
+/// scene as that connects, in the connection options, and the event loop
+/// (tao) passes on only the links that come once the scene is up. So its
+/// scene delegate's connect is wrapped to keep the link on the way. The
+/// delegate class exists once the app delegate does, which is installed as
+/// UIKit starts: the wrap goes on then.
+#[cfg(target_os = "ios")]
+mod launch_link {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::sel;
+    use std::ffi::{CStr, c_char};
+    use std::sync::OnceLock;
+
+    static SET_DELEGATE: OnceLock<usize> = OnceLock::new();
+    static CONNECT: OnceLock<usize> = OnceLock::new();
+
+    type SetDelegate = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject);
+    type Connect = unsafe extern "C-unwind" fn(
+        *mut AnyObject,
+        Sel,
+        *mut AnyObject,
+        *mut AnyObject,
+        *mut AnyObject,
+    );
+
+    /// Swaps `selector`'s implementation on `class` for `imp`, keeping the
+    /// one it had in `previous`.
+    unsafe fn wrap(class: *const AnyClass, selector: Sel, imp: Imp, previous: &OnceLock<usize>) {
+        unsafe {
+            let method = objc2::ffi::class_getInstanceMethod(class, selector);
+            if method.is_null() || previous.get().is_some() {
+                return;
+            }
+            if let Some(original) = objc2::ffi::method_setImplementation(method as *mut _, imp) {
+                let _ = previous.set(original as usize);
+            }
+        }
+    }
+
+    pub fn catch() {
+        if let Some(app) = AnyClass::get(c"UIApplication") {
+            unsafe {
+                let imp: Imp = std::mem::transmute(set_delegate as SetDelegate);
+                wrap(app, sel!(setDelegate:), imp, &SET_DELEGATE);
+            }
+        }
+    }
+
+    unsafe extern "C-unwind" fn set_delegate(
+        this: *mut AnyObject,
+        cmd: Sel,
+        delegate: *mut AnyObject,
+    ) {
+        unsafe {
+            if let Some(&previous) = SET_DELEGATE.get() {
+                let previous: SetDelegate = std::mem::transmute(previous);
+                previous(this, cmd, delegate);
+            }
+            if let Some(scene) = AnyClass::get(c"TaoSceneDelegate") {
+                let imp: Imp = std::mem::transmute(connect as Connect);
+                wrap(
+                    scene,
+                    sel!(scene:willConnectToSession:options:),
+                    imp,
+                    &CONNECT,
+                );
+            }
+        }
+    }
+
+    unsafe extern "C-unwind" fn connect(
+        this: *mut AnyObject,
+        cmd: Sel,
+        scene: *mut AnyObject,
+        session: *mut AnyObject,
+        options: *mut AnyObject,
+    ) {
+        unsafe {
+            if !options.is_null() {
+                let contexts: *mut AnyObject = msg_send![options, URLContexts];
+                let context: *mut AnyObject = if contexts.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![contexts, anyObject]
+                };
+                let url: *mut AnyObject = if context.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![context, URL]
+                };
+                let text: *mut AnyObject = if url.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![url, absoluteString]
+                };
+                let utf8: *const c_char = if text.is_null() {
+                    std::ptr::null()
+                } else {
+                    msg_send![text, UTF8String]
+                };
+                if !utf8.is_null() {
+                    let link = CStr::from_ptr(utf8).to_string_lossy().into_owned();
+                    if link.starts_with("tty7pair:") {
+                        *super::OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+                    }
+                }
+            }
+            if let Some(&previous) = CONNECT.get() {
+                let previous: Connect = std::mem::transmute(previous);
+                previous(this, cmd, scene, session, options);
+            }
+        }
+    }
+}
+
+/// The link the app was opened with, once.
+#[tauri::command]
+fn opened_link() -> Option<String> {
+    OPENED.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 /// Light, dark or the system's, for what the page does not draw itself: the
@@ -596,4 +820,258 @@ fn edge_to_edge(window: &tauri::WebviewWindow) {
             let _: () = msg_send![scroll, setContentInsetAdjustmentBehavior: NEVER];
         }
     });
+}
+
+/// The keyboard, told to the page. The WebView runs edge to edge, and so it
+/// says the keyboard's size unreliably — not at all while WebKit's form bar
+/// is up, and halfway through its move otherwise: the page would go on under
+/// it, the message box with it. Where its top edge lands, and how long it
+/// takes to get there, are sent as a `native-keyboard` event as it starts to
+/// move, as Android's MainActivity sends its height. And WebKit's bar over it — the
+/// previous, next and Done of a web form — goes: a terminal has no form to
+/// step through, and the room is the pane's.
+#[cfg(target_os = "ios")]
+fn keyboard(window: &tauri::WebviewWindow) {
+    use block2::RcBlock;
+    use objc2::encode::{Encode, Encoding};
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::{msg_send, sel};
+    use std::ffi::{CStr, CString};
+    use std::ptr::{NonNull, null_mut};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Pair(f64, f64);
+    /// A CGRect: its origin, then its size, laid out alike.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect(Pair, Pair);
+    unsafe impl Encode for Rect {
+        const ENCODING: Encoding = Encoding::Struct(
+            "CGRect",
+            &[
+                Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]),
+                Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]),
+            ],
+        );
+    }
+
+    unsafe extern "C-unwind" fn no_bar(_this: *mut AnyObject, _cmd: Sel) -> *mut AnyObject {
+        null_mut()
+    }
+    unsafe fn string(s: &CStr) -> *mut AnyObject {
+        match AnyClass::get(c"NSString") {
+            Some(class) => msg_send![class, stringWithUTF8String: s.as_ptr()],
+            None => null_mut(),
+        }
+    }
+
+    // Set up on the main thread, where the WebView is handed over; it lives
+    // as long as the app, to measure against and to tell. Told directly, not
+    // through Tauri's `eval`, which waits on the main thread the keyboard is
+    // announced on.
+    let _ = window.with_webview(|webview| unsafe {
+        let wk = webview.inner() as *mut AnyObject;
+        if wk.is_null() {
+            return;
+        }
+        if let Some(content) = AnyClass::get(c"WKContentView") {
+            let imp: Imp = std::mem::transmute(
+                no_bar as unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> *mut AnyObject,
+            );
+            objc2::ffi::class_replaceMethod(
+                content as *const AnyClass as *mut AnyClass,
+                sel!(inputAccessoryView),
+                imp,
+                c"@@:".as_ptr(),
+            );
+        }
+
+        let (Some(center), Some(queue)) = (AnyClass::get(c"NSNotificationCenter"), AnyClass::get(c"NSOperationQueue"))
+        else {
+            return;
+        };
+        let center: *mut AnyObject = msg_send![center, defaultCenter];
+        let queue: *mut AnyObject = msg_send![queue, mainQueue];
+        let end_key: *mut AnyObject = msg_send![string(c"UIKeyboardFrameEndUserInfoKey"), retain];
+        let duration_key: *mut AnyObject = msg_send![string(c"UIKeyboardAnimationDurationUserInfoKey"), retain];
+        let changed = RcBlock::new(move |note: NonNull<AnyObject>| {
+            let info: *mut AnyObject = msg_send![note.as_ref(), userInfo];
+            if info.is_null() {
+                return;
+            }
+            let end: *mut AnyObject = msg_send![info, objectForKey: end_key];
+            if end.is_null() {
+                return;
+            }
+            let duration: *mut AnyObject = msg_send![info, objectForKey: duration_key];
+            let frame: Rect = msg_send![end, CGRectValue];
+            let seconds: f64 = if duration.is_null() { 0.25 } else { msg_send![duration, doubleValue] };
+            // Where its top edge will be, in the page's own pixels: what is
+            // above it is what the page has.
+            let local: Rect = msg_send![wk, convertRect: frame, fromView: null_mut::<AnyObject>()];
+            let Ok(script) = CString::new(format!(
+                "window.dispatchEvent(new CustomEvent('native-keyboard',{{detail:{{top:{},duration:{}}}}}))",
+                local.0 .1.round(),
+                (seconds * 1000.0).round()
+            )) else {
+                return;
+            };
+            let _: () = msg_send![
+                wk,
+                evaluateJavaScript: string(&script),
+                completionHandler: null_mut::<AnyObject>()
+            ];
+        });
+        let token: *mut AnyObject = msg_send![
+            center,
+            addObserverForName: string(c"UIKeyboardWillChangeFrameNotification"),
+            object: null_mut::<AnyObject>(),
+            queue: queue,
+            usingBlock: &*changed
+        ];
+        // Watched for as long as the app runs.
+        let _: *mut AnyObject = msg_send![token, retain];
+    });
+}
+
+/// The system bars and display cutout the page is drawn under, in CSS pixels.
+/// Android runs the WebView edge to edge, yet WebViews before 140 report
+/// `env(safe-area-inset-*)` as 0, so the page asks here. Zero elsewhere: iOS's
+/// WebView reports its own.
+#[derive(Serialize, Default)]
+struct Insets {
+    top: f64,
+    right: f64,
+    bottom: f64,
+    left: f64,
+}
+
+#[tauri::command]
+async fn insets(window: tauri::WebviewWindow) -> Insets {
+    #[cfg(target_os = "android")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = window.with_webview(move |webview| {
+            webview.jni_handle().exec(move |env, activity, _| {
+                let insets = android::insets(env, activity).unwrap_or_else(|_| {
+                    let _ = env.exception_clear();
+                    Insets::default()
+                });
+                let _ = tx.send(insets);
+            })
+        });
+        rx.await.unwrap_or_default()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = window;
+        Insets::default()
+    }
+}
+
+/// Back from the first screen: the app goes to the background, as Android's
+/// own apps do, rather than being closed.
+#[tauri::command]
+fn to_background(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "android")]
+    let _ = window.with_webview(|webview| {
+        webview.jni_handle().exec(|env, activity, _| {
+            if env
+                .call_method(activity, "moveTaskToBack", "(Z)Z", &[true.into()])
+                .is_err()
+            {
+                let _ = env.exception_clear();
+            }
+        })
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = window;
+}
+
+#[cfg(target_os = "android")]
+mod android {
+    use jni::JNIEnv;
+    use jni::errors::Result;
+    use jni::objects::JObject;
+
+    use super::Insets;
+
+    pub fn insets(env: &mut JNIEnv, activity: &JObject) -> Result<Insets> {
+        let window = env
+            .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .l()?;
+        let decor = env
+            .call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?
+            .l()?;
+        let insets = env
+            .call_method(
+                &decor,
+                "getRootWindowInsets",
+                "()Landroid/view/WindowInsets;",
+                &[],
+            )?
+            .l()?;
+        // Not attached yet: nothing to avoid.
+        if insets.is_null() {
+            return Ok(Insets::default());
+        }
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        let [top, right, bottom, left] = if sdk >= 30 {
+            let types = "android/view/WindowInsets$Type";
+            let bars = env
+                .call_static_method(types, "systemBars", "()I", &[])?
+                .i()?;
+            let cutout = env
+                .call_static_method(types, "displayCutout", "()I", &[])?
+                .i()?;
+            let edges = env
+                .call_method(
+                    &insets,
+                    "getInsets",
+                    "(I)Landroid/graphics/Insets;",
+                    &[(bars | cutout).into()],
+                )?
+                .l()?;
+            let mut side = |name| env.get_field(&edges, name, "I").and_then(|v| v.i());
+            [side("top")?, side("right")?, side("bottom")?, side("left")?]
+        } else {
+            let mut side = |name| {
+                env.call_method(&insets, name, "()I", &[])
+                    .and_then(|v| v.i())
+            };
+            [
+                side("getSystemWindowInsetTop")?,
+                side("getSystemWindowInsetRight")?,
+                side("getSystemWindowInsetBottom")?,
+                side("getSystemWindowInsetLeft")?,
+            ]
+        };
+        let resources = env
+            .call_method(
+                activity,
+                "getResources",
+                "()Landroid/content/res/Resources;",
+                &[],
+            )?
+            .l()?;
+        let metrics = env
+            .call_method(
+                &resources,
+                "getDisplayMetrics",
+                "()Landroid/util/DisplayMetrics;",
+                &[],
+            )?
+            .l()?;
+        let density = f64::from(env.get_field(&metrics, "density", "F")?.f()?).max(1.0);
+        let css = |px: i32| f64::from(px) / density;
+        Ok(Insets {
+            top: css(top),
+            right: css(right),
+            bottom: css(bottom),
+            left: css(left),
+        })
+    }
 }

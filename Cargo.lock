@@ -3867,7 +3867,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0464254c69d9c1c341c3ee7846fd2dffecee0068"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3950,7 +3950,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0464254c69d9c1c341c3ee7846fd2dffecee0068"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3964,7 +3964,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0464254c69d9c1c341c3ee7846fd2dffecee0068"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9908,8 +9908,6 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "simple-dns"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b6f884fa9a8d48101774bfbd3aeb81e968dd22cffd19a372da69f183db22c1a"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -11543,6 +11541,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "iroh",
  "jieba-rs",
  "keyring",
  "ksni",
@@ -11567,6 +11566,7 @@ dependencies = [
  "smallvec",
  "smol",
  "tempfile",
+ "tokio",
  "tray-icon",
  "tty7-core",
  "tty7-gateway",
@@ -11638,6 +11638,7 @@ dependencies = [
 name = "tty7-gateway"
 version = "26.9.4"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "clap",
  "getrandom 0.3.4",
@@ -11653,6 +11654,7 @@ dependencies = [
  "tty7-core",
  "tty7-mobile-client",
  "tty7-mobile-proto",
+ "url",
 ]
 
 [[package]]

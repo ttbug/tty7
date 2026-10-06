@@ -58,7 +58,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMobileShowCode => "显示配对码",
         L10nKey::SettingsMobilePairDesc => "生成一个一次性配对码，给手机上的 tty7 app 用。",
         L10nKey::SettingsMobilePairNeedsAccess => "请先打开手机访问。",
-        L10nKey::SettingsMobilePairScan => "用手机上的 tty7 app 扫描，或者复制配对码粘贴过去。",
+        L10nKey::SettingsMobilePairScan => {
+            "用手机相机对准它，或在 tty7 app 里扫描，或者复制配对码粘贴过去。"
+        }
         L10nKey::SettingsMobilePairValid => "{time} 后失效，只能配对一台手机。",
         L10nKey::SettingsMobileNewCode => "换一个配对码",
         L10nKey::SettingsMobilePairExpired => "这个配对码已过期。生成一个新的再配对。",
@@ -230,6 +232,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseTabBusyTitle => "关闭这个标签页？",
         L10nKey::CloseBusyCommandBody => "{what} 还在运行，关闭会终止它。",
         L10nKey::CloseBusyAgentBody => "{agent} 还在工作，关闭会中断这一轮。",
+        L10nKey::CloseIdleBody => "里面的 shell 也会随之结束。",
+        L10nKey::CloseTabsTitle => "关闭 {count} 个标签页？",
+        L10nKey::CloseTabsBody => "里面的 shell 也会一并结束。",
         L10nKey::Keep => "保留",
         L10nKey::SettingsNavAppearance => "外观",
         L10nKey::SettingsNavTerminal => "终端",
@@ -278,6 +283,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => {
             "语言 区域设置 英文 中文 language locale english chinese"
         }
@@ -307,6 +313,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "跟随主题",
         L10nKey::SettingsDimInactivePanes => "调暗非活动窗格",
         L10nKey::SettingsDimInactivePanesDesc => "在分屏中淡化未聚焦的窗格，让活动窗格更突出。",
+        L10nKey::SettingsAutoHideTitlebarButtons => "悬停时显示标题栏按钮",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "新标签页、侧栏开关等按钮平时隐藏，鼠标移到标题栏上才出现。"
+        }
         L10nKey::SettingsOpenThemesFolder => "打开主题文件夹",
         L10nKey::SettingsChangeThemeImage => "更改…",
         L10nKey::SettingsChooseThemeImage => "选择…",
@@ -633,6 +643,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
+        L10nKey::SettingsConfirmClose => "关闭前确认",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "关闭标签页或窗格前是否先问一下。设了“关闭前警告”的 SSH 主机无论如何都会询问。"
+        }
+        L10nKey::ConfirmCloseNever => "从不",
+        L10nKey::ConfirmCloseWhenBusy => "有程序在运行时",
+        L10nKey::ConfirmCloseAlways => "总是",
         L10nKey::SettingsTabBarPosition => "标签栏位置",
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
         L10nKey::SettingsSidebarGrouping => "自动分组",
@@ -650,6 +667,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyModeNever => "从不",
         L10nKey::NotifyModeUnfocused => "窗口未聚焦时",
         L10nKey::NotifyModeAlways => "总是",
+        L10nKey::ProgramNotesDropped => "此窗格的其他通知未显示",
         L10nKey::SettingsStartupNormal => "普通",
         L10nKey::SettingsStartupMaximized => "最大化",
         L10nKey::SettingsStartupFullscreen => "全屏",
@@ -789,6 +807,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "需要手动安装",
+        L10nKey::AppAgentHooksMuseManualInstall => "请在目标机器上运行: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
@@ -848,6 +871,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "调暗 非活动窗格 淡化 未聚焦 分屏 高亮 active dimming pane focus"
         }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "自动隐藏 标题栏 按钮 悬停 鼠标 简洁 新标签页 侧栏 auto hide title bar buttons hover"
+        }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "焦点跟随鼠标 悬停 激活 窗格 focus follows mouse hover activate pane"
         }
@@ -891,6 +917,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "新标签页位置 标签页 顺序 末尾 当前之后 new tab position tabs order end after current"
+        }
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "关闭前确认 关闭 标签页 窗格 询问 提示 运行中 空闲 总是 从不 confirm close tab pane ask prompt busy idle always never"
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "命令完成时通知 通知 提醒 命令 notify command finish notification alert desktop"
@@ -945,6 +974,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "Prime Agent agent 集成 扩展 安装 prime prime-agent primeintellect"
         }
+        L10nKey::SettingsSearchEmpryoKeywords => "Empryo agent 集成 钩子 安装 empryo",
+        L10nKey::SettingsSearchJcodeKeywords => "jcode agent 集成 钩子 安装 jcode",
+        L10nKey::SettingsSearchMuseKeywords => "Muse Code agent 集成 钩子 插件 安装 muse meta",
         L10nKey::SettingsSearchAntigravityKeywords => {
             "Antigravity agent 集成 钩子 安装 antigravity agy google"
         }
@@ -1274,6 +1306,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNoChangesHint => "worktree 是干净的。",
         L10nKey::PanelSessionSubtitle => "会话",
         L10nKey::PanelProcessesSubtitle => "进程",
+        L10nKey::PanelProcessesTotal => "合计",
         L10nKey::PanelPortsSubtitle => "端口",
         L10nKey::PanelLatency => "延迟",
         L10nKey::PanelPortsUnsupported => "对端的 tty7-server 太旧，列不出端口。",
@@ -1705,6 +1738,27 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGitFetch => "Git：获取",
         L10nKey::CmdGitToggleGraph => "Git：显示 / 隐藏提交历史",
         L10nKey::CmdFindInTerminal => "在终端中查找…",
+        L10nKey::CmdToggleComposer => "切换消息输入框",
+        L10nKey::ComposerModeDefault => "编辑前询问",
+        L10nKey::ComposerModeAcceptEdits => "自动接受编辑",
+        L10nKey::ComposerModePlan => "计划模式",
+        L10nKey::ComposerModeBypass => "跳过权限确认",
+        L10nKey::ComposerModeAuto => "自动模式",
+        L10nKey::ComposerModeTip => "权限模式  ·  Shift+Tab 切换",
+        L10nKey::ComposerModel => "模型",
+        L10nKey::ComposerModelTip => "切换模型",
+        L10nKey::ComposerModelDefault => "默认（推荐）",
+        L10nKey::ComposerEffort => "推理强度",
+        L10nKey::ComposerEffortTip => "推理强度  ·  点击切换",
+        L10nKey::ComposerPlaceholder => "给 {agent} 发消息   ·   @ 文件   / 命令",
+        L10nKey::ComposerPlaceholderFiles => "给 {agent} 发消息   ·   @ 文件",
+        L10nKey::ComposerSendTip => "发送（Enter）  ·  Shift+Enter 换行",
+        L10nKey::ComposerAttach => "附加文件或图片",
+        L10nKey::ComposerMenuCommands => "命令",
+        L10nKey::ComposerMenuFiles => "文件",
+        L10nKey::ComposerCmdProject => "项目命令",
+        L10nKey::ComposerCmdUser => "用户命令",
+        L10nKey::ComposerAgentAsking => "{agent} 正在等你回答，请先在终端里回答再发送。",
         L10nKey::CmdFindNext => "查找下一个",
         L10nKey::CmdFindPrevious => "查找上一个",
         L10nKey::CmdCopy => "复制",
@@ -2052,6 +2106,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarUngroupedGroup => "未分组",
         L10nKey::SidebarMoveToGroup => "移到分组",
         L10nKey::SidebarNewGroup => "新建分组…",
+        L10nKey::SidebarRemoveFromGroup => "移出分组",
         L10nKey::SidebarNewGroupName => "新建分组",
         L10nKey::SidebarRenameGroup => "重命名分组",
         L10nKey::SidebarPinGroup => "固定分组",
@@ -2212,6 +2267,8 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SftpReplaceBody, "one") => "{names} 在这个文件夹里已经存在，上传会覆盖它。",
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
+        (L10nKey::CloseTabsTitle, "one") => "关闭 1 个标签页？",
+        (L10nKey::CloseTabsTitle, "other") => "关闭 {count} 个标签页？",
         (L10nKey::AppTabsNotRestored, "one") => "上次的 1 个标签页没能重新打开",
         (L10nKey::AppTabsNotRestored, "other") => "上次的 {count} 个标签页没能重新打开",
         (L10nKey::LaunchWorkspacesLeftRunning, "one") => {

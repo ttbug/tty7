@@ -556,6 +556,7 @@ impl Tty7App {
         let config = cx.global::<Config>();
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
+        let auto_hide_titlebar_buttons = config.auto_hide_titlebar_buttons;
         let opacity = Tty7App::effective_window_opacity(cx);
 
         const MIN: f32 = 0.2;
@@ -638,6 +639,12 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_dim_inactive_panes(on, cx),
         );
+        let auto_hide_chrome = self.settings_switch(
+            "auto-hide-titlebar-buttons",
+            auto_hide_titlebar_buttons,
+            cx,
+            |this, on, _, cx| this.set_auto_hide_titlebar_buttons(on, cx),
+        );
         let follow_theme = overridden.then(|| {
             h_flex()
                 .pt(px(4.))
@@ -686,6 +693,15 @@ impl Tty7App {
                 t(L10nKey::SettingsDimInactivePanes),
                 t(L10nKey::SettingsDimInactivePanesDesc),
                 dim,
+                cx,
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            self.settings_row(
+                t(L10nKey::SettingsAutoHideTitlebarButtons),
+                t(L10nKey::SettingsAutoHideTitlebarButtonsDesc),
+                auto_hide_chrome,
                 cx,
             )
             .into_any_element(),
@@ -1373,6 +1389,29 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let confirm_idx = match cfg.confirm_close {
+            ConfirmClose::Never => 0,
+            ConfirmClose::WhenBusy => 1,
+            ConfirmClose::Always => 2,
+        };
+        let confirm = self.settings_choice(
+            "wt-confirm-close",
+            &[
+                t(L10nKey::ConfirmCloseNever),
+                t(L10nKey::ConfirmCloseWhenBusy),
+                t(L10nKey::ConfirmCloseAlways),
+            ],
+            confirm_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => ConfirmClose::Never,
+                    1 => ConfirmClose::WhenBusy,
+                    _ => ConfirmClose::Always,
+                };
+                this.set_confirm_close(mode, cx);
+            },
+        );
         let new_tab = self.settings_choice(
             "wt-new-tab-pos",
             &[t(L10nKey::SettingsAfterCurrent), t(L10nKey::SettingsAtEnd)],
@@ -1431,6 +1470,12 @@ impl Tty7App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsConfirmClose),
+                    t(L10nKey::SettingsConfirmCloseDesc),
+                    confirm,
                     cx,
                 ),
             ]

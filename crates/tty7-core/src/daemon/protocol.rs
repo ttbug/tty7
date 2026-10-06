@@ -464,13 +464,23 @@ pub struct ManagedForward {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcEntry {
     pub pid: u32,
     pub name: String,
     pub depth: u8,
     #[serde(default)]
     pub foreground: bool,
+    /// Resident memory in bytes, total CPU time (user + system) in ns, and an
+    /// opaque start stamp that tells a reused pid from the process it replaced.
+    /// `None` from a daemon that predates them or could not read them; not a
+    /// `PROTOCOL_VERSION` bump, since either side skips what it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,6 +896,18 @@ pub enum ClientMsg {
         pane_id: u64,
         bytes: Vec<u8>,
     },
+    /// An agent hook's report about the pane it runs in — the JSON body of
+    /// the `tty7://cli-agent` OSC 777 sequence — handed straight to the
+    /// daemon rather than written to the pane's tty, where the agent's own
+    /// output can cut into it. `pid` is the hook's process, which has to be
+    /// running under the pane for the report to count. Answered with
+    /// `InputAck` when applied and `Error` when not, so the hook knows to
+    /// fall back to the tty.
+    AgentEvent {
+        pane_id: u64,
+        pid: u32,
+        event: String,
+    },
     Resize(WinSize),
     Detach,
     Kill {
@@ -905,6 +927,15 @@ pub enum ClientMsg {
     },
     EnsureLoopbackForward(LoopbackForwardRequest),
     SpawnNativeSsh {
+        /// The directory *on the remote host* for the shell to start in —
+        /// where a pane being dialled again (restore, Reconnect, a split, ⌘T)
+        /// last reported it was. Never a path on this machine: it is not
+        /// checked or canonicalized here, only handed to the far shell, and a
+        /// fresh connection from a saved host sends `None`.
+        ///
+        /// Honoured only when the session gets a shell-integration bootstrap
+        /// to carry it; a relative path is ignored, and one that no longer
+        /// exists leaves the shell in the login directory.
         cwd: Option<PathBuf>,
         size: WinSize,
         spec: Box<NativeSshSpec>,
@@ -1059,6 +1090,7 @@ mod kind {
     pub const SEND_INPUT: u8 = 55;
     pub const HANDOFF: u8 = 56;
     pub const LEASE: u8 = 57;
+    pub const AGENT_EVENT: u8 = 58;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1283,6 +1315,11 @@ impl ClientMsg {
             ClientMsg::SendInput { pane_id, bytes } => {
                 write_frame(w, kind::SEND_INPUT, &to_json(&(pane_id, bytes))?)
             }
+            ClientMsg::AgentEvent {
+                pane_id,
+                pid,
+                event,
+            } => write_frame(w, kind::AGENT_EVENT, &to_json(&(pane_id, pid, event))?),
             ClientMsg::Resize(size) => write_frame(w, kind::RESIZE, &to_json(size)?),
             ClientMsg::Detach => write_frame(w, kind::DETACH, &[]),
             ClientMsg::Kill { pane_id } => write_frame(w, kind::KILL, &to_json(pane_id)?),
@@ -1409,6 +1446,14 @@ impl ClientMsg {
             kind::SEND_INPUT => {
                 let (pane_id, bytes) = from_json(&payload)?;
                 ClientMsg::SendInput { pane_id, bytes }
+            }
+            kind::AGENT_EVENT => {
+                let (pane_id, pid, event) = from_json(&payload)?;
+                ClientMsg::AgentEvent {
+                    pane_id,
+                    pid,
+                    event,
+                }
             }
             kind::RESIZE => ClientMsg::Resize(from_json(&payload)?),
             kind::DETACH => ClientMsg::Detach,
@@ -1770,6 +1815,11 @@ mod tests {
                 pane_id: 7,
                 bytes: Vec::new(),
             },
+            ClientMsg::AgentEvent {
+                pane_id: 7,
+                pid: 4242,
+                event: r#"{"v":1,"agent":"claude","event":"stop"}"#.into(),
+            },
             ClientMsg::Resize(SIZE),
             ClientMsg::Detach,
             ClientMsg::Kill { pane_id: 7 },
@@ -1952,6 +2002,7 @@ mod tests {
                 activity: 12,
                 turns: 4,
                 inferred: false,
+                readout: Default::default(),
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

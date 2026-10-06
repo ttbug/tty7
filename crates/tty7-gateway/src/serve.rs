@@ -7,10 +7,13 @@
 //! channels are bounded: a phone that stops reading stalls its own thread, and
 //! through it only its own daemon connection, never the gateway.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::mirror::Mirror;
 
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -20,9 +23,9 @@ use tty7_core::core::machine::Machine;
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_core::daemon::protocol::{DaemonMsg, LeaseRequest, WinSize};
 use tty7_mobile_proto::{
-    ControlEvent, ControlRequest, Diff, Frame, GridSize, MAX_DIFF, MAX_UPLOAD, Open, OpenReply,
-    PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded, read_frame,
-    write_bytes, write_msg,
+    ControlEvent, ControlRequest, Diff, Frame, FrameReader, GridSize, MAX_DIFF, MAX_UPLOAD, Open,
+    OpenReply, PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded,
+    read_frame, write_bytes, write_msg,
 };
 
 use crate::state::State;
@@ -63,6 +66,16 @@ pub trait Backend: Send + Sync + 'static {
         cwd: Option<String>,
         size: Option<GridSize>,
     ) -> io::Result<TabCreated>;
+    /// Closes a tab and ends its panes, keeping it to reopen where the
+    /// machine can.
+    fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()>;
+    /// Closes a pane as the desktop does: out of its tab (the tab too, if it
+    /// was the last pane there), and whatever runs in it ended.
+    fn close_pane(&self, machine: Option<&str>, pane_id: u64) -> io::Result<()>;
+    /// The panes this machine's server has running, when it can say.
+    fn running_panes(&self) -> Option<HashSet<u64>> {
+        None
+    }
 }
 
 /// One linked machine, as [`Backend::remotes`] reports it.
@@ -203,6 +216,40 @@ async fn serve_stream(
             finish(send).await;
             Ok(())
         }
+        Open::CloseTab {
+            workspace_id,
+            tab_id,
+            machine,
+        } => {
+            let closed = {
+                let backend = backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    backend.close_tab(machine.as_deref(), &workspace_id, &tab_id)
+                })
+                .await
+                .map_err(io::Error::other)?
+            };
+            match closed {
+                Ok(()) => write_msg(&mut send, &ok).await?,
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::ClosePane { pane_id, machine } => {
+            let closed = {
+                let backend = backend.clone();
+                tokio::task::spawn_blocking(move || backend.close_pane(machine.as_deref(), pane_id))
+                    .await
+                    .map_err(io::Error::other)?
+            };
+            match closed {
+                Ok(()) => write_msg(&mut send, &ok).await?,
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
         Open::Diff { cwd, machine } => {
             let read = if machine.is_some() {
                 Err(io::Error::other(
@@ -313,10 +360,13 @@ fn read_diff(cwd: &str) -> io::Result<Diff> {
     let truncated = out.stdout.len() > MAX_DIFF;
     let mut patch = out.stdout;
     patch.truncate(MAX_DIFF);
+    // A new directory is one entry, as `git status` shows it, not every
+    // file under it: a generated folder would bury the rest.
     let untracked = git(&[
         "ls-files",
         "--others",
         "--exclude-standard",
+        "--directory",
         "--full-name",
         ":/",
     ])?;
@@ -416,7 +466,7 @@ async fn finish(mut send: SendStream) {
 
 async fn control_stream(
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     backend: Arc<dyn Backend>,
 ) -> io::Result<()> {
     let (events_tx, mut events) = mpsc::channel::<ControlEvent>(4);
@@ -425,9 +475,12 @@ async fn control_stream(
         .name("gateway-tree".into())
         .spawn(move || watch_tree(backend, events_tx, refresh_rx))?;
 
+    // A `select!` drops whichever arm loses, so the read has to survive
+    // being dropped mid-frame.
+    let mut frames = FrameReader::new(recv);
     loop {
         tokio::select! {
-            frame = read_frame(&mut recv) => match frame? {
+            frame = frames.next() => match frame? {
                 Some(frame) => match frame.msg::<ControlRequest>()? {
                     ControlRequest::Refresh => {
                         let _ = refresh_tx.send(());
@@ -461,7 +514,18 @@ fn watch_tree(
         let event = match backend.snapshot() {
             Ok((machine, agents)) => {
                 failing = false;
-                let mut tree = tree::build(&host, &machine, &agents);
+                // This machine's directories are this process's to read.
+                let running = backend.running_panes();
+                let mut tree = tree::build_with(
+                    &host,
+                    &machine,
+                    &agents,
+                    |cwd| {
+                        tty7_core::core::git::head::read_head(std::path::Path::new(cwd))
+                            .map(|h| h.home)
+                    },
+                    running.as_ref(),
+                );
                 tree.remotes = backend.remotes().into_iter().map(remote_view).collect();
                 if forced || last.as_ref() != Some(&tree) {
                     last = Some(tree.clone());
@@ -543,7 +607,7 @@ async fn pane_stream(
     by: String,
     mut feed: Box<dyn PaneFeed>,
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     backend: Arc<dyn Backend>,
 ) -> io::Result<()> {
     let (down_tx, mut down) = mpsc::channel::<Down>(PANE_BACKLOG);
@@ -613,9 +677,12 @@ async fn pane_stream(
             }
         })?;
 
+    // A `select!` drops whichever arm loses — every time output goes down —
+    // so the read has to survive being dropped mid-frame.
+    let mut frames = FrameReader::new(recv);
     loop {
         tokio::select! {
-            frame = read_frame(&mut recv) => match frame? {
+            frame = frames.next() => match frame? {
                 Some(Frame::Bytes(bytes)) => {
                     let _ = input_tx.send(Up::Keys(bytes));
                 }
@@ -647,18 +714,34 @@ async fn pane_stream(
     }
 }
 
+/// How long a fresh drawing of the screen waits for the output that made it
+/// stale to stop, and the longest it waits while output keeps coming.
+const DRAW_SETTLE: Duration = Duration::from_millis(30);
+const DRAW_LIMIT: Duration = Duration::from_millis(200);
+
 fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
     // The daemon reports the agent and its status in separate messages; the
     // phone gets both together.
     let mut agent: Option<CLIAgent> = None;
     let mut status: Option<AgentSessionState> = None;
+    // The pane as the desktop reads it (`mirror`), and since when the phone's
+    // copy has been out of date: from the start, while the replay comes in,
+    // then after a resize or a full-screen program's exit. Output that
+    // arrives meanwhile goes into the drawing rather than past it.
+    let mut mirror: Option<Mirror> = None;
+    let mut size = (80, 24);
+    let mut stale: Option<Instant> = Some(Instant::now());
     loop {
         if down.is_closed() {
             return;
         }
-        let msg = match feed.recv(FEED_TICK) {
-            Ok(Some(msg)) => msg,
-            Ok(None) => continue,
+        let wait = if stale.is_some() {
+            DRAW_SETTLE
+        } else {
+            FEED_TICK
+        };
+        let msg = match feed.recv(wait) {
+            Ok(msg) => msg,
             Err(e) => {
                 let _ = down.blocking_send(Down::Event(PaneEvent::Error {
                     message: e.to_string(),
@@ -666,12 +749,48 @@ fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
                 return;
             }
         };
+        // Drawn once the burst is over, or anything other than output is
+        // about to be said, or it has waited long enough.
+        let burst = matches!(
+            msg,
+            Some(DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_))
+        );
+        if stale.is_some_and(|since| !burst || since.elapsed() >= DRAW_LIMIT) {
+            stale = None;
+            if let Some(mirror) = &mirror {
+                let (cols, rows) = size;
+                let drawn = [
+                    Down::Event(PaneEvent::Size { cols, rows }),
+                    Down::Bytes(mirror.draw()),
+                ];
+                for item in drawn {
+                    if down.blocking_send(item).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+        let Some(msg) = msg else { continue };
         let item = match msg {
-            DaemonMsg::Size(size) => Down::Event(PaneEvent::Size {
-                cols: size.cols,
-                rows: size.rows,
-            }),
-            DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes) => Down::Bytes(bytes),
+            DaemonMsg::Size(new) => {
+                size = (new.cols, new.rows);
+                match &mut mirror {
+                    Some(mirror) => mirror.resize(new.cols, new.rows),
+                    None => mirror = Some(Mirror::new(new.cols, new.rows)),
+                }
+                stale.get_or_insert_with(Instant::now);
+                continue;
+            }
+            DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes) => {
+                let mirror = mirror.get_or_insert_with(|| Mirror::new(size.0, size.1));
+                if mirror.feed(&bytes) {
+                    stale.get_or_insert_with(Instant::now);
+                }
+                if stale.is_some() {
+                    continue;
+                }
+                Down::Bytes(bytes)
+            }
             DaemonMsg::Cwd(path) => Down::Event(PaneEvent::Cwd {
                 path: path.to_string_lossy().into_owned(),
             }),

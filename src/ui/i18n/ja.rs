@@ -71,7 +71,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "先にスマートフォンからのアクセスをオンにしてください。"
         }
         L10nKey::SettingsMobilePairScan => {
-            "スマートフォンの tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
+            "スマートフォンのカメラを向けるか、tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
         }
         L10nKey::SettingsMobilePairValid => {
             "あと {time} で失効します。1 台のスマートフォンに限ります。"
@@ -270,6 +270,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseSshConnectionBody => "接続中です。閉じると切断されます",
         L10nKey::ClosePaneBusyTitle => "このペインを閉じますか？",
         L10nKey::CloseTabBusyTitle => "このタブを閉じますか？",
+        L10nKey::CloseIdleBody => "中のシェルも終了します。",
+        L10nKey::CloseTabsTitle => "{count} 個のタブを閉じますか？",
+        L10nKey::CloseTabsBody => "中のシェルもすべて終了します。",
         L10nKey::CloseBusyCommandBody => "{what} はまだ実行中です。閉じると終了します。",
         L10nKey::CloseBusyAgentBody => {
             "{agent} はまだ作業中です。閉じるとこのターンは中断されます。"
@@ -324,6 +327,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => {
             "言語 ロケール 英語 中国語 language locale english chinese"
         }
@@ -353,6 +357,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "テーマに従う",
         L10nKey::SettingsDimInactivePanes => "非アクティブなペインを暗くする",
         L10nKey::SettingsDimInactivePanesDesc => "フォーカス外のペインを暗くします",
+        L10nKey::SettingsAutoHideTitlebarButtons => "タイトルバーのボタンをホバー時に表示",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "新規タブやサイドバーのボタンを、ポインタがタイトルバーに乗ったときだけ表示します"
+        }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
         L10nKey::SettingsChooseThemeImage => "選択…",
@@ -736,6 +744,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
+        L10nKey::SettingsConfirmClose => "閉じる前に確認",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "タブやペインを閉じる前に確認するタイミング。「閉じる前に警告」を有効にした SSH ホストは常に確認します"
+        }
+        L10nKey::ConfirmCloseNever => "確認しない",
+        L10nKey::ConfirmCloseWhenBusy => "実行中のときのみ",
+        L10nKey::ConfirmCloseAlways => "常に確認",
         L10nKey::SettingsNewTabPositionDesc => "新しく開いたタブが挿入される場所",
         L10nKey::SettingsTabBarPosition => "タブバーの位置",
         L10nKey::SettingsTabBarPositionDesc => {
@@ -758,6 +773,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyModeNever => "通知しない",
         L10nKey::NotifyModeUnfocused => "非フォーカス時のみ",
         L10nKey::NotifyModeAlways => "常に通知",
+        L10nKey::ProgramNotesDropped => "このペインのほかの通知は表示されませんでした",
         L10nKey::SettingsStartupNormal => "通常サイズ",
         L10nKey::SettingsStartupMaximized => "最大化",
         L10nKey::SettingsStartupFullscreen => "全画面",
@@ -913,6 +929,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "手動インストールが必要",
+        L10nKey::AppAgentHooksMuseManualInstall => "対象のマシンで実行: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
@@ -974,6 +995,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "非アクティブ ペイン 暗く フォーカス 分割 fade unfocused inactive split pane focus opacity highlight active dimming"
         }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "自動 隠す タイトルバー ボタン ホバー ポインタ すっきり 新規タブ サイドバー auto hide title bar buttons hover"
+        }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"
         }
@@ -1017,6 +1041,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "タブ 順序 末尾 現在のタブの隣 new tab position tabs order end after current"
+        }
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "閉じる 確認 タブ ペイン 実行中 アイドル 常に しない confirm close tab pane ask prompt busy idle always never"
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "通知 アラート 完了 osc デスクトップ バナー 長い コマンド notify on command finish notification alert desktop"
@@ -1074,6 +1101,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "エージェント 統合 拡張 インストール prime prime-agent primeintellect agent integration extension install"
+        }
+        L10nKey::SettingsSearchEmpryoKeywords => {
+            "エージェント 統合 フック インストール empryo agent integration hooks install"
+        }
+        L10nKey::SettingsSearchJcodeKeywords => {
+            "エージェント 統合 フック インストール jcode agent integration hooks install"
+        }
+        L10nKey::SettingsSearchMuseKeywords => {
+            "エージェント 統合 フック プラグイン インストール muse meta agent integration hooks plugins install"
         }
         L10nKey::SettingsSearchAntigravityKeywords => {
             "エージェント 統合 フック インストール antigravity agy google agent integration hooks install"
@@ -1428,6 +1464,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNoChangesHint => "ワーキングツリーはクリーンです",
         L10nKey::PanelSessionSubtitle => "セッション",
         L10nKey::PanelProcessesSubtitle => "プロセス",
+        L10nKey::PanelProcessesTotal => "合計",
         L10nKey::PanelPortsSubtitle => "ポート",
         L10nKey::PanelLatency => "遅延",
         L10nKey::PanelPortsUnsupported => "リモートの tty7-server が古く、ポートを列挙できません。",
@@ -1893,6 +1930,29 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGitToggleGraph => "Git: コミット履歴の表示切替",
         L10nKey::CmdClearScrollback => "スクロールバックをクリア",
         L10nKey::CmdFindInTerminal => "ターミナル内を検索…",
+        L10nKey::CmdToggleComposer => "メッセージ入力欄の切り替え",
+        L10nKey::ComposerModeDefault => "編集前に確認",
+        L10nKey::ComposerModeAcceptEdits => "編集を自動承認",
+        L10nKey::ComposerModePlan => "プランモード",
+        L10nKey::ComposerModeBypass => "権限確認をスキップ",
+        L10nKey::ComposerModeAuto => "自動モード",
+        L10nKey::ComposerModeTip => "権限モード  ·  Shift+Tab で切り替え",
+        L10nKey::ComposerModel => "モデル",
+        L10nKey::ComposerModelTip => "モデルを切り替え",
+        L10nKey::ComposerModelDefault => "デフォルト（推奨）",
+        L10nKey::ComposerEffort => "推論の強さ",
+        L10nKey::ComposerEffortTip => "推論の強さ  ·  クリックして変更",
+        L10nKey::ComposerPlaceholder => "{agent} にメッセージ   ·   @ ファイル   / コマンド",
+        L10nKey::ComposerPlaceholderFiles => "{agent} にメッセージ   ·   @ ファイル",
+        L10nKey::ComposerSendTip => "送信（Enter）  ·  Shift+Enter で改行",
+        L10nKey::ComposerAttach => "ファイルや画像を添付",
+        L10nKey::ComposerMenuCommands => "コマンド",
+        L10nKey::ComposerMenuFiles => "ファイル",
+        L10nKey::ComposerCmdProject => "プロジェクトのコマンド",
+        L10nKey::ComposerCmdUser => "ユーザーのコマンド",
+        L10nKey::ComposerAgentAsking => {
+            "{agent} が質問しています。ターミナルで答えてから送信してください。"
+        }
         L10nKey::CmdFindNext => "次を検索",
         L10nKey::CmdFindPrevious => "前を検索",
         L10nKey::CmdCopy => "コピー",
@@ -2264,6 +2324,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarUngroupedGroup => "未分類",
         L10nKey::SidebarMoveToGroup => "グループへ移動",
         L10nKey::SidebarNewGroup => "新規グループ…",
+        L10nKey::SidebarRemoveFromGroup => "グループから外す",
         L10nKey::SidebarNewGroupName => "新規グループ",
         L10nKey::SidebarRenameGroup => "グループ名を変更",
         L10nKey::SidebarPinGroup => "グループを固定",
@@ -2442,6 +2503,8 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => {
             "{names} はこのフォルダに既に存在します。アップロードすると上書きされます。"
         }
+        (L10nKey::CloseTabsTitle, "one") => "1 個のタブを閉じますか？",
+        (L10nKey::CloseTabsTitle, "other") => "{count} 個のタブを閉じますか？",
         (L10nKey::AppTabsNotRestored, "one") => "前回のタブ 1 個を開き直せませんでした",
         (L10nKey::AppTabsNotRestored, "other") => "前回のタブ {count} 個を開き直せませんでした",
         (L10nKey::LaunchWorkspacesLeftRunning, "one") => {

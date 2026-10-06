@@ -71,7 +71,9 @@ npm run tauri ios init       # once: generates src-tauri/gen/apple
 npm run tauri ios dev        # simulator, or pick a connected device
 ```
 
-To send a build to TestFlight (Xcode signed in to an account on the team):
+Releases go to TestFlight from CI (see [Releasing](#releasing)). To send one from this
+machine instead, signed in to Xcode with an account on the team, or with an App Store
+Connect API key in `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_PATH`:
 
 ```sh
 scripts/testflight.sh              # archive, sign for the App Store, upload
@@ -83,14 +85,61 @@ last. `--build-number 7` picks it.
 
 ### Android
 
-Needs Android Studio's SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set.
+Needs the Android SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set, and a JDK 17 to 21
+as `JAVA_HOME`.
 
 ```sh
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 cd mobile
-npm run tauri android init
-npm run tauri android dev
+npm run tauri android dev                                        # emulator or a connected phone
+npm run tauri android build -- --debug --apk --target aarch64   # an installable .apk
 ```
+
+`src-tauri/gen/android` is kept in the repo, unlike `gen/apple`: its `MainActivity` hands the
+keyboard's height to the page, which the WebView does not report edge to edge. Don't re-run
+`android init` over it.
+
+The release key is in the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and
+`ANDROID_KEY_ALIAS` secrets, with a copy kept outside GitHub. A local release build signs
+with it when `src-tauri/gen/android/keystore.properties` (ignored by git) names it:
+
+```properties
+storeFile=/path/to/tty7-release.jks
+storePassword=…
+keyAlias=tty7
+keyPassword=…
+```
+
+### Releasing
+
+Both platforms ship at one version, apart from the desktop's:
+
+1. Raise `version` in `src-tauri/tauri.conf.json` and merge it. Each version must be higher
+   than the last: Android installs over a build only when its versionCode, which Tauri
+   derives from the version, is higher.
+2. Tag that commit `mobile-v<version>` and push the tag.
+
+`.github/workflows/mobile.yml` then:
+
+- **Android:** builds a signed arm64 APK and attaches it to a draft release, which you
+  publish. The release is never marked latest, because the desktop updater reads
+  `/releases/latest`.
+- **iOS:** uploads a build to TestFlight. It reaches testers once App Store Connect has
+  processed it, and, for the external group, once Beta App Review passes.
+- **Checks:** a tag that doesn't match `tauri.conf.json` fails the run.
+
+Running the workflow by hand builds both platforms but uploads nothing.
+
+Secrets:
+
+| Secret | What |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` | the Android release key |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` | an App Store Connect API key with the Admin role, which signs and uploads iOS builds (App Manager keys may not sign in the cloud) |
+
+Keep both keys outside GitHub as well; secrets can't be read back. A phone feature that
+needs a newer desktop says so when the desktop is older, so the release notes should name
+the desktop version a release needs.
 
 ### Without a phone
 

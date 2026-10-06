@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 已解决当前 `feat/own` 合并 `main`（`cd640388`）的两个冲突：保留当前分支的 MiniMax Code／Command Code Hook 能力与侧边栏修改，同时合入 main 的新 Agent、远程安装测试及进程 CPU／内存信息列；补齐合并后 `CLIAgent::ALL`、AgentEvent 测试字段和俄文翻译覆盖。已通过 `cargo fmt --check`、`cargo test -p tty7-core --lib agent_hooks`（71 项）、`cargo test -p tty7 'ui::tab_sidebar::'`（50 项）和 `cargo check -p tty7`。
 - 已将 `main`（`ef20382`）合并到当前 `feat/own`：保留当前分支 sidebar 品牌区、树连接线、底部 workspace 入口、颜色布局与选中态阶梯，同时合入 main 的移动端／网关模块、可访问性标注、主题可读性修正及其他新增功能；已解决 `src/ui/presets.rs` 与 `src/ui/tab_sidebar.rs` 冲突。
 - 已将 main（`4b1336b`）合并到 `feat/tmp`：处理 `agent_hooks.rs`、`terminal/view.rs` 和 `ui/file_tree.rs` 冲突，保留当前分支侧边栏布局、分组与拖拽改动，同时合入 main 的用户提问状态、Agent 完成状态过滤、右键选中和远程文件拖拽功能。
 - 已将 `main`（`d0e42fa`）合并到 `feat/tmp`：接入 Search Everywhere、v4 UI、固定分组、快捷启动、新 Agent 与终端改进；冲突处理中保留 xview 品牌区、底部 workspace 入口、Command Code／MiniMax Code 识别、恢复、Hook 和三语设置搜索。

@@ -15,6 +15,8 @@
 //!   keystrokes up, and a few [`PaneEvent`]s beside them;
 //! - a one-shot [`Open::NewTab`] stream that starts a shell in a new tab and
 //!   answers with a [`TabCreated`];
+//! - a one-shot [`Open::ClosePane`] stream that closes a pane and ends what
+//!   runs in it;
 //! - a one-shot [`Open::Upload`] stream that carries a file from the phone to
 //!   the machine and answers with where it landed, an [`Uploaded`];
 //! - a one-shot [`Open::Diff`] stream that answers with a git working tree's
@@ -96,13 +98,19 @@ pub enum Open {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
-    /// Put a file from the phone on the machine, for a pane to be handed its
-    /// path. After `Ok` the phone sends the file as bytes frames and finishes
-    /// its side; the gateway answers [`Uploaded`] once the file is written.
-    /// `Denied` before any bytes: too big, or a machine files cannot go to.
+    /// Close a tab, its panes with it. One-shot: `Ok` once it is closed, or
+    /// `Denied` with why not. Where the machine keeps closed tabs, it goes on
+    /// the workspace's recently-closed list, for the desktop to reopen.
     ///
     /// A gateway older than this variant cannot parse it and drops the stream
     /// unanswered.
+    CloseTab {
+        workspace_id: String,
+        tab_id: String,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
     /// What has changed in the git working tree `cwd` is in, against its last
     /// commit: `Ok`, then a [`Diff`]. `Denied` when it is not in a repository.
     ///
@@ -114,6 +122,26 @@ pub enum Open {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
+    /// Close a pane, as closing it on the desktop does: it leaves its tab (the
+    /// tab with it, when it was the last pane there) and whatever runs in it
+    /// is ended. One-shot: `Ok` once it is closed, or `Denied` with what went
+    /// wrong. The tree on the control stream shows it gone on its own.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
+    ClosePane {
+        pane_id: u64,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// Put a file from the phone on the machine, for a pane to be handed its
+    /// path. After `Ok` the phone sends the file as bytes frames and finishes
+    /// its side; the gateway answers [`Uploaded`] once the file is written.
+    /// `Denied` before any bytes: too big, or a machine files cannot go to.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
     Upload {
         /// The file's name on the phone; the gateway keeps what it safely can.
         name: String,
@@ -274,6 +302,33 @@ pub struct WorkspaceView {
     pub id: String,
     pub name: String,
     pub tabs: Vec<TabView>,
+    /// The desktop sidebar's groups, in its order: pinned groups, then the
+    /// ones it works out per repository or SSH host, then the tabs in none.
+    /// Every tab is in exactly one. Empty from a gateway that predates
+    /// groups, and the tabs are then one list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupView>,
+    /// The tab the desktop last had in front in this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+}
+
+/// One of the desktop sidebar's groups of tabs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupView {
+    /// What its header reads. `None` for the tabs in no group when there is
+    /// no other group to set them apart from, which the desktop draws without
+    /// a header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A group the user pinned, rather than one worked out from the tabs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Folded shut on the desktop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
+    /// Its tabs' ids, in the workspace's order.
+    pub tabs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -293,6 +348,11 @@ pub struct PaneView {
     pub cwd: Option<String>,
     #[serde(default)]
     pub agent: Option<AgentView>,
+    /// Nothing is running in it: the machine's server restarted, and no
+    /// window has opened the tab since to start it again. Absent from an
+    /// older gateway, which cannot tell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,8 +508,53 @@ mod io_async {
     use super::*;
     use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
+    /// Reads frames off a stream, keeping a frame it has only part of in its
+    /// own buffer. That makes [`FrameReader::next`] cancel-safe: dropping it in
+    /// a `select!` or at a `timeout` loses nothing, where dropping
+    /// [`read_frame`] mid-frame throws away the bytes it has read and leaves
+    /// the stream in the middle of a payload — whose bytes the next read then
+    /// takes for a length.
+    pub struct FrameReader<R> {
+        inner: R,
+        decoder: Decoder,
+        chunk: Box<[u8]>,
+    }
+
+    impl<R: AsyncRead + Unpin> FrameReader<R> {
+        pub fn new(inner: R) -> Self {
+            FrameReader {
+                inner,
+                decoder: Decoder::default(),
+                chunk: vec![0; 64 << 10].into_boxed_slice(),
+            }
+        }
+
+        /// The next frame. `Ok(None)` is a clean end of stream between frames;
+        /// an end in the middle of one is an error. Cancel-safe.
+        pub async fn next(&mut self) -> io::Result<Option<Frame>> {
+            loop {
+                if let Some(frame) = self.decoder.next_frame()? {
+                    return Ok(Some(frame));
+                }
+                // The only await: a read that is dropped before it completes
+                // has taken nothing off the stream.
+                let n = self.inner.read(&mut self.chunk).await?;
+                if n == 0 {
+                    return if self.decoder.buf.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(io::ErrorKind::UnexpectedEof.into())
+                    };
+                }
+                self.decoder.push(&self.chunk[..n]);
+            }
+        }
+    }
+
     /// Reads one frame. `Ok(None)` is a clean end of stream between frames; an
-    /// end in the middle of one is an error.
+    /// end in the middle of one is an error. Not cancel-safe: anything that
+    /// may drop it before it finishes — a `select!` arm, a `timeout` the
+    /// stream outlives — wants a [`FrameReader`].
     pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Frame>> {
         let mut header = [0u8; 5];
         let mut got = 0;
@@ -483,7 +588,7 @@ mod io_async {
 }
 
 #[cfg(feature = "tokio")]
-pub use io_async::{read_frame, write_bytes, write_msg};
+pub use io_async::{FrameReader, read_frame, write_bytes, write_msg};
 
 fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
@@ -525,6 +630,65 @@ mod tests {
                 PaneEvent::Size { cols: 80, rows: 24 }
             );
         }
+    }
+
+    /// A read dropped with half a frame in hand — a phone's output batching
+    /// timing out on a slow link, a gateway's `select!` taking the other arm —
+    /// must leave the next read at the start of that frame, not in the middle
+    /// of its payload reading terminal output as a length.
+    #[tokio::test]
+    async fn a_frame_reader_dropped_mid_frame_loses_nothing() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut far, near) = tokio::io::duplex(1 << 16);
+        let mut reader = FrameReader::new(near);
+        let output = encode_bytes(b"[]|\"\\(.name)=\\(.conclusion)\"");
+        let (head, tail) = output.split_at(9);
+
+        far.write_all(head).await.unwrap();
+        // Poll once, so the reader takes what has arrived, then drop it.
+        tokio::select! {
+            biased;
+            _ = reader.next() => panic!("half a frame read as a whole one"),
+            () = std::future::ready(()) => {}
+        }
+        far.write_all(tail).await.unwrap();
+        far.write_all(&encode_msg(&PaneEvent::Size { cols: 80, rows: 24 }))
+            .await
+            .unwrap();
+        drop(far);
+
+        assert_eq!(
+            reader.next().await.unwrap(),
+            Some(Frame::Bytes(b"[]|\"\\(.name)=\\(.conclusion)\"".to_vec()))
+        );
+        assert_eq!(
+            reader
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .msg::<PaneEvent>()
+                .unwrap(),
+            PaneEvent::Size { cols: 80, rows: 24 }
+        );
+        assert_eq!(reader.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_frame_reader_refuses_a_stream_that_ends_mid_frame() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut far, near) = tokio::io::duplex(1 << 16);
+        let mut reader = FrameReader::new(near);
+        far.write_all(&encode_bytes(b"cut short")[..7])
+            .await
+            .unwrap();
+        drop(far);
+        assert_eq!(
+            reader.next().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
@@ -621,6 +785,31 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type": "pane", "pane_id": 3})
         );
+    }
+
+    #[test]
+    fn a_close_names_only_the_pane_for_this_machine() {
+        let open = Open::ClosePane {
+            pane_id: 7,
+            machine: None,
+        };
+        let wire = serde_json::to_value(&open).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "close_pane", "pane_id": 7})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), open);
+
+        let remote = Open::ClosePane {
+            pane_id: 7,
+            machine: Some("me@box:22".into()),
+        };
+        let wire = serde_json::to_value(&remote).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "close_pane", "pane_id": 7, "machine": "me@box:22"})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), remote);
     }
 
     #[test]
