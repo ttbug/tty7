@@ -313,13 +313,23 @@ async function canLock() {
 
 const still = matchMedia("(prefers-reduced-motion: reduce)");
 
+// The machine the screen on show is connected to, set as it renders: the
+// connection is kept up in the background while one is (`api.keepAlive`).
+let connectedTo: string | null = null;
+let held: string | null = null;
+
 function go(direction: "push" | "pop", render: () => HTMLElement) {
   const swap = () => {
     onLeave?.();
     onLeave = null;
     onResume = null;
     onBack = null;
+    connectedTo = null;
     app.replaceChildren(render());
+    if (connectedTo !== held) {
+      held = connectedTo;
+      api.keepAlive(held).catch(() => {});
+    }
   };
   if (!document.startViewTransition || still.matches || !app.firstChild) {
     swap();
@@ -570,7 +580,7 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
       const shown = all.filter((host) => host.name.toLowerCase().includes(query));
       body.replaceChildren(
         shown.length
-          ? section(null, ...shown.map(hostRow))
+          ? section(null, ...shown.map((host) => hostRow(host, all)))
           : h("p", { class: "search-empty" }, `No machine matches “${query}”.`),
       );
     };
@@ -884,8 +894,41 @@ function addKeySheet(add: (k: Key) => void) {
   );
 }
 
-function hostRow(host: Host) {
+/** Pairing the same computer again — tty7 reinstalled, a second config dir —
+ * gives it a new key, and the entry under the old key will never answer
+ * again. Offers to drop those, rather than leave two of one computer in the
+ * list with nothing to say which one works. */
+async function replaceOlderPairings(host: Host) {
+  if (!host.machine) return;
+  const older = (await api.hosts()).filter((h) => h.id !== host.id && h.machine === host.machine);
+  if (older.length === 0) return;
+  const names = [...new Set(older.map((h) => `“${h.name}”`))].join(" and ");
+  const replace = await confirmSheet(
+    older.length === 1 ? "Replace the older pairing?" : "Replace the older pairings?",
+    `${names} ${older.length === 1 ? "is" : "are"} this same computer, paired before tty7 there got a new key. ` +
+      "Keep both only if you run more than one tty7 on it.",
+    "Replace",
+    "Keep both",
+  );
+  if (!replace) return;
+  for (const old of older) await api.forget(old.id).catch(() => {});
+}
+
+/** What tells a machine apart from another of the same name: when it was
+ * paired, or for a pairing older than that, the start of its key. */
+function pairedLabel(host: Host): string {
+  if (host.paired_at) {
+    const when = new Date(host.paired_at * 1000);
+    const date = when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `Paired ${date}`;
+  }
+  return `Key ${host.id.slice(0, 6)}`;
+}
+
+function hostRow(host: Host, all: Host[] = []) {
   const meta = hostMeta(host.id);
+  const twin = all.some((other) => other.id !== host.id && other.name === host.name);
+  const sub = [meta?.text, twin ? pairedLabel(host) : null].filter(Boolean).join(" · ");
   return h(
     "button",
     { class: meta?.tone === "offline" ? "row machine dim" : "row machine", onclick: () => hostScreen(host, "push") },
@@ -894,7 +937,7 @@ function hostRow(host: Host) {
       "span",
       { class: "row-text" },
       h("span", { class: "row-title" }, host.name),
-      meta && h("span", { class: `row-sub link ${meta.tone}` }, h("span", { class: "link-dot" }), meta.text),
+      sub && h("span", { class: `row-sub link ${meta?.tone ?? ""}` }, meta && h("span", { class: "link-dot" }), sub),
     ),
     ico("chevron", "icon row-chevron"),
   );
@@ -1014,6 +1057,7 @@ function pairScreen(linked?: string) {
       submit.textContent = "Pairing…";
       try {
         const host = await api.pair(code.value.trim(), name.value.trim() || "phone");
+        await replaceOlderPairings(host);
         hostScreen(host, "push");
       } catch (e) {
         const text = errorText(e);
@@ -1133,9 +1177,15 @@ function retrier(run: () => void) {
 /** How long a machine may stay silent before the screen says so. */
 const SLOW_CONNECT_MS = 10_000;
 
+/** How long a dropped connection is retried quietly, under what is on screen,
+ * before the screen says it dropped. Most drops — the phone locked, the
+ * network changed — are back well within it. */
+const QUIET_MS = 3_000;
+
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
   remember("last.host", host.id);
   go(direction, () => {
+    connectedTo = host.name;
     const link = h("p", { class: "link" });
     // Shown here and remembered for the machine list.
     const showLink = (info: LinkInfo | null) => {
@@ -1235,6 +1285,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       generation++;
       unwatch();
       clearTimeout(slow);
+      clearTimeout(quiet);
       retry.cancel();
       window.removeEventListener("online", online);
     };
@@ -1242,22 +1293,34 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     const failed = (message: string) =>
       notice.replaceChildren(noticeCard({ title: "Couldn't open a tab", body: [sentence(message)] }));
 
+    // A drop under a tree is retried quietly at first: the link says it is
+    // connecting, and the notice comes only if that takes a while.
+    let quiet: number | undefined;
     const offline = (message: string) => {
       offlineNow = true;
       dropped = true;
       retry.schedule();
-      showLink(null);
-      notice.replaceChildren(
-        noticeCard({
-          title: `Can't reach ${host.name}`,
-          body: [why(message, host.name), ` Check that tty7 is running on ${host.name} with phone access on.`],
-          actions: [
-            { label: "Try now", run: start },
-            { label: "Pair again", run: () => pairScreen() },
-          ],
-        }),
-      );
-      if (!lastTree) body.replaceChildren();
+      clearTimeout(quiet);
+      const say = () => {
+        showLink(null);
+        notice.replaceChildren(
+          noticeCard({
+            title: `Can't reach ${host.name}`,
+            body: [why(message, host.name), ` Check that tty7 is running on ${host.name} with phone access on.`],
+            actions: [
+              { label: "Try now", run: start },
+              { label: "Pair again", run: () => pairScreen() },
+            ],
+          }),
+        );
+      };
+      if (lastTree) {
+        showLink({ path: "connecting", rtt_ms: 0 });
+        quiet = window.setTimeout(say, QUIET_MS);
+      } else {
+        say();
+        body.replaceChildren();
+      }
     };
 
     const start = async () => {
@@ -1294,6 +1357,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
           switch (msg.type) {
             case "tree":
               clearTimeout(slow);
+              clearTimeout(quiet);
               retry.reset();
               if (!lastTree || dropped) notice.replaceChildren();
               dropped = false;
@@ -1311,7 +1375,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
               if (!lastTree) body.replaceChildren();
               break;
             case "closed":
-              offline("The connection closed.");
+              offline(msg.message ?? "The connection closed.");
               break;
           }
         });
@@ -1326,10 +1390,20 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
         }
       }
     };
-    // Back from the background the stream may be dead, or fine and merely
-    // behind: watching again covers both, since the gateway sends the whole
-    // tree on every new watch.
-    onResume = start;
+    // Back from the background: a connection that still answers has kept the
+    // tree coming, and a refresh makes sure of it; one that does not is
+    // dialed again, under the tree that is up.
+    onResume = () => {
+      const id = watching;
+      if (id === null || offlineNow) return void start();
+      const again = () => {
+        if (alive && watching === id) start();
+      };
+      api.alive(host.id).then((ok) => {
+        if (!ok) again();
+        else if (alive && watching === id) api.refresh(id).catch(again);
+      }, again);
+    };
     if (lastTree) draw();
     start();
     return view;
@@ -1923,7 +1997,7 @@ function renderDiff(d: api.Diff): Node[] {
 
 /** Asks before something that cannot be undone. `window.confirm` is no use:
  * the iOS WebView shows nothing for it and answers "no" at once. */
-function confirmSheet(title: string, text: string, action: string): Promise<boolean> {
+function confirmSheet(title: string, text: string, action: string, cancel = "Cancel"): Promise<boolean> {
   return new Promise((resolve) => {
     let answered = false;
     const answer = (yes: boolean) => {
@@ -1939,7 +2013,7 @@ function confirmSheet(title: string, text: string, action: string): Promise<bool
         { class: "sheet-body" },
         h("p", { class: "sheet-text" }, text),
         h("button", { class: "button danger wide", onclick: () => answer(true) }, action),
-        h("button", { class: "button tinted wide", onclick: () => answer(false) }, "Cancel"),
+        h("button", { class: "button tinted wide", onclick: () => answer(false) }, cancel),
       ),
     );
     // Closed with its × or by tapping outside it: a no.
@@ -2590,6 +2664,7 @@ const drafts = new Map<string, string>();
  * the start, since nobody is reading it anywhere else yet. */
 function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string, made = false) {
   go("push", () => {
+    connectedTo = host.name;
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
     const stateWord = h("span", {}, "Connecting…");
@@ -2745,6 +2820,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     writeFor(pane.agent);
     const sendKey = h("button", { class: "round send", ariaLabel: "Send" }, ico("send"));
+    // Typing straight into the terminal, key by key, for what a message box
+    // cannot do: a full-screen program, a password prompt.
+    const keyboard = h("button", { class: "round", ariaLabel: "Type into the terminal" }, ico("keyboard"));
     // Past messages: the whole list, searchable, while the box is empty; the
     // ones that match, in place of the key row, as it is written in.
     const historyKey = h("button", { class: "round", ariaLabel: "History" }, ico("history"));
@@ -2752,7 +2830,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // an agent to be pointed at with whatever is written around it.
     const attachKey = h("button", { class: "round", ariaLabel: "Attach a photo or file" }, ico("attach"));
     const picker = h("input", { type: "file", multiple: true, hidden: true });
-    const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, picker);
+    const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, keyboard, picker);
     // Files sent to the machine, waiting to go with the message: shown by
     // name and picture, their paths written in only when it is sent.
     const attached: { path: string; name: string; thumb: string | null }[] = [];
@@ -2990,6 +3068,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       ended = true;
       live = false;
       retry.cancel();
+      hush();
       setState("offline", "Not running");
       // Nothing typed here would go anywhere: the box and keys say so
       // rather than taking it and doing nothing.
@@ -3017,20 +3096,38 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       };
       showBanner(`This pane isn't running. tty7 on ${host.name} starts it again when it next opens the tab.`, fresh || undefined);
     };
-    const offline = (message: string) => {
+    // A drop is said after a moment, not at once: most come back within it,
+    // the screen as it was all along. Anything typed meanwhile says it now.
+    let quiet: { timer: number; say: () => void } | null = null;
+    const hush = () => {
+      if (quiet) clearTimeout(quiet.timer);
+      quiet = null;
+    };
+    const speak = () => {
+      const say = quiet?.say;
+      hush();
+      say?.();
+    };
+    const offline = (message: string, now = false) => {
       if (/no such pane/i.test(message)) return gone();
       live = false;
       setState("connecting", "Reconnecting");
-      showBanner(`${why(message, host.name)} Reconnecting…`, { label: "Try now", run: reopen });
+      hush();
+      const say = () => showBanner(`${why(message, host.name)} Reconnecting…`, { label: "Try now", run: reopen });
+      if (now) say();
+      else quiet = { timer: window.setTimeout(speak, QUIET_MS), say };
       retry.schedule();
     };
     // Only the first refusal speaks: a key typed just before it fails on its
-    // own, with a vaguer reason.
+    // own, with a vaguer reason. Typing lost is said at once.
     const refused = (message: string) => {
-      if (alive && live) offline(message);
+      if (alive && live) offline(message, true);
     };
     const input = (data: string): Promise<boolean> => {
-      if (handle === null || !live) return Promise.resolve(false);
+      if (handle === null || !live) {
+        speak();
+        return Promise.resolve(false);
+      }
       return api.paneInput(handle, data).then(
         () => true,
         (e) => {
@@ -3109,9 +3206,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const edited = () => {
       if (field.value) drafts.set(draftKey, field.value);
       else drafts.delete(draftKey);
-      // Written, the round button sends; empty, it is not there.
+      // Written, the round button sends; empty, it is the keyboard's.
       const ready = !!field.value || attached.length > 0;
       sendKey.hidden = !ready;
+      keyboard.hidden = ready;
       historyKey.hidden = ready;
       grow();
       offer();
@@ -3289,12 +3387,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     sendKey.onpointerdown = (e) => e.preventDefault();
     sendKey.onclick = () => (feel("key"), void submit());
 
+    keyboard.onpointerdown = (e) => e.preventDefault();
+    keyboard.onclick = () => {
+      if (document.activeElement === typing) typing.blur();
+      else typing.focus({ preventScroll: true });
+    };
     // While the field has the keys the pane's cursor is drawn solid, as a
     // focused terminal's is, so a tap on the pane shows where typing lands.
     typing.addEventListener("focus", () => {
+      keyboard.classList.add("on");
       term.options.cursorInactiveStyle = "block";
     });
     typing.addEventListener("blur", () => {
+      keyboard.classList.remove("on");
       term.options.cursorInactiveStyle = "outline";
       typing.value = "";
       typed = "";
@@ -4141,7 +4246,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       };
       live = false;
       retry.cancel();
-      if (!banner.hasChildNodes()) setState("connecting", "Connecting");
+      if (!banner.hasChildNodes() && !quiet) setState("connecting", "Connecting");
       try {
         const opened = await api.paneOpen(
           host.id,
@@ -4178,13 +4283,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                 live = false;
                 handle = null;
                 retry.cancel();
+                hush();
                 setState("offline", "Closed");
                 showBanner(
                   event.code === null ? "This pane closed." : `This pane exited with code ${event.code}.`,
                 );
                 break;
               case "error":
-                offline(event.message);
+                // Keys that did not get through are said at once (lib.rs
+                // `pane_open`); a stream that broke, after a moment.
+                offline(event.message, /^typing didn't reach/.test(event.message));
                 break;
               case "lease":
                 leaseEvent(event.held, event.refused);
@@ -4204,6 +4312,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         sent = "";
         askLease();
         retry.reset();
+        hush();
         banner.replaceChildren();
         setState("live", liveLabel());
         if (cramped) hintPhoneSize();
@@ -4331,6 +4440,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     onLeave = () => {
       alive = false;
       retry.cancel();
+      hush();
       clearTimeout(peekTimer);
       if (peeking !== null) api.unwatch(peeking).catch(() => {});
       window.removeEventListener("online", online);
@@ -4342,9 +4452,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (handle !== null) api.paneClose(handle);
       term.dispose();
     };
-    // The pane replays its screen on every open, so coming back from the
-    // background is a fresh open onto a reset terminal — never a gap.
-    onResume = reopen;
+    // Back from the background, a stream whose connection still answers
+    // carries on: what the pane printed meanwhile is on its way. One that
+    // does not is opened again, and the pane replays its screen onto a reset
+    // terminal — never a gap.
+    onResume = () => {
+      if (ended) return;
+      const was = handle;
+      if (was === null || !live) return reopen();
+      const again = () => {
+        if (alive && handle === was) reopen();
+      };
+      api.alive(host.id).then((ok) => ok || again(), again);
+    };
 
     // Hack has to be loaded before xterm measures a cell, or the first fit is
     // taken with the fallback face's metrics; the symbols before a glyph is
