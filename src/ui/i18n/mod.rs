@@ -1863,6 +1863,10 @@ l10n_keys! {
     GitHubShowFullText,
     GitHubShowHiddenComments,
     GitHubShowAllReviewers,
+    CmdCopyRaw,
+    SettingsCopyJoinWrapped,
+    SettingsCopyJoinWrappedDesc,
+    SettingsSearchCopyJoinWrappedKeywords,
 }
 
 /// The source control strings that are translated but not yet displayed.

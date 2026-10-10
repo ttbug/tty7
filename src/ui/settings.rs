@@ -540,6 +540,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchTrimTrailingSpacesKeywords,
         },
         SearchEntry {
+            section: KeyboardMouse,
+            title: SettingsCopyJoinWrapped,
+            keywords: SettingsSearchCopyJoinWrappedKeywords,
+        },
+        SearchEntry {
             section: Ssh,
             title: SettingsHosts,
             keywords: SettingsSearchHostsKeywords,
@@ -855,6 +860,7 @@ impl SearchEntry {
             L10nKey::SettingsSmoothScroll => "smooth_scroll",
             L10nKey::SettingsMouseZoom => "mouse_zoom_modifier",
             L10nKey::SettingsTrimTrailingSpaces => "clipboard_trim_trailing_spaces",
+            L10nKey::SettingsCopyJoinWrapped => "copy_join_wrapped",
             L10nKey::SettingsCopyOnSelect => "copy_on_select",
             L10nKey::SettingsSmartSelection => "smart_select",
             L10nKey::SettingsPromptEditor => "prompt_editor",
@@ -946,6 +952,7 @@ impl SearchEntry {
             L10nKey::SettingsSmartSelection => t(L10nKey::SettingsSmartSelectionDesc),
             L10nKey::SettingsCopyOnSelect => t(L10nKey::SettingsCopyOnSelectDesc),
             L10nKey::SettingsTrimTrailingSpaces => t(L10nKey::SettingsTrimTrailingSpacesDesc),
+            L10nKey::SettingsCopyJoinWrapped => t(L10nKey::SettingsCopyJoinWrappedDesc),
             L10nKey::SettingsVerifyHostKeys => t(L10nKey::SettingsVerifyHostKeysDesc),
             L10nKey::SettingsStartupWindow => t(L10nKey::SettingsStartupWindowDesc),
             L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
@@ -1043,6 +1050,7 @@ impl SearchEntry {
             L10nKey::SettingsTrimTrailingSpaces => {
                 cfg.clipboard_trim_trailing_spaces != defaults.clipboard_trim_trailing_spaces
             }
+            L10nKey::SettingsCopyJoinWrapped => cfg.copy_join_wrapped != defaults.copy_join_wrapped,
             L10nKey::SettingsCopyOnSelect => cfg.copy_on_select != defaults.copy_on_select,
             L10nKey::SettingsSmartSelection => cfg.smart_select != defaults.smart_select,
             L10nKey::SettingsPromptEditor => cfg.prompt_editor != defaults.prompt_editor,
@@ -1475,6 +1483,20 @@ impl SshProfileForm {
     fn secrets_changed(&self, cx: &App) -> bool {
         self.password.read(cx).value().as_ref() != self.loaded_password
             || self.passphrase.read(cx).value().as_ref() != self.loaded_passphrase
+    }
+
+    /// Which credential boxes the method actually uses — the same split
+    /// `ssh_connect::build_spec_inner` makes when it decides what to hand the
+    /// daemon. A password box under "Agent" would be a secret that is stored
+    /// and then never offered.
+    fn wants_password(&self) -> bool {
+        matches!(self.auth, AuthMode::Auto | AuthMode::Password)
+    }
+
+    /// A passphrase is filed against a key's contents, so the box only shows
+    /// once the form names a key that is actually on this machine.
+    fn wants_passphrase(&self) -> bool {
+        matches!(self.auth, AuthMode::Auto | AuthMode::PublicKey) && self.loaded_key.is_some()
     }
 }
 
@@ -3936,6 +3958,39 @@ mod gpui_tests {
                 "saved.example.com"
             );
         });
+    }
+
+    /// The credential rows follow the auth method the same way connecting
+    /// does: a password only for methods that offer one, a passphrase never
+    /// for a method that does not try keys. (Whether Auto / PublicKey show the
+    /// passphrase depends on the default keys in this machine's `~/.ssh`, so
+    /// that half is not pinned here.)
+    #[gpui::test]
+    fn the_credential_rows_follow_the_auth_method(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::{AuthMode, SshProfile};
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        for (auth, password, keys) in [
+            (AuthMode::Auto, true, true),
+            (AuthMode::Password, true, false),
+            (AuthMode::PublicKey, false, true),
+            (AuthMode::Agent, false, false),
+        ] {
+            let mut profile = SshProfile::new("creds");
+            profile.auth = auth;
+            let id = profile.id;
+            app.update_in(&mut vcx, |app, window, cx| {
+                cx.global_mut::<Config>().ssh_profiles.push(profile);
+                app.open_ssh_profile_in_settings(id, window, cx);
+                let form = app.active_settings().unwrap().ssh_form.as_ref().unwrap();
+                assert_eq!(form.wants_password(), password, "{auth:?}");
+                if !keys {
+                    assert!(!form.wants_passphrase(), "{auth:?} never tries a key");
+                }
+                app.cancel_ssh_form(cx);
+            });
+            vcx.run_until_parked();
+        }
     }
 
     #[gpui::test]

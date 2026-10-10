@@ -6,6 +6,8 @@
 
 ## 已完成
 
+- 侧边栏分组行移除 Git Diff 计数及其点击入口、折叠会话数量，只保留分组名和 Git 分支；分支紧跟名称，间距按当前字体两个空格的宽度计算，保留文件夹图标与方括号。侧边栏 50 项测试通过，桌面视觉效果待确认。
+- 侧边栏分组行统一增加文件夹图标，分组名显示为 `[名称]`；宽度计算预留图标、间距和方括号，长名称截断时保留两侧括号，重命名仍编辑原始名称。侧边栏 50 项测试通过，桌面视觉效果待确认。
 - 已解决当前 `feat/own` 合并 `main`（`cd640388`）的两个冲突：保留当前分支的 MiniMax Code／Command Code Hook 能力与侧边栏修改，同时合入 main 的新 Agent、远程安装测试及进程 CPU／内存信息列；补齐合并后 `CLIAgent::ALL`、AgentEvent 测试字段和俄文翻译覆盖。已通过 `cargo fmt --check`、`cargo test -p tty7-core --lib agent_hooks`（71 项）、`cargo test -p tty7 'ui::tab_sidebar::'`（50 项）和 `cargo check -p tty7`。
 - 已将 `main`（`ef20382`）合并到当前 `feat/own`：保留当前分支 sidebar 品牌区、树连接线、底部 workspace 入口、颜色布局与选中态阶梯，同时合入 main 的移动端／网关模块、可访问性标注、主题可读性修正及其他新增功能；已解决 `src/ui/presets.rs` 与 `src/ui/tab_sidebar.rs` 冲突。
 - 已将 main（`4b1336b`）合并到 `feat/tmp`：处理 `agent_hooks.rs`、`terminal/view.rs` 和 `ui/file_tree.rs` 冲突，保留当前分支侧边栏布局、分组与拖拽改动，同时合入 main 的用户提问状态、Agent 完成状态过滤、右键选中和远程文件拖拽功能。
@@ -57,6 +59,9 @@
 
 ## 最近验证
 
+- 2026-10-10 侧边栏分组显示调整 Apple Silicon DMG：release 主程序与 updater 构建通过，`bundle-macos.sh` 生成 [dist/tty7-26.9.4-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.dmg)（约 36M，SHA-256 `43007ecdd7a6184780c6079ac2fe0a3696d1fe1aec22f729f7c702beab7e332f`）与 [dist/tty7-26.9.4-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.zip)（约 32M，SHA-256 `88f635354c9e40a0e107ed071e9093c30902b41d6a923b531ab600f994acb276`）。DMG CRC 校验、只读挂载、`CFBundleShortVersionString=26.9.4`、`/Applications` 入口、三个 thin arm64 可执行文件和 ad-hoc `codesign --verify --deep --strict` 均通过。
+- 2026-10-10 分组行仅显示名称与分支：`cargo fmt --check`、`git diff --check` 和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 通过（50 passed）；未启动桌面窗口进行视觉检查。
+- 2026-10-10 分组行图标与方括号：`cargo fmt --check`、`git diff --check` 和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 通过（50 passed）；未启动桌面窗口进行视觉检查。
 - 2026-09-30 `26.9.4` Apple Silicon DMG／ZIP：release 主程序与 updater 构建通过；`bundle-macos.sh` 生成 [dist/tty7-26.9.4-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.dmg)（约 36M，SHA-256 `cc22de984e28767ac0b761135752ddb59c9937343ead7cd7a0aa090aa19aeb79`）和 [dist/tty7-26.9.4-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.zip)（约 31M，SHA-256 `ad7720d8f9f0c9a62e64092d841eb19b36914ccf8325f192a2ed2275a1d880d5`）。DMG CRC、只读挂载、版本、`tty7.app`、`/Applications` 入口、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release UUID 比对均通过；ZIP 完整性通过。
 - 2026-09-30 合并 `main`（`ef20382`）：`cargo fmt --check`、`git diff --check`、`cargo check -p tty7` 通过；`cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast`（48 passed）通过；主题预设测试 45 项通过，`dracula_selection_matches_the_signed_off_greys` 仍失败，该断言及其依赖值未被本次合并改动触及，待后续单独校准。
 - 2026-09-30 合并冲突收尾：解决 `src/ui/app.rs` 中 `settings_window` 可见性冲突，保留 `main` 所需的 `pub(crate)` 访问及当前分支测试说明；`cargo fmt --check`、`git diff --check`、`cargo test -p tty7 'ui::settings' --no-fail-fast`（53 passed）和 `cargo check -p tty7` 通过，存在项目既有编译警告。

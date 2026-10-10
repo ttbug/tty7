@@ -139,10 +139,11 @@ pub struct Config {
     /// more the lighter the text, which is why light-on-dark looks bolder.
     /// On by default, because it is what every macOS app draws with.
     ///
-    /// Off pins `AppleFontSmoothing` to `0` for this process alone, so glyphs
-    /// are drawn at the face's own weight. gpui reads that preference once, the
-    /// first time it rasterizes text, so a change applies at the next launch.
-    /// Ignored elsewhere, where there is no such dilation to turn off.
+    /// Off tells gpui's rasterizer not to dilate, so tty7's glyphs are drawn
+    /// at the face's own weight. `AppleFontSmoothing` is left alone, so menus
+    /// and other natively drawn text keep the system's look (#1119). Applied
+    /// at launch, so a change takes hold at the next one. Ignored elsewhere,
+    /// where there is no such dilation to turn off.
     #[serde(default = "default_true")]
     pub font_thicken: bool,
     pub font_size: f32,
@@ -381,6 +382,10 @@ pub struct Config {
     #[serde(default, deserialize_with = "de_lenient")]
     pub mouse_zoom_modifier: MouseZoomModifier,
     pub clipboard_trim_trailing_spaces: bool,
+    /// In a Claude Code pane, copy joins the rows Claude wrapped itself, so a
+    /// paragraph pastes as one line. ⌘⌥C and Copy Raw copy the rows as is.
+    #[serde(default)]
+    pub copy_join_wrapped: bool,
     pub copy_on_select: bool,
     /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
     /// downloads, and (HTTP only) the mobile gateway's relay; when set it is
@@ -854,6 +859,7 @@ impl Default for Config {
             mouse_reporting: true,
             mouse_zoom_modifier: MouseZoomModifier::default(),
             clipboard_trim_trailing_spaces: false,
+            copy_join_wrapped: false,
             copy_on_select: false,
             http_proxy: None,
             smart_select: true,

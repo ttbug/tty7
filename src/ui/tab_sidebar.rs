@@ -71,9 +71,6 @@ const RAIL_INSET: f32 = 12.;
 const HEAD_CONTROL_HEIGHT: f32 = 28.;
 const HEAD_CONTROL_RADIUS: f32 = 7.;
 
-/// What sits between a group's branch and its diff counts.
-const META_SEP_TRIMMED: &str = "·";
-
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
 fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
@@ -116,7 +113,7 @@ mod row_metrics {
     }
 
     /// What a group header can spend on its name and the branch beside it.
-    /// The chevron, the pin and the folded row count come off at the call
+    /// The folder, the chevron and the pin come off at the call
     /// site, which knows whether they are drawn — an open group draws no
     /// chevron, and reserving one anyway elided its branch with 18px to spare.
     pub(super) const fn header_budget(width: f32) -> f32 {
@@ -178,11 +175,6 @@ fn counts_width(
 /// The branch a whole group shares, lifted off its rows and onto its header.
 struct SharedGit {
     status: crate::terminal::git_status::GitStatus,
-    /// Where a click on the counts opens the diff overlay, if the setting
-    /// allows one.
-    click: Option<(crate::ui::host_ops::HostId, PathBuf)>,
-    /// Every row the group counts, drawn or folded away.
-    rows: Vec<usize>,
 }
 
 /// What a sidebar row rendered, next to what it had to leave out, so the
@@ -592,14 +584,10 @@ impl Tty7App {
                 // ⌘T. Unknown is not different; it is not yet known.
                 let mut known = rows
                     .iter()
-                    .filter_map(|&i| Some((i, self.tabs[i].git_status(Some(window), cx)?)));
-                let (first, status) = known.next()?;
-                let same = known.all(|(_, other)| other == status);
-                same.then(|| SharedGit {
-                    status,
-                    click: git_click(&self.tabs[first], window, cx),
-                    rows: rows.clone(),
-                })
+                    .filter_map(|&i| self.tabs[i].git_status(Some(window), cx));
+                let status = known.next()?;
+                let same = known.all(|other| other == status);
+                same.then_some(SharedGit { status })
             });
             for (slot, i) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
@@ -1306,37 +1294,31 @@ impl Tty7App {
                 // keeps the rest, and each is elided into its share the way a
                 // row already elides its own.
                 let ts = window.text_system();
-                let mut avail = row_metrics::header_budget(width);
+                let mut avail =
+                    row_metrics::header_budget(width) - header_size - row_metrics::META_GAP;
                 if folded {
                     avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
                 }
                 if pinned {
                     avail -= PIN_MARK_SIZE + row_metrics::META_GAP;
                 }
-                let count_label = row_count.to_string();
-                if folded {
-                    avail -= measure_text(&ts, &meta_font, header_size, &count_label)
-                        + row_metrics::META_GAP;
-                }
                 let avail = avail.max(HEADER_NAME_FLOOR);
-                // What the shared branch would take if nothing were in its
-                // way: the branch itself, the `·` before its counts, the
-                // counts, and the gaps the spacer between the name and the
-                // branch sits in.
-                // Drawn as a bare `·` with a gap on either side; the gap before
-                // it is the one `counts_width` already reserves.
-                let sep_w = measure_text(&ts, &meta_font, header_size, META_SEP_TRIMMED)
-                    + row_metrics::META_GAP;
+                let branch_gap = measure_text(&ts, &meta_font, header_size, "  ");
                 let git_want = shared_git.as_ref().map(|shared| {
-                    let counts = counts_width(&ts, &meta_font, header_size, &shared.status);
-                    let sep = if counts > 0. { sep_w } else { 0. };
-                    2. * row_metrics::META_GAP
-                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
-                        + sep
-                        + counts
+                    branch_gap + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                 });
                 let name_avail = header_name_avail(avail, git_want);
-                let label = elide_label(&ts, &header_font, header_size, &name, name_avail);
+                let brackets_w = measure_text(&ts, &header_font, header_size, "[]");
+                let label = format!(
+                    "[{}]",
+                    elide_label(
+                        &ts,
+                        &header_font,
+                        header_size,
+                        &name,
+                        (name_avail - brackets_w).max(0.),
+                    )
+                );
                 let name_w = measure_text(&ts, &header_font, header_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
                 let bar = h_flex()
@@ -1430,6 +1412,11 @@ impl Tty7App {
                                 .into_any_element(),
                         })
                     })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .child(Icon::empty().path("icons/folder.svg").size(px(header_size))),
+                    )
                     .child(match renaming_group {
                         Some(input) => div()
                             .id(("sidebar-group-rename", group_ix))
@@ -1472,94 +1459,25 @@ impl Tty7App {
                             .into_any_element(),
                     })
                     .when_some(shared_git, |bar, shared| {
-                        let SharedGit {
-                            status,
-                            click,
-                            rows,
-                        } = shared;
-                        let counts_w = counts_width(&ts, &meta_font, header_size, &status);
-                        let sep = if counts_w > 0. { sep_w } else { 0. };
-                        let branch_avail =
-                            (avail - name_w - 2. * row_metrics::META_GAP - sep - counts_w).max(0.);
+                        let branch_avail = (avail - name_w - branch_gap).max(0.);
                         // Cut from the end, like a row's.
                         let branch = elide_end_clusters(
                             &ts,
                             &meta_font,
                             header_size,
-                            &status.branch,
+                            &shared.status.branch,
                             branch_avail,
                         );
-                        let mut line = h_flex()
+                        let line = h_flex()
                             .id(("sidebar-group-git", group_ix))
                             .flex_shrink(1.)
                             .min_w_0()
                             .items_center()
-                            .gap_1p5()
+                            // Replace the header's default gap with two spaces.
+                            .ml(px(branch_gap - row_metrics::META_GAP))
                             .text_color(cx.theme().danger)
                             .child(div().min_w_0().truncate().child(branch));
-                        if status.added > 0 || status.removed > 0 {
-                            line = line.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .whitespace_nowrap()
-                                    .child(META_SEP_TRIMMED),
-                            );
-                            let mut counts = h_flex()
-                                .id(("sidebar-group-diff", group_ix))
-                                .flex_shrink_0()
-                                .items_center()
-                                .gap_1p5()
-                                .when_some(click, |counts, (host, cwd)| {
-                                    counts
-                                        .cursor_pointer()
-                                        .hover(|s| s.underline())
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                move |this, _: &MouseDownEvent, window, cx| {
-                                                    cx.stop_propagation();
-                                                    // The overlay opens over the
-                                                    // active tab; make sure that
-                                                    // is one of this group's,
-                                                    // the same way a row's counts
-                                                    // activate their row first.
-                                                    if !rows.contains(&this.active)
-                                                        && let Some(&first) = rows.first()
-                                                    {
-                                                        this.activate(first, window, cx);
-                                                    }
-                                                    this.toggle_diff_overlay(
-                                                        host,
-                                                        cwd.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            ),
-                                        )
-                                });
-                            if status.added > 0 {
-                                counts = counts.child(
-                                    div()
-                                        .text_color(added_ink)
-                                        .child(format!("+{}", status.added)),
-                                );
-                            }
-                            if status.removed > 0 {
-                                counts = counts.child(
-                                    div()
-                                        .text_color(cx.theme().danger)
-                                        .child(format!("−{}", status.removed)),
-                                );
-                            }
-                            line = line.child(counts);
-                        }
-                        bar.child(div().flex_1()).child(line)
-                    })
-                    // The count is redundant while the rows are on screen; it
-                    // is what a shut group has instead of them.
-                    .when(folded, |bar| {
-                        bar.child(div().flex_shrink_0().child(count_label))
+                        bar.child(line)
                     })
                     .children(self.header_actions(
                         group_ix,

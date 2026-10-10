@@ -3902,7 +3902,8 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
     }
 
-    /// Saved only: gpui reads this preference once per process.
+    /// Saved only: it is handed to gpui once, at launch, so it takes hold at
+    /// the next one (see `apply_font_thicken` in main.rs).
     pub(crate) fn set_font_thicken(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.font_thicken = on);
     }
@@ -5541,6 +5542,7 @@ impl Tty7App {
         // and the machine stops the panes: a kill from here would drop the
         // screens a reopen restores from. That happens in the sync the
         // `save_session` below runs, once the tab is gone from the window.
+        crate::ui::tree_sync::intend_close(cx, self.workspace, closing);
         let remembered = crate::ui::tree_sync::remembers_closed_tab(cx, self.workspace, closing);
         let remote = WorkspaceStore::all(cx)
             .get(self.workspace)
@@ -6792,6 +6794,11 @@ impl Tty7App {
                     });
                 }
             }
+            CopyRaw => {
+                if let Some(leaf) = self.focused_leaf(window, cx) {
+                    leaf.update(cx, |view, cx| view.copy_raw(cx));
+                }
+            }
             CutText => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
                     leaf.update(cx, |view, cx| {
@@ -7119,6 +7126,9 @@ impl Tty7App {
             }
             L10nKey::SettingsTrimTrailingSpaces => {
                 self.set_clipboard_trim(defaults.clipboard_trim_trailing_spaces, cx)
+            }
+            L10nKey::SettingsCopyJoinWrapped => {
+                self.update_config(cx, |c| c.copy_join_wrapped = defaults.copy_join_wrapped)
             }
             L10nKey::SettingsCopyOnSelect => self.set_copy_on_select(defaults.copy_on_select, cx),
             L10nKey::SettingsSmartSelection => self.set_smart_select(defaults.smart_select, cx),
@@ -12704,6 +12714,93 @@ mod ssh_rebuild_gpui_tests {
                 "the remote pane's existing view is reused, not re-attached"
             );
         });
+    }
+
+    /// Two tabs on pane 1 and pane 2, with the window's sync primed on them the
+    /// way a landed pull leaves it.
+    fn primed_two_tab_window(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<super::Tty7App>,
+        gpui::VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, first) = harness_with_pane(cx);
+        let second = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = crate::terminal::view::quiet_test_pane(2, window, cx);
+            app.tabs
+                .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            let tabs = app
+                .tabs
+                .iter()
+                .zip([1u64, 2])
+                .map(|(tab, pane)| TreeTab {
+                    id: tab.tree_id.get(),
+                    name: None,
+                    group: None,
+                    last_auto: None,
+                    root: PaneNode::Leaf { pane },
+                    hibernated: false,
+                })
+                .collect();
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![WindowView {
+                        id: app.workspace,
+                        ..WindowView::default()
+                    }],
+                    active: None,
+                },
+            );
+            crate::ui::tree_sync::prime_for_test(cx, app.workspace, tabs);
+            stream
+        });
+        (app, vcx, vec![first, second])
+    }
+
+    fn queued_closes(
+        app: &super::Tty7App,
+        cx: &mut gpui::App,
+    ) -> Vec<tty7_core::core::machine::TabId> {
+        use tty7_core::daemon::control::ControlRequest;
+        crate::ui::tree_sync::queued_for_test(cx, app.workspace)
+            .into_iter()
+            .filter_map(|op| match op {
+                ControlRequest::TabClose { tab, .. }
+                | ControlRequest::TabCloseRemembered { tab, .. } => Some(tab),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Restart Server empties the window and waits out the handoff, and every
+    /// delta that lands meanwhile syncs the emptied window. A window missing
+    /// its tabs is not a user closing them.
+    #[gpui::test]
+    fn emptying_the_window_closes_nothing_on_the_machine(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = primed_two_tab_window(cx);
+        let closes = app.update_in(&mut vcx, |app, _, cx| {
+            app.tabs.clear();
+            app.save_session(cx);
+            queued_closes(app, cx)
+        });
+        assert!(
+            closes.is_empty(),
+            "this is the regression: Restart Server closed all sixteen tabs of a workspace, \
+             unremembered, and left their shells running with no tab to hold them"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_a_tab_closes_it_and_only_it_on_the_machine(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = primed_two_tab_window(cx);
+        let (closed, closes) = app.update_in(&mut vcx, |app, window, cx| {
+            let closed = app.tabs[1].tree_id.get();
+            app.close_tab_inner(1, true, window, cx);
+            (closed, queued_closes(app, cx))
+        });
+        assert_eq!(closes, vec![closed]);
     }
 
     #[gpui::test]
