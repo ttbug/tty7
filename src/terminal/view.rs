@@ -115,6 +115,7 @@ actions!(
     terminal,
     [
         CopyText,
+        CopyRaw,
         CutText,
         PasteText,
         AlternatePaste,
@@ -2651,10 +2652,6 @@ impl TerminalView {
             return;
         }
 
-        if m.platform && m.alt && !m.control && ks.key == "c" && self.copy_raw(cx) {
-            cx.stop_propagation();
-            return;
-        }
         if m.platform && !m.control && !m.alt {
             match self.handle_cmd_shortcut(ks, window, cx) {
                 CmdKey::Consumed => {
@@ -2789,7 +2786,7 @@ impl TerminalView {
         let m = &ks.modifiers;
         match ks.key.as_str() {
             "c" => {
-                if self.copy_contextual(m.control, cx) {
+                if self.copy_contextual(m.control, false, cx) {
                     CmdKey::Consumed
                 } else {
                     CmdKey::FallThrough
@@ -3596,14 +3593,25 @@ impl TerminalView {
         }
     }
 
-    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        self.copy_selection_as(false, cx);
-    }
-
-    fn copy_selection_as(&mut self, raw: bool, cx: &mut Context<Self>) {
-        let text = copy_unwrap::selection_text(self, raw, cx);
+    /// `raw` copies the rows as the grid holds them. Otherwise, in a Claude
+    /// pane with `copy_join_wrapped` on, the rows Claude wrapped are joined;
+    /// other programs' output is never joined, since `ls` columns, separators
+    /// and an editor's own wraps all look like Claude's.
+    pub fn copy_selection(&mut self, raw: bool, cx: &mut Context<Self>) {
+        let cfg = cx.global::<Config>();
+        let join = !raw
+            && cfg.copy_join_wrapped
+            && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
+        let text = {
+            let term = self.terminal.term.lock();
+            if join {
+                copy_unwrap::joined(&term)
+            } else {
+                term.selection_to_string()
+            }
+        };
         if let Some(mut text) = text {
-            if cx.global::<Config>().clipboard_trim_trailing_spaces {
+            if cfg.clipboard_trim_trailing_spaces {
                 text = trim_trailing_spaces(&text);
             }
             if !text.is_empty() {
@@ -3612,7 +3620,12 @@ impl TerminalView {
         }
     }
 
-    pub fn copy_contextual(&mut self, clear_on_copy: bool, cx: &mut Context<Self>) -> bool {
+    pub fn copy_contextual(
+        &mut self,
+        clear_on_copy: bool,
+        raw: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.input_active() {
             if let Some(text) = self.cmd.selected_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -3624,7 +3637,7 @@ impl TerminalView {
             }
         }
         if self.has_selection() {
-            self.copy_selection(cx);
+            self.copy_selection(raw, cx);
             if clear_on_copy {
                 self.terminal.term.lock().selection = None;
                 cx.notify();
@@ -4720,6 +4733,19 @@ impl TerminalView {
         )
     }
 
+    /// Whether a click on `row`/`col` lands on the prompt the shell drew,
+    /// ahead of where the input bar's text begins.
+    fn click_on_prompt(&self, col: usize, row: usize) -> bool {
+        let Some((srow, scol)) = self.cursor_cell() else {
+            return false;
+        };
+        if row < srow {
+            return false;
+        }
+        let cols = self.terminal.term.lock().columns().max(1);
+        before_input(input_start(scol, cols), col, row - srow)
+    }
+
     pub fn editor_click(
         &mut self,
         col: usize,
@@ -4728,6 +4754,14 @@ impl TerminalView {
         shift: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A click on the prompt itself — the branch in `git:(main)`, the
+        // directory before it — is on the prompt's text, not the editor's.
+        // It goes to the grid's select like a click on any other output, and
+        // leaves the caret where it was: the first half of a double click
+        // must not have already thrown it to the start of the line.
+        if self.click_on_prompt(col, row) {
+            return false;
+        }
         let Some(idx) = self.editor_char_index(col, row, false) else {
             return false;
         };
@@ -6053,7 +6087,7 @@ impl TerminalView {
         self.drag_scroll = None;
         match copy {
             SelectEndCopy::None => {}
-            SelectEndCopy::Grid => self.copy_selection(cx),
+            SelectEndCopy::Grid => self.copy_selection(false, cx),
             SelectEndCopy::Editor => {
                 if let Some(text) = self.cmd.selected_text() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -7721,7 +7755,13 @@ impl Render for TerminalView {
                 },
             ))
             .on_action(cx.listener(|this, _: &CopyText, _w, cx| {
-                this.copy_contextual(false, cx);
+                this.copy_contextual(false, false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyRaw, _w, cx| {
+                // Nothing selected: let the chord reach the key handler.
+                if !this.copy_contextual(false, true, cx) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &CutText, _w, cx| {
                 this.cut_contextual(cx);
@@ -8590,6 +8630,12 @@ fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows
         .min(crow + caret_vrow)
 }
 
+/// Whether `col` on input-relative row `target` sits before `start`, the cell
+/// the input bar's first character goes in.
+fn before_input(start: (usize, usize), col: usize, target: usize) -> bool {
+    target < start.0 || (target == start.0 && col < start.1)
+}
+
 fn wrapped_click_index(
     chars: &[char],
     start: (usize, usize),
@@ -8820,11 +8866,12 @@ mod tests {
         wsl_share_path,
     };
     use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
-        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, input_start,
-        menu_layout, paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step,
-        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        before_input, description_budget, drag_scroll_step, elide, encode_mouse,
+        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
+        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
+        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
+        select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -10409,6 +10456,19 @@ mod tests {
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
         let chars: Vec<char> = text.chars().collect();
         wrapped_click_index(&chars, (0, scol), cols, col, row, false)
+    }
+
+    #[test]
+    fn before_input_covers_the_prompt_and_nothing_after_it() {
+        // ` tty7 git:(main) ` — the editor starts at column 17.
+        assert!(before_input((0, 17), 12, 0));
+        assert!(before_input((0, 17), 0, 0));
+        assert!(!before_input((0, 17), 17, 0));
+        assert!(!before_input((0, 17), 30, 0));
+        assert!(!before_input((0, 17), 0, 1));
+        // A prompt too long to share its row pushes the editor down one.
+        assert!(before_input((1, 0), 70, 0));
+        assert!(!before_input((1, 0), 0, 1));
     }
 
     #[test]
