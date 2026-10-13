@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 参考侧边栏截图调整展示：xview 品牌区居中放大，任务列表增加「当前任务」计数和分隔线；Agent 会话采用「图标、名称、状态」与任务摘要两层布局，无任务标题时回退到工作目录；树连接线对齐 Agent 标题并连接摘要，选中行增加左侧强调线，仓库分组统一显示展开箭头与 Git 分支徽标。已通过侧边栏 51 项测试、格式检查和编译检查，桌面视觉效果待确认。
 - 侧边栏分组行移除 Git Diff 计数及其点击入口、折叠会话数量，只保留分组名和 Git 分支；分支紧跟名称，间距按当前字体两个空格的宽度计算，保留文件夹图标与方括号。侧边栏 50 项测试通过，桌面视觉效果待确认。
 - 侧边栏分组行统一增加文件夹图标，分组名显示为 `[名称]`；宽度计算预留图标、间距和方括号，长名称截断时保留两侧括号，重命名仍编辑原始名称。侧边栏 50 项测试通过，桌面视觉效果待确认。
 - 已解决当前 `feat/own` 合并 `main`（`cd640388`）的两个冲突：保留当前分支的 MiniMax Code／Command Code Hook 能力与侧边栏修改，同时合入 main 的新 Agent、远程安装测试及进程 CPU／内存信息列；补齐合并后 `CLIAgent::ALL`、AgentEvent 测试字段和俄文翻译覆盖。已通过 `cargo fmt --check`、`cargo test -p tty7-core --lib agent_hooks`（71 项）、`cargo test -p tty7 'ui::tab_sidebar::'`（50 项）和 `cargo check -p tty7`。
@@ -46,7 +47,7 @@
 - 认证弹窗回归：旧交付包曾因构建与打包并行而包含旧版主程序；现已重新构建并确认 `authfix` 包内主程序 UUID 为 `A20FA225-3EBA-3491-B266-63EDD990355C`，与最新 release 产物一致。真实密码／短信验证码服务器端到端显示仍待确认。
 - MiniMax Hook 三项补充修复已通过代码级验证：识别 `tty7-server-c{control}p{protocol}` 远程宿主；祖先进程解析保留带空格的路径；首次临时写入为空或标记未完整时按预期内容的字节前缀恢复，且不据此认领其他文件。真实 `mcode` 运行时端到端验证仍待完成。
 
-- 已实现品牌区、任务分区、仓库分组、分组到会话的 L 型树连接线和底部 workspace 入口，等待启动应用进行视觉检查。
+- 已按参考图调整品牌区、任务标题、Agent 会话双层布局、树连接线和选中态，等待启动最新构建进行桌面视觉检查；本次桌面工具未成功返回截图。
 - 已保留搜索、折叠、拖拽排序、关闭、右键菜单、Git Diff 和缩放行为。
 
 ## 待办
@@ -59,6 +60,7 @@
 
 ## 最近验证
 
+- 2026-10-13 参考图侧边栏展示调整：`cargo test -p tty7 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo check -p tty7 --offline`、`cargo fmt --check` 和 `git diff --check` 通过。新增任务标题回退回归测试，覆盖无标题时工作目录缩写、无目录时占位，以及终端标题和手动命名的保留；未完成最新构建的桌面视觉验证。
 - 2026-10-10 侧边栏分组显示调整 Apple Silicon DMG：release 主程序与 updater 构建通过，`bundle-macos.sh` 生成 [dist/tty7-26.9.4-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.dmg)（约 36M，SHA-256 `43007ecdd7a6184780c6079ac2fe0a3696d1fe1aec22f729f7c702beab7e332f`）与 [dist/tty7-26.9.4-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.zip)（约 32M，SHA-256 `88f635354c9e40a0e107ed071e9093c30902b41d6a923b531ab600f994acb276`）。DMG CRC 校验、只读挂载、`CFBundleShortVersionString=26.9.4`、`/Applications` 入口、三个 thin arm64 可执行文件和 ad-hoc `codesign --verify --deep --strict` 均通过。
 - 2026-10-10 分组行仅显示名称与分支：`cargo fmt --check`、`git diff --check` 和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 通过（50 passed）；未启动桌面窗口进行视觉检查。
 - 2026-10-10 分组行图标与方括号：`cargo fmt --check`、`git diff --check` 和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 通过（50 passed）；未启动桌面窗口进行视觉检查。

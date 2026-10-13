@@ -2,6 +2,9 @@
 /dist
 .DS_Store
 
+# Task-scoped scratch space for local build/debug runs (never committed)
+/.tmp/
+
 # Local dev-tool state — kept out of the repo but retained on disk.
 /CLAUDE.md
 /AGENTS.md

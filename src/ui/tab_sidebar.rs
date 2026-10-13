@@ -52,6 +52,10 @@ const ROW_HEIGHT: f32 = 30.;
 /// A row with a branch line under its title.
 const ROW_HEIGHT_TWO_LINE: f32 = 42.;
 
+const AGENT_ROW_HEIGHT: f32 = 64.;
+const AGENT_ROW_HEADER_Y: f32 = 18.;
+const BRANCH_CHROME: f32 = 23.;
+
 /// The air between two groups — what makes a group a group without a box.
 const GROUP_GAP: f32 = 16.;
 
@@ -114,8 +118,7 @@ mod row_metrics {
 
     /// What a group header can spend on its name and the branch beside it.
     /// The folder, the chevron and the pin come off at the call
-    /// site, which knows whether they are drawn — an open group draws no
-    /// chevron, and reserving one anyway elided its branch with 18px to spare.
+    /// site, which knows whether a pin is drawn. The chevron is always shown.
     pub(super) const fn header_budget(width: f32) -> f32 {
         width - BORDER - 2. * LIST_PAD - HEADER_PAD
     }
@@ -142,6 +145,22 @@ fn header_name_avail(avail: f32, git_want: Option<f32>) -> f32 {
     match git_want {
         Some(want) => (avail - want.min(avail * 0.5)).max(HEADER_NAME_FLOOR),
         None => avail,
+    }
+}
+
+fn agent_task_summary(
+    view: &crate::ui::machine_mirror::TabView,
+    title: Option<String>,
+    home: Option<&Path>,
+) -> Option<String> {
+    use crate::ui::machine_mirror::TabLabel;
+
+    if matches!(view.label(), TabLabel::Agent(_)) {
+        view.cwd
+            .as_deref()
+            .map(|cwd| abbreviate_home(cwd, home).into_owned())
+    } else {
+        title
     }
 }
 
@@ -298,7 +317,22 @@ impl Tty7App {
             .overflow_y_scroll()
             .px_3()
             .pb(px(20.))
-            .gap(px(GROUP_GAP));
+            .gap(px(GROUP_GAP))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t(L10nKey::SidebarActiveTasks)),
+                    )
+                    .child(self.tabs.len().to_string())
+                    .child(div().flex_1().h(px(1.)).bg(cx.theme().sidebar_border)),
+            );
 
         let keys: Rc<Vec<Option<GroupKey>>> = Rc::new(self.sidebar_group_keys(cx));
         let groups = &self.sidebar_groups;
@@ -618,13 +652,13 @@ impl Tty7App {
                 } else {
                     zoom_extra
                 };
-                // Status rides at the row's trailing end, where the badge
-                // would be; the badge wins while the modifier is held.
-                let status_dot = match show_badges && badge_pos < 9 {
+                // Agent rows move this mark beside their name; shell rows keep
+                // it at the trailing end. The modifier badge takes precedence.
+                let mut status_dot = match show_badges && badge_pos < 9 {
                     true => None,
                     false => self.row_status_dot(agent_status, agent_unread, rail_fill),
                 };
-                let status_extra = match status_dot.is_some() {
+                let status_extra = match agent.is_none() && status_dot.is_some() {
                     true => row_metrics::STATUS + row_metrics::GAP,
                     false => 0.,
                 };
@@ -635,7 +669,11 @@ impl Tty7App {
                         .max(48.);
                 let title_size = 0.875 * rem;
                 let meta_size = META_REM * rem;
-                let title_font = if is_active { &title_font_active } else { &font };
+                let title_font = if is_active && agent.is_none() {
+                    &title_font_active
+                } else {
+                    &font
+                };
                 // Title: the *full* label, elided further down once the
                 // working directory beside it has said how much of the line
                 // it wants. A wide sidebar shows the whole thing and a narrow
@@ -654,18 +692,25 @@ impl Tty7App {
                 // string, so it wants what `label_of` would have cut down
                 // rather than the cut. A renamed tab is elided like anything
                 // else — and so the card has to be able to spell it back out.
-                let (title_text, full_title) = match self.full_tab_label(tab, Some(window), cx) {
+                let raw_title = self.full_tab_label(tab, Some(window), cx);
+                let raw_title = if agent.is_some() {
+                    let (view, home) = tab.label_view(Some(window), cx);
+                    agent_task_summary(&view, raw_title, home.as_deref())
+                } else {
+                    raw_title
+                };
+                let (title_text, full_title) = match raw_title {
                     Some(raw) => {
                         let full = SharedString::from(raw);
                         (full.clone(), Some(full))
                     }
-                    // Nothing to expand: the row is naming an unnamed shell,
-                    // not hiding a title behind an ellipsis.
+                    // Nothing to expand: the row needs a translated placeholder.
                     None => {
-                        let placeholder = SharedString::from(t_fmt(
-                            L10nKey::TabUnnamedShell,
-                            &[("n", &((i + 1).to_string()))],
-                        ));
+                        let placeholder = SharedString::from(if agent.is_some() {
+                            t(L10nKey::WindowUntitled).to_string()
+                        } else {
+                            t_fmt(L10nKey::TabUnnamedShell, &[("n", &((i + 1).to_string()))])
+                        });
                         (placeholder, None)
                     }
                 };
@@ -750,7 +795,8 @@ impl Tty7App {
                 // of two-line rows describing paths that mostly agree, which
                 // is twice the height for a line of small grey text nobody
                 // was reading. A row keeps its second line only for a branch.
-                let cwd_full: Option<SharedString> = match git_line.is_none()
+                let cwd_full: Option<SharedString> = match agent.is_none()
+                    && git_line.is_none()
                     && shared_git.is_none()
                 {
                     false => None,
@@ -831,12 +877,17 @@ impl Tty7App {
                 let success = added_ink;
                 let danger = removed_ink;
 
-                // A row that grows a branch line under its title stands at
-                // `ROW_HEIGHT_TWO_LINE`; a one-line row at `ROW_HEIGHT`.
                 let two_line = git_line.is_some();
-                let row_h = match two_line {
-                    true => ROW_HEIGHT_TWO_LINE,
-                    false => ROW_HEIGHT,
+                let row_h = match (agent.is_some(), two_line) {
+                    (true, true) => AGENT_ROW_HEIGHT + 16.,
+                    (true, false) => AGENT_ROW_HEIGHT,
+                    (false, true) => ROW_HEIGHT_TWO_LINE,
+                    (false, false) => ROW_HEIGHT,
+                };
+                let connector_y = if agent.is_some() {
+                    AGENT_ROW_HEADER_Y
+                } else {
+                    row_h / 2.
                 };
                 let has_group_header = section.name.is_some();
                 let is_last_in_group = slot + 1 == visible_tabs.len();
@@ -862,6 +913,9 @@ impl Tty7App {
                         .flex_1()
                         .min_w_0()
                         .justify_center()
+                        .when(agent.is_some(), |col| {
+                            col.h_full().justify_start().pt(px(8.)).gap(px(6.))
+                        })
                         .when_some(info, |col, info| {
                             col.tooltip(move |window, cx| {
                                 // `Tooltip::element` rebuilds its content on
@@ -948,18 +1002,133 @@ impl Tty7App {
                                 .build(window, cx)
                             })
                         })
+                        .when_some(agent, |col, agent| {
+                            let status_label = if asleep {
+                                t(L10nKey::TabContextHibernate)
+                            } else {
+                                crate::ui::tab_strip::agent_status_label(agent_status)
+                                    .unwrap_or_else(|| t(L10nKey::SidebarAgentReady))
+                            };
+                            let show_status = !(show_badges && badge_pos < 9);
+                            let status_chrome =
+                                row_metrics::STATUS + row_metrics::META_GAP + row_metrics::GAP;
+                            let status_text = elide_end_clusters(
+                                &window.text_system(),
+                                &font,
+                                meta_size,
+                                status_label,
+                                (label_avail * 0.5 - status_chrome).max(0.),
+                            );
+                            let status_w = if show_status {
+                                measure_text(&window.text_system(), &font, meta_size, &status_text)
+                                    + status_chrome
+                            } else {
+                                0.
+                            };
+                            let name = elide_end_clusters(
+                                &window.text_system(),
+                                &title_font_active,
+                                title_size,
+                                agent.display_name(),
+                                (label_avail - status_w).max(0.),
+                            );
+                            col.child(
+                                h_flex()
+                                    .w_full()
+                                    .h(px(20.))
+                                    .items_center()
+                                    .gap(px(row_metrics::GAP))
+                                    .child(self.tab_avatar_plain(
+                                        ("sidebar-avatar", i),
+                                        Some(agent),
+                                        agent_status,
+                                        ssh_dot,
+                                        row_metrics::AVATAR,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(name),
+                                    )
+                                    .when(show_status, |line| {
+                                        line.child(
+                                            h_flex()
+                                                .flex_shrink_0()
+                                                .gap(px(row_metrics::META_GAP))
+                                                .children(status_dot.take())
+                                                .when(
+                                                    agent_status
+                                                        .and_then(|s| s.dot_rgb())
+                                                        .is_none(),
+                                                    |status| {
+                                                        status.child(
+                                                            div().size(px(5.)).rounded_full().bg(
+                                                                if asleep {
+                                                                    muted
+                                                                } else {
+                                                                    cx.theme().success
+                                                                },
+                                                            ),
+                                                        )
+                                                    },
+                                                )
+                                                .text_size(px(meta_size))
+                                                .text_color(muted)
+                                                .child(status_text),
+                                        )
+                                    }),
+                            )
+                        })
                         .child(
                             h_flex()
                                 .w_full()
                                 .items_center()
-                                .gap_1p5()
+                                .gap(px(if agent.is_some() {
+                                    row_metrics::GAP
+                                } else {
+                                    row_metrics::META_GAP
+                                }))
+                                .when(agent.is_some(), |line| {
+                                    line.child(
+                                        div()
+                                            .relative()
+                                            .flex_shrink_0()
+                                            .w(px(row_metrics::AVATAR))
+                                            .h(px(18.))
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(7.))
+                                                    .top(px(-8.))
+                                                    .w(px(1.))
+                                                    .h(px(17.))
+                                                    .bg(cx.theme().sidebar_border),
+                                            )
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(7.))
+                                                    .top(px(9.))
+                                                    .w(px(9.))
+                                                    .h(px(1.))
+                                                    .bg(cx.theme().sidebar_border),
+                                            ),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
                                         .text_sm()
-                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                        .when(agent.is_some(), |d| d.text_color(muted))
+                                        .when(is_active && agent.is_none(), |d| {
+                                            d.font_weight(FontWeight::MEDIUM)
+                                        })
                                         .child(shown_title),
                                 )
                                 // The path is elided to the room the title
@@ -976,12 +1145,17 @@ impl Tty7App {
                                     )
                                 }),
                         )
-                        .children(git_line)
+                        .when_some(git_line, |col, line| {
+                            col.child(line.when(agent.is_some(), |line| {
+                                line.pl(px(row_metrics::AVATAR + row_metrics::GAP))
+                            }))
+                        })
                         .into_any_element(),
                 };
 
                 let row = h_flex()
                     .id(("tab-row", i))
+                    .relative()
                     // What a screen reader announces and presses: the full
                     // title, not the elided one drawn.
                     .role(gpui::Role::Tab)
@@ -1021,6 +1195,16 @@ impl Tty7App {
                     .when(is_active, |s| {
                         s.bg(gpui::rgb(sf.selected))
                             .text_color(gpui::rgb(sf.text_selected))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(3.))
+                                    .bottom(px(3.))
+                                    .w(px(3.))
+                                    .rounded_full()
+                                    .bg(cx.theme().accent),
+                            )
                     })
                     .when(!is_active, |s| {
                         s.text_color(gpui::rgb(sf.text_resting))
@@ -1100,7 +1284,9 @@ impl Tty7App {
                                         .left(px(5.))
                                         .top(px(-ROW_GAP))
                                         .w(px(1.))
-                                        .when(is_last_in_group, |line| line.bottom(px(row_h / 2.)))
+                                        .when(is_last_in_group, |line| {
+                                            line.bottom(px(row_h - connector_y))
+                                        })
                                         .when(!is_last_in_group, |line| line.bottom_0())
                                         .bg(cx.theme().sidebar_border),
                                 )
@@ -1108,21 +1294,23 @@ impl Tty7App {
                                     div()
                                         .absolute()
                                         .left(px(5.))
-                                        .top(px(row_h / 2. - 0.5))
+                                        .top(px(connector_y - 0.5))
                                         .w(px(9.))
                                         .h(px(1.))
                                         .bg(cx.theme().sidebar_border),
                                 ),
                         )
                     })
-                    .child(self.tab_avatar_plain(
-                        ("sidebar-avatar", i),
-                        agent,
-                        agent_status,
-                        ssh_dot,
-                        row_metrics::AVATAR,
-                        cx,
-                    ))
+                    .when(agent.is_none(), |row| {
+                        row.child(self.tab_avatar_plain(
+                            ("sidebar-avatar", i),
+                            agent,
+                            agent_status,
+                            ssh_dot,
+                            row_metrics::AVATAR,
+                            cx,
+                        ))
+                    })
                     // Leading, like the chip's: the trailing end of a row is
                     // the badge's, and the close button fades in over it.
                     .when(zoomed, |row| {
@@ -1296,16 +1484,16 @@ impl Tty7App {
                 let ts = window.text_system();
                 let mut avail =
                     row_metrics::header_budget(width) - header_size - row_metrics::META_GAP;
-                if folded {
-                    avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
-                }
+                avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
                 if pinned {
                     avail -= PIN_MARK_SIZE + row_metrics::META_GAP;
                 }
                 let avail = avail.max(HEADER_NAME_FLOOR);
                 let branch_gap = measure_text(&ts, &meta_font, header_size, "  ");
                 let git_want = shared_git.as_ref().map(|shared| {
-                    branch_gap + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
+                    branch_gap
+                        + BRANCH_CHROME
+                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                 });
                 let name_avail = header_name_avail(avail, git_want);
                 let brackets_w = measure_text(&ts, &header_font, header_size, "[]");
@@ -1371,16 +1559,16 @@ impl Tty7App {
                             }
                         })
                     })
-                    // The heading names the group; the chevron only says
-                    // something when there is something behind it. An open
-                    // group shows its rows, which is its own answer.
-                    .when(folded, |header| {
-                        header.child(
-                            div()
-                                .flex_shrink_0()
-                                .child(Icon::new(IconName::ChevronRight).xsmall()),
-                        )
-                    })
+                    .child(
+                        div().flex_shrink_0().child(
+                            Icon::new(if folded {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .xsmall(),
+                        ),
+                    )
                     // Every kept group carries the mark; it is what sets them
                     // apart from the derived groups below. On a folder group it
                     // is also the way to stop keeping it — a click unpins, and
@@ -1459,7 +1647,7 @@ impl Tty7App {
                             .into_any_element(),
                     })
                     .when_some(shared_git, |bar, shared| {
-                        let branch_avail = (avail - name_w - branch_gap).max(0.);
+                        let branch_avail = (avail - name_w - branch_gap - BRANCH_CHROME).max(0.);
                         // Cut from the end, like a row's.
                         let branch = elide_end_clusters(
                             &ts,
@@ -1475,7 +1663,17 @@ impl Tty7App {
                             .items_center()
                             // Replace the header's default gap with two spaces.
                             .ml(px(branch_gap - row_metrics::META_GAP))
+                            .px(px(5.))
+                            .rounded(px(6.))
+                            .bg(cx.theme().danger.opacity(0.12))
+                            .gap(px(3.))
                             .text_color(cx.theme().danger)
+                            .child(
+                                gpui::svg()
+                                    .path("icons/git-branch.svg")
+                                    .flex_shrink_0()
+                                    .size(px(10.)),
+                            )
                             .child(div().min_w_0().truncate().child(branch));
                         bar.child(line)
                     })
@@ -1736,46 +1934,37 @@ impl Tty7App {
                         .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
                     ),
             );
-        let brand = h_flex()
+        let brand = v_flex()
             .flex_shrink_0()
-            .h(px(58.))
+            .h(px(100.))
             .items_center()
-            .gap_2()
+            .justify_center()
+            .gap(px(4.))
             .px(px(RAIL_INSET))
             .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
+                h_flex()
                     .items_center()
-                    .justify_center()
-                    .size(px(30.))
-                    .rounded(px(8.))
-                    .bg(cx.theme().muted)
+                    .gap(px(10.))
                     .child(
                         gpui::svg()
                             .path("icons/terminal.svg")
-                            .size(px(17.))
+                            .size(px(32.))
                             .text_color(cx.theme().accent),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(cx.theme().foreground)
-                            .child("xview"),
                     )
                     .child(
                         div()
-                            .truncate()
-                            .text_size(px(10.5))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(t(L10nKey::SidebarProductTagline)),
+                            .text_size(px(32.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(cx.theme().foreground)
+                            .child("xview"),
                     ),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(t(L10nKey::SidebarProductTagline)),
             );
         // The tile inside asks for `w_full`, and a percentage is only a width
         // while some box above it has a real one. This row used to have none of
@@ -4306,6 +4495,42 @@ mod fold_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_summary_uses_cwd_only_when_the_title_is_an_agent_fallback() {
+        use crate::core::cli_agent::CLIAgent;
+        use crate::ui::machine_mirror::TabView;
+
+        let mut view = TabView {
+            id: crate::core::machine::TabId::new(),
+            name: None,
+            title: String::new(),
+            osc_title: None,
+            cwd: Some("/home/test/project".to_string()),
+            agent: Some(CLIAgent::Codex),
+            status: None,
+            live: true,
+            panes: 1,
+        };
+        assert_eq!(
+            agent_task_summary(&view, Some("Codex".into()), Some(Path::new("/home/test"))),
+            Some("~/project".into()),
+        );
+        view.cwd = None;
+        assert_eq!(agent_task_summary(&view, Some("Codex".into()), None), None);
+
+        view.osc_title = Some("Fix sidebar layout".into());
+        assert_eq!(
+            agent_task_summary(&view, Some("Fix sidebar layout".into()), None),
+            Some("Fix sidebar layout".into()),
+        );
+        // An explicit name remains a task title even when it names the agent.
+        view.name = Some("Codex".into());
+        assert_eq!(
+            agent_task_summary(&view, Some("Codex".into()), None),
+            Some("Codex".into()),
+        );
+    }
 
     #[test]
     fn reveal_shift_moves_only_rows_out_of_view() {
