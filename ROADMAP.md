@@ -6,6 +6,10 @@
 
 ## 已完成
 
+- 侧边栏中文品牌副标题从「终端工作台」改为「All in One终端工作台」。国际化 8 项测试、格式检查和差异检查通过。
+- 侧边栏分组名字号从 13px 增大到 14px，名称及方括号的宽度测量同步使用新字号，保留高亮粗体显示。侧边栏 51 项测试及格式检查通过，桌面视觉效果待确认。
+- 已修复侧边栏分组 Git 分支图标漏设颜色：SVG 显式设置主题 `danger` 色，避免 GPUI 因图标自身颜色为空而跳过绘制。侧边栏 51 项测试、Git 图标资源测试及格式检查通过，桌面视觉效果待确认。
+- 侧边栏任务分组名改用完整主题强调色 `success` 和粗体 `BOLD`，文字宽度测量同步使用粗体，保证长名称截断与分支间距一致。侧边栏 51 项测试及格式检查通过，桌面视觉效果待确认。
 - 参考侧边栏截图调整展示：xview 品牌区居中放大，任务列表增加「当前任务」计数和分隔线；Agent 会话采用「图标、名称、状态」与任务摘要两层布局，无任务标题时回退到工作目录；树连接线对齐 Agent 标题并连接摘要，选中行增加左侧强调线，仓库分组统一显示展开箭头与 Git 分支徽标。已通过侧边栏 51 项测试、格式检查和编译检查，桌面视觉效果待确认。
 - 侧边栏分组行移除 Git Diff 计数及其点击入口、折叠会话数量，只保留分组名和 Git 分支；分支紧跟名称，间距按当前字体两个空格的宽度计算，保留文件夹图标与方括号。侧边栏 50 项测试通过，桌面视觉效果待确认。
 - 侧边栏分组行统一增加文件夹图标，分组名显示为 `[名称]`；宽度计算预留图标、间距和方括号，长名称截断时保留两侧括号，重命名仍编辑原始名称。侧边栏 50 项测试通过，桌面视觉效果待确认。
@@ -60,6 +64,11 @@
 
 ## 最近验证
 
+- 2026-10-13 14:42 侧边栏品牌副标题与分组名字号改动的 Apple Silicon DMG：`cargo test -p tty7 'ui::tab_sidebar::'`（51 passed）后执行 `cargo build --release --locked --target aarch64-apple-darwin`（14:36:02–14:41:49）与 updater 构建通过，`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 [dist/tty7-26.10.0-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.dmg)（38240496 bytes，SHA-256 `697bbd64757900a0892336b00e672ab23d701b0eb4c34612f27740668f13308d`）与 [dist/tty7-26.10.0-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.zip)（33355311 bytes，SHA-256 `08ae269f2a50fd4b3991f64e563eab6a9430bd3482228dedf2b7453d1048a745`）。DMG CRC VALID、ZIP 完整性、只读挂载含 `tty7.app` 与 `/Applications` 入口、`CFBundleShortVersionString=26.10.0`、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release `dwarfdump` UUID 逐一比对（tty7-app `40F457E3-4F71-3AB0-A4E0-0A69D109A30F`、tty7 `7521001D-B98A-35B5-BE7F-BDCE899FFABA`、tty7-updater `6EEC3F60-57F0-37B1-ADF2-916A4E5580C3`）均通过；已确认新文案 `All in One终端工作台` 编入包内主程序，旧 dist 备份至 `.tmp/dmg-build/prev-dist-26.10.0/`；未启动桌面窗口做视觉确认。
+- 2026-10-13 侧边栏品牌副标题文案：`cargo test -p tty7 --bin tty7-app 'ui::i18n::' --offline --no-fail-fast`（8 passed）、`cargo fmt --check` 和 `git diff --check` 通过。
+- 2026-10-13 分组名字号增大：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。
+- 2026-10-13 分支图标颜色修复：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo test -p tty7 --bin tty7-app every_git_icon_resolves --offline`（1 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。
+- 2026-10-13 分组名高亮加粗：`cargo test -p tty7 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。
 - 2026-10-13 参考图侧边栏展示调整：`cargo test -p tty7 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo check -p tty7 --offline`、`cargo fmt --check` 和 `git diff --check` 通过。新增任务标题回退回归测试，覆盖无标题时工作目录缩写、无目录时占位，以及终端标题和手动命名的保留；未完成最新构建的桌面视觉验证。
 - 2026-10-10 侧边栏分组显示调整 Apple Silicon DMG：release 主程序与 updater 构建通过，`bundle-macos.sh` 生成 [dist/tty7-26.9.4-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.dmg)（约 36M，SHA-256 `43007ecdd7a6184780c6079ac2fe0a3696d1fe1aec22f729f7c702beab7e332f`）与 [dist/tty7-26.9.4-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.9.4-macos-arm64.zip)（约 32M，SHA-256 `88f635354c9e40a0e107ed071e9093c30902b41d6a923b531ab600f994acb276`）。DMG CRC 校验、只读挂载、`CFBundleShortVersionString=26.9.4`、`/Applications` 入口、三个 thin arm64 可执行文件和 ad-hoc `codesign --verify --deep --strict` 均通过。
 - 2026-10-10 分组行仅显示名称与分支：`cargo fmt --check`、`git diff --check` 和 `cargo test -p tty7 'ui::tab_sidebar::' --no-fail-fast` 通过（50 passed）；未启动桌面窗口进行视觉检查。

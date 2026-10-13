@@ -2099,7 +2099,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuSplitHint => "按住 {key} 可分屏打开",
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",
-        L10nKey::SidebarProductTagline => "终端工作台",
+        L10nKey::SidebarProductTagline => "All in One终端工作台",
         L10nKey::SidebarActiveTasks => "当前任务",
         L10nKey::SidebarAgentReady => "就绪",
         L10nKey::SidebarScratchGroup => "草稿",

@@ -65,6 +65,8 @@ const HEADER_HEIGHT: f32 = 22.;
 /// The group heading's line: 13px at the default size.
 const HEADER_REM: f32 = 13. / 16.;
 
+const HEADER_NAME_REM: f32 = 14. / 16.;
+
 /// The row's branch line: 11.5px at the default size.
 const META_REM: f32 = 11.5 / 16.;
 
@@ -406,6 +408,7 @@ impl Tty7App {
         let rem = window.rem_size().as_f32();
         // Measure with the same interface scale used to paint the header.
         let header_size = rem * HEADER_REM;
+        let header_name_size = rem * HEADER_NAME_REM;
         // The git lines and the group header paint with `tabular()` figures,
         // which set a `1` as wide as an `8`; measuring them proportionally
         // came out a few pixels short on counts like `+1565 −124`, and the
@@ -415,7 +418,7 @@ impl Tty7App {
             ..font.clone()
         };
         let header_font = gpui::Font {
-            weight: FontWeight::MEDIUM,
+            weight: FontWeight::BOLD,
             ..font.clone()
         };
         // On the rail the diff counts are metadata like the branch beside
@@ -1496,18 +1499,18 @@ impl Tty7App {
                         + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                 });
                 let name_avail = header_name_avail(avail, git_want);
-                let brackets_w = measure_text(&ts, &header_font, header_size, "[]");
+                let brackets_w = measure_text(&ts, &header_font, header_name_size, "[]");
                 let label = format!(
                     "[{}]",
                     elide_label(
                         &ts,
                         &header_font,
-                        header_size,
+                        header_name_size,
                         &name,
                         (name_avail - brackets_w).max(0.),
                     )
                 );
-                let name_w = measure_text(&ts, &header_font, header_size, &label);
+                let name_w = measure_text(&ts, &header_font, header_name_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
                 let bar = h_flex()
                     .id(("sidebar-group", group_ix))
@@ -1629,12 +1632,9 @@ impl Tty7App {
                             .flex_shrink_0()
                             .min_w_0()
                             .truncate()
-                            .text_color(added_ink)
-                            // A caption, not a title: the rows under it are
-                            // what the column is for, so the heading keeps a
-                            // restrained medium weight while its cyan color
-                            // separates it from the branch beside it.
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(header_name_size))
+                            .text_color(cx.theme().success)
+                            .font_weight(FontWeight::BOLD)
                             .child(label)
                             // A folder group may have been renamed to anything;
                             // the folder it keeps is what the name stands for.
@@ -1672,7 +1672,8 @@ impl Tty7App {
                                 gpui::svg()
                                     .path("icons/git-branch.svg")
                                     .flex_shrink_0()
-                                    .size(px(10.)),
+                                    .size(px(10.))
+                                    .text_color(cx.theme().danger),
                             )
                             .child(div().min_w_0().truncate().child(branch));
                         bar.child(line)
