@@ -1523,13 +1523,27 @@ impl RemoteTerminal {
                                 // comes back with the prompt's cursor.
                                 let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
+                                // Each prompt mark in it also clears the kitty
+                                // keyboard stacks, at the mark itself. Live,
+                                // that happens on the `Prompt` report that
+                                // follows it; a replay carries one report for
+                                // the whole ring, so flags a dead program left
+                                // before an earlier prompt would otherwise come
+                                // back to whatever runs in the pane now (#1155).
+                                // The daemon's `TerminalModes` clears them at
+                                // the same marks, so the prelude ahead of the
+                                // ring agrees.
                                 let fed =
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
                                         match cut {
                                             ReaderCut::Command(mark) => {
+                                                if mark == CommandMark::Finished {
+                                                    term.reset_keyboard_modes();
+                                                }
                                                 command_cursor.apply(term, mark)
                                             }
                                             ReaderCut::Prompt(mark) => {
+                                                term.reset_keyboard_modes();
                                                 prompt_break.apply(term, mark)
                                             }
                                             ReaderCut::Parked(_) => {}
@@ -1724,7 +1738,20 @@ impl RemoteTerminal {
                                     let resets = stale_mode_resets(*term.mode());
                                     if !resets.is_empty() {
                                         processor.advance(&mut *term, &resets);
-                                        drop(term);
+                                    }
+                                    // Nothing in front of the shell could have
+                                    // negotiated kitty keyboard flags, so they
+                                    // all go — both screens' stacks, not just
+                                    // the flags in effect. `CSI = 0 u` cannot
+                                    // do that: a program killed on the
+                                    // alternate screen left its push on that
+                                    // screen's stack, and the next program to
+                                    // enter it got the flags back and its
+                                    // Escape as `CSI 27 u` — which a ConPTY
+                                    // reader sees as no key at all (#1155).
+                                    term.reset_keyboard_modes();
+                                    drop(term);
+                                    if !resets.is_empty() {
                                         proxy.send_event(AlacEvent::Wakeup);
                                     }
                                 }
@@ -2822,9 +2849,8 @@ fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::FOCUS_IN_OUT) {
         seq.extend_from_slice(b"\x1b[?1004l");
     }
-    if mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) || mode.contains(TermMode::ALT_SCREEN) {
-        seq.extend_from_slice(b"\x1b[=0;1u");
-    }
+    // The kitty keyboard flags are not reset here: no sequence clears their
+    // stacks, so the caller does it through `Term::reset_keyboard_modes`.
     seq
 }
 
@@ -2905,10 +2931,12 @@ fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// What a click on a macOS notification has to carry back: the pane to reveal.
+/// What a click on a notification has to carry back: the pane to reveal.
 ///
-/// It rides in the notification's `identifier`, which is the one field the
-/// center hands back verbatim on activation without a dictionary round trip.
+/// On macOS it rides in the notification's `identifier`, which is the one
+/// field the center hands back verbatim on activation without a dictionary
+/// round trip. On Windows it is the toast's `launch` attribute, which comes
+/// back as the `invokedArgs` of a COM activation (`core::toast_activator`).
 /// Shape: `tty7-pane-<pid>-<leaf>-<seq>`.
 ///
 /// The pid is what makes a stale identifier fail closed. Notifications outlive
@@ -2916,13 +2944,14 @@ fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
 /// whatever process now owns the bundle id — a relaunched tty7, or a second
 /// instance running alongside. A leaf id is a gpui entity id, which a fresh
 /// process hands out again in the same order, so without the pid that click
-/// would reveal an unrelated pane. The sequence number keeps two notifications
-/// for the same pane apart — the center treats a repeated identifier as
-/// "replace the earlier one".
-#[cfg(any(target_os = "macos", test))]
+/// would reveal an unrelated pane. On Windows that is the *only* kind of click
+/// a process COM launched for the purpose can receive. The sequence number
+/// keeps two notifications for the same pane apart — the center treats a
+/// repeated identifier as "replace the earlier one".
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const NOTIFICATION_ID_PREFIX: &str = "tty7-pane-";
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn notification_identifier(leaf_id: u64) -> String {
     use std::sync::atomic::AtomicU64;
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2931,7 +2960,7 @@ fn notification_identifier(leaf_id: u64) -> String {
     format!("{NOTIFICATION_ID_PREFIX}{pid}-{leaf_id}-{seq}")
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn leaf_id_in_identifier(identifier: &str) -> Option<u64> {
     let rest = identifier.strip_prefix(NOTIFICATION_ID_PREFIX)?;
     let (pid, rest) = rest.split_once('-')?;
@@ -3066,20 +3095,30 @@ fn try_clickable_notification(title: &str, body: &str, leaf_id: u64) -> bool {
     let Some(tx) = toast_thread() else {
         return false;
     };
-    tx.try_send((title.to_string(), body.to_string(), leaf_id))
-        .is_ok()
+    tx.try_send((
+        title.to_string(),
+        body.to_string(),
+        notification_identifier(leaf_id),
+    ))
+    .is_ok()
 }
 
+/// Title, body, and the `launch` identifier a click hands back.
 #[cfg(all(target_os = "windows", not(test)))]
-type ToastRequest = (String, String, u64);
+type ToastRequest = (String, String, String);
 
-/// Toasts are built, shown and *kept* on one dedicated thread.
+/// Toasts are built, shown and kept on one dedicated thread.
 ///
-/// A `ToastNotification` has to stay alive for its `Activated` event to reach
-/// us, and Windows parks toasts in Action Center long after they leave the
-/// screen — a thread per toast sleeping out a fixed window would both leak
-/// threads and stop working the moment the timer expired. Keeping them on a
-/// single thread also means the WinRT objects never cross a thread boundary.
+/// A click reaches us two ways. The one that always works is COM activation
+/// (`core::toast_activator`): the shell calls our registered class with the
+/// toast's `launch` string, whether the click lands on the popup or on the
+/// toast in notification history, and whether or not this process is still
+/// the one that sent it. The other is the toast object's own `Activated`
+/// event, which fires only for the popup and only while the object is alive
+/// here — it is kept as the fallback for a shortcut that predates the toast
+/// activator (an all-users install from an older installer, which we cannot
+/// rewrite unelevated). Keeping the objects on a single thread also means the
+/// WinRT objects never cross a thread boundary.
 #[cfg(all(target_os = "windows", not(test)))]
 fn toast_thread() -> Option<&'static std::sync::mpsc::SyncSender<ToastRequest>> {
     use std::sync::OnceLock;
@@ -3110,13 +3149,14 @@ fn toast_loop(rx: std::sync::mpsc::Receiver<ToastRequest>) {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
-    // How many past toasts stay clickable. Dropping the oldest is what bounds
-    // the memory here; there is no useful deadline to expire them on.
+    // How many recent popups keep their `Activated` fallback. Dropping the
+    // oldest is what bounds the memory here; the popup is long gone by then,
+    // and the COM path does not depend on these objects at all.
     const MAX_LIVE_TOASTS: usize = 32;
     let mut live: VecDeque<ToastNotification> = VecDeque::new();
 
-    while let Ok((title, body, leaf_id)) = rx.recv() {
-        if let Some(toast) = show_windows_toast(&title, &body, leaf_id) {
+    while let Ok((title, body, launch)) = rx.recv() {
+        if let Some(toast) = show_windows_toast(&title, &body, launch) {
             if live.len() == MAX_LIVE_TOASTS {
                 live.pop_front();
             }
@@ -3125,11 +3165,31 @@ fn toast_loop(rx: std::sync::mpsc::Receiver<ToastRequest>) {
     }
 }
 
+/// The toast's XML. `launch` is what Windows hands back on a click — as the
+/// `invokedArgs` of a COM activation, and as the `Arguments` of the in-process
+/// `Activated` event.
+#[cfg(any(target_os = "windows", test))]
+fn toast_xml(title: &str, body: &str, launch: &str) -> String {
+    format!(
+        r#"<toast launch="{}" activationType="foreground">
+  <visual>
+    <binding template="ToastText02">
+      <text id="1">{}</text>
+      <text id="2">{}</text>
+    </binding>
+  </visual>
+</toast>"#,
+        xml_escape(launch),
+        xml_escape(title),
+        xml_escape(body)
+    )
+}
+
 #[cfg(all(target_os = "windows", not(test)))]
 fn show_windows_toast(
     title: &str,
     body: &str,
-    leaf_id: u64,
+    launch: String,
 ) -> Option<windows::UI::Notifications::ToastNotification> {
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::Foundation::TypedEventHandler;
@@ -3138,18 +3198,7 @@ fn show_windows_toast(
 
     let app_id = crate::core::aumid::toast_app_id()?;
 
-    let xml = format!(
-        r#"<toast>
-  <visual>
-    <binding template="ToastText02">
-      <text id="1">{}</text>
-      <text id="2">{}</text>
-    </binding>
-  </visual>
-</toast>"#,
-        xml_escape(title),
-        xml_escape(body)
-    );
+    let xml = toast_xml(title, body, &launch);
 
     let doc = match XmlDocument::new() {
         Ok(d) => {
@@ -3175,7 +3224,7 @@ fn show_windows_toast(
 
     if let Err(e) = toast.Activated(&TypedEventHandler::new(
         move |_sender: &Option<ToastNotification>, _args: &Option<IInspectable>| {
-            reveal_pane(leaf_id);
+            toast_activated(&launch);
             Ok(())
         },
     )) {
@@ -3198,13 +3247,69 @@ fn show_windows_toast(
     Some(toast)
 }
 
+/// What a click on a Windows toast asks for. A pane this process notified
+/// about is revealed; anything else — a toast from an earlier tty7, one
+/// without a pane, a launch string we do not recognize — still brings tty7
+/// forward, which is what the user clicked a tty7 toast for.
+#[cfg(any(target_os = "windows", test))]
+fn toast_click_action(launch: &str) -> crate::ui::tray::TrayAction {
+    use crate::ui::tray::TrayAction;
+    match leaf_id_in_identifier(launch) {
+        Some(leaf_id) => TrayAction::RevealPane { leaf_id },
+        None => TrayAction::ShowWindow,
+    }
+}
+
+/// The last few `launch` strings acted on. A click on the popup can arrive
+/// twice — through COM and through the toast object's `Activated` event — and
+/// must reveal once. Identifiers are unique per toast, so a repeat is that
+/// same click; an empty one (a toast without a pane) is never deduplicated.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct RecentActivations(std::collections::VecDeque<String>);
+
+#[cfg(any(target_os = "windows", test))]
+impl RecentActivations {
+    const KEEP: usize = 8;
+
+    fn first_time(&mut self, launch: &str) -> bool {
+        if launch.is_empty() {
+            return true;
+        }
+        if self.0.iter().any(|seen| seen == launch) {
+            return false;
+        }
+        if self.0.len() == Self::KEEP {
+            self.0.pop_front();
+        }
+        self.0.push_back(launch.to_string());
+        true
+    }
+}
+
+/// A click on a tty7 toast, from whichever path delivered it. Runs on a COM or
+/// WinRT callback thread, so it only touches the tray channel — queued there
+/// when this process has no dispatch loop yet (a launch COM made to deliver
+/// the click).
+#[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn toast_activated(launch: &str) {
+    static RECENT: std::sync::Mutex<RecentActivations> =
+        std::sync::Mutex::new(RecentActivations(std::collections::VecDeque::new()));
+    let first = RECENT
+        .lock()
+        .map(|mut recent| recent.first_time(launch))
+        .unwrap_or(true);
+    if first {
+        crate::ui::tray::send_or_queue(toast_click_action(launch));
+    }
+}
+
 /// Ask the tray dispatch loop to bring `leaf_id` to the front. Runs on whatever
 /// thread the platform hands the activation to, so it only touches the channel.
-#[cfg(any(target_os = "macos", all(target_os = "windows", not(test))))]
+#[cfg(target_os = "macos")]
 fn reveal_pane(leaf_id: u64) {
-    if let Some(tx) = crate::ui::tray::sender() {
-        let _ = tx.try_send(crate::ui::tray::TrayAction::RevealPane { leaf_id });
-    }
+    crate::ui::tray::send_or_queue(crate::ui::tray::TrayAction::RevealPane { leaf_id });
 }
 
 #[cfg(not(any(target_os = "macos", all(target_os = "windows", not(test)))))]
@@ -3214,7 +3319,7 @@ fn try_clickable_notification(_title: &str, _body: &str, _leaf_id: u64) -> bool 
     false
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -3282,7 +3387,72 @@ mod notification_tests {
         assert_eq!(sanitize_notification_text("short", 8), "short");
     }
 
+    /// Pulls the `launch` attribute back out the way the shell would see it.
+    fn launch_attribute(xml: &str) -> String {
+        let start = xml
+            .find(r#"launch=""#)
+            .expect("toast has a launch attribute")
+            + 8;
+        let len = xml[start..].find('"').expect("closed attribute");
+        xml[start..start + len].to_string()
+    }
+
+    /// #1179: a toast clicked from notification history is only reported over
+    /// COM, as the toast's `launch` string. Without one the pane is lost.
+    #[test]
+    fn a_toast_carries_its_pane_in_the_launch_attribute() {
+        let xml = toast_xml("title", "body", &notification_identifier(42));
+        assert_eq!(
+            toast_click_action(&launch_attribute(&xml)),
+            crate::ui::tray::TrayAction::RevealPane { leaf_id: 42 }
+        );
+    }
+
+    #[test]
+    fn a_toast_from_another_process_only_shows_the_window() {
+        let other_pid = std::process::id().wrapping_add(1);
+        let stale = format!("{NOTIFICATION_ID_PREFIX}{other_pid}-42-0");
+        let xml = toast_xml("title", "body", &stale);
+        assert_eq!(
+            toast_click_action(&launch_attribute(&xml)),
+            crate::ui::tray::TrayAction::ShowWindow
+        );
+        assert_eq!(
+            toast_click_action(""),
+            crate::ui::tray::TrayAction::ShowWindow
+        );
+    }
+
+    #[test]
+    fn one_click_delivered_twice_reveals_once() {
+        let mut recent = RecentActivations::default();
+        let a = notification_identifier(1);
+        let b = notification_identifier(1);
+        assert!(recent.first_time(&a));
+        assert!(!recent.first_time(&a));
+        assert!(recent.first_time(&b));
+        // Toasts without a pane all share the empty launch string.
+        assert!(recent.first_time(""));
+        assert!(recent.first_time(""));
+    }
+
+    /// The real WinRT XML parser must accept the document and hand the launch
+    /// string back verbatim. Parses only; shows nothing.
     #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_parses_the_toast_and_keeps_its_launch_string() {
+        use windows::Data::Xml::Dom::XmlDocument;
+        let id = notification_identifier(7);
+        let doc = XmlDocument::new().expect("XmlDocument");
+        doc.LoadXml(&toast_xml("a & <b>", "\"c\" 'd'", &id).into())
+            .expect("toast xml parses");
+        let launch = doc
+            .DocumentElement()
+            .and_then(|root| root.GetAttribute(&"launch".into()))
+            .expect("launch attribute");
+        assert_eq!(launch.to_string(), id);
+    }
+
     #[test]
     fn xml_escaping_covers_every_entity_once() {
         assert_eq!(
@@ -4410,6 +4580,160 @@ mod replay_tests {
             "the displaced attach's detach took the live seat: the surviving \
              view stopped receiving output"
         );
+    }
+
+    /// What a physical Escape is written to the pane as, by the encoder a
+    /// local ConPTY pane uses (#1155 is a ConPTY-only symptom), once the
+    /// reader has applied everything up to `barrier`. Also returns the reply
+    /// a `CSI ? u` sent after the barrier gets.
+    fn escape_after(frames: Vec<DaemonMsg>, barrier: &str) -> (Vec<u8>, Option<String>) {
+        use crate::terminal::input::{KeyFlags, keystroke_to_bytes};
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        for frame in frames {
+            frame.encode(&mut daemon).unwrap();
+        }
+        DaemonMsg::Output(format!("{barrier}\x1b[?u").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        let text = settled(&term, &[barrier]);
+        assert!(text.contains(barrier), "the barrier never arrived:\n{text}");
+        let mut reply = None;
+        for _ in 0..200 {
+            while let Ok(event) = term.events.try_recv() {
+                if let AlacEvent::PtyWrite(text) = event {
+                    reply = Some(text);
+                }
+            }
+            if reply.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mode = *term.term.lock().mode();
+        let flags = KeyFlags::from_mode_with_local_conpty(&mode, true);
+        let escape = keystroke_to_bytes(&gpui::Keystroke::parse("escape").unwrap(), flags);
+        drop(daemon);
+        (escape.unwrap_or_default(), reply)
+    }
+
+    fn at_prompt() -> DaemonMsg {
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(130),
+        }
+    }
+
+    /// #1155: a program pushed kitty keyboard flags on the main screen and
+    /// again on the alternate one, and was killed there. Once the prompt is
+    /// back, the next program to enter the alternate screen must not find the
+    /// dead one's flags on its stack.
+    #[test]
+    fn a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen() {
+        let (escape, reply) = escape_after(
+            vec![
+                DaemonMsg::Output(b"\x1b[>1u\x1b[?1049h\x1b[>7u".to_vec()),
+                at_prompt(),
+                DaemonMsg::Output(b"\x1b[?1049h".to_vec()),
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b", "Escape must reach the next program bare");
+        assert_eq!(
+            reply.as_deref(),
+            Some("\x1b[?0u"),
+            "a flags query must agree with the flags in effect"
+        );
+    }
+
+    /// #1155: a program that left the alternate screen *before* popping
+    /// popped the main screen's stack, so its push stayed on the alternate
+    /// one while no flags were in effect at the prompt.
+    #[test]
+    fn a_prompt_forgets_a_kitty_push_stranded_on_the_inactive_screen() {
+        let (escape, _) = escape_after(
+            vec![
+                DaemonMsg::Output(b"\x1b[?1049h\x1b[>7u\x1b[?1049l\x1b[<u".to_vec()),
+                at_prompt(),
+                DaemonMsg::Output(b"\x1b[?1049h".to_vec()),
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b");
+    }
+
+    /// A stale entry under the next program's own push must not come back
+    /// when it pops.
+    #[test]
+    fn a_pop_after_the_prompt_does_not_restore_stale_kitty_flags() {
+        let (escape, _) = escape_after(
+            vec![
+                DaemonMsg::Output(b"\x1b[>7u".to_vec()),
+                at_prompt(),
+                DaemonMsg::Output(b"\x1b[>1u\x1b[<u".to_vec()),
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b");
+    }
+
+    /// The guard on the other side: flags a program negotiates after the
+    /// prompt returned are its own and take effect.
+    #[test]
+    fn kitty_flags_pushed_after_the_prompt_take_effect() {
+        let (escape, reply) = escape_after(
+            vec![
+                DaemonMsg::Output(b"\x1b[?1049h\x1b[>7u".to_vec()),
+                at_prompt(),
+                DaemonMsg::Output(b"\x1b[?1049h\x1b[>1u".to_vec()),
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b[27u");
+        assert_eq!(reply.as_deref(), Some("\x1b[?1u"));
+    }
+
+    /// The same on a re-attach. The replay carries one prompt report for the
+    /// whole ring, and here it says a program owns the pane — so the prompt
+    /// the shell drew between the dead program and this one is only in the
+    /// ring's bytes, and has to clear the flags where it stands.
+    #[test]
+    fn a_replay_forgets_kitty_flags_from_before_an_earlier_prompt() {
+        let (escape, _) = escape_after(
+            vec![
+                DaemonMsg::Size(ws(80, 24)),
+                DaemonMsg::Snapshot(b"\x1b[>1u\x1b[?1049h\x1b[>7u".to_vec()),
+                DaemonMsg::Snapshot(
+                    b"\x1b]133;D;130\x07\x1b]133;A\x07$ \x1b]133;B\x07codex\r\n\x1b]133;C\x07"
+                        .to_vec(),
+                ),
+                DaemonMsg::Snapshot(b"\x1b[?1049h".to_vec()),
+                DaemonMsg::Prompt {
+                    active: true,
+                    at_prompt: false,
+                    last_exit: Some(130),
+                },
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b");
+
+        // What the program after the prompt pushes is replayed as it was.
+        let (escape, _) = escape_after(
+            vec![
+                DaemonMsg::Size(ws(80, 24)),
+                DaemonMsg::Snapshot(b"\x1b[>7u\x1b]133;A\x07\x1b]133;C\x07\x1b[>1u".to_vec()),
+                DaemonMsg::Prompt {
+                    active: true,
+                    at_prompt: false,
+                    last_exit: None,
+                },
+            ],
+            "NEXT-PROGRAM",
+        );
+        assert_eq!(escape, b"\x1b[27u");
     }
 }
 
@@ -5799,14 +6123,18 @@ mod tests {
         assert!(text.contains("\x1b[?25h"));
         assert!(text.contains("\x1b[?1002l"));
         assert!(text.contains("\x1b[?1006l"));
-        assert!(text.ends_with("\x1b[=0;1u"));
+        assert!(
+            !text.contains("u"),
+            "kitty flags are the caller's: {text:?}"
+        );
 
         let kitty = TermMode::SHOW_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES;
-        assert_eq!(stale_mode_resets(kitty), b"\x1b[=0;1u");
+        assert!(stale_mode_resets(kitty).is_empty());
     }
 
     #[test]
     fn prompt_report_scrubs_stale_tui_modes() {
+        crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 

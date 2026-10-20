@@ -378,6 +378,11 @@ pub struct TerminalView {
     relink_inflight: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
+    /// The button whose press this pane reported to the application, until
+    /// its release. The drag and release handlers listen on the whole window,
+    /// so this is what keeps a drag over the title bar, the sidebar or the
+    /// pane next door from reaching a program that never saw it begin (#1182).
+    mouse_grab: Option<MouseButton>,
     /// Where the grid sat in the window on the last frame, so an event that
     /// arrives with nothing but a window position — the wheel — can be told
     /// which cell it is over.
@@ -491,6 +496,11 @@ pub struct TerminalView {
     /// Whether the current scope's list is a finished load rather than the
     /// empty placeholder one starts as. Only a finished one is worth stashing.
     history_ready: bool,
+    /// A native SSH pane's far-end history is still owed to the current scope:
+    /// it was entered before the pane's connection was up.
+    history_seed_pending: bool,
+    /// Bumped by every history load, so only the latest one is installed.
+    history_load_gen: u64,
     ranked_cwd: Option<std::path::PathBuf>,
     history_nav: Option<usize>,
     history_stash: String,
@@ -726,6 +736,99 @@ fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
 }
 
 const MAX_HISTORY_BYTES: u64 = 4 << 20;
+
+/// Where a remote scope's list is seeded from, besides what tty7 itself
+/// recorded for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HistorySeedSource {
+    /// Nothing to seed from: tty7's own record is all there is.
+    None,
+    /// The workspace host's own shell history files, through its `Host`.
+    WorkspaceHost,
+    /// The far end's shell history files, over the pane's own SSH connection.
+    PaneSftp,
+}
+
+fn history_seed_source(
+    scope_is_local: bool,
+    host_is_local: bool,
+    remote: Option<crate::daemon::protocol::RemoteKind>,
+) -> HistorySeedSource {
+    use crate::daemon::protocol::RemoteKind;
+    if scope_is_local {
+        return HistorySeedSource::None;
+    }
+    match remote {
+        // tty7 holds this pane's SSH connection itself, so the far end's
+        // files are one SFTP read away — and with shell integration on, the
+        // prompt editor is the only history the user gets (#1142).
+        Some(RemoteKind::NativeSsh) => HistorySeedSource::PaneSftp,
+        // The Host reaches the workspace machine's home directory and nothing
+        // beyond it. A pane that has ssh'ed onward from there is scoped to the
+        // *inner* target, and seeding that scope from the workspace host's
+        // ~/.zsh_history would offer commands from the wrong box — the exact
+        // confusion scoping exists to prevent. Those panes start from what
+        // tty7 recorded for the inner target, like bare ssh.
+        Some(_) => HistorySeedSource::None,
+        None if host_is_local => HistorySeedSource::None,
+        None => HistorySeedSource::WorkspaceHost,
+    }
+}
+
+/// What a history load reads besides tty7's own record of the scope.
+enum HistorySeedFetch {
+    None,
+    Host(Vec<(crate::ui::host_ops::SharedHost, std::path::PathBuf)>),
+    Sftp(crate::ui::sftp::SftpRoute),
+}
+
+impl HistorySeedFetch {
+    /// The far end's shell history files, each with the file name that picks
+    /// its parser. Blocking. A file that is missing, too large or unreadable is
+    /// skipped, and a connection that is gone yields nothing: a seed is a
+    /// convenience, never worth an error on screen.
+    fn read(self) -> Vec<(String, Vec<u8>)> {
+        match self {
+            HistorySeedFetch::None => Vec::new(),
+            HistorySeedFetch::Host(files) => files
+                .into_iter()
+                .filter_map(|(host, path)| {
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    Some((name, host.read_file(&path, MAX_HISTORY_BYTES).ok()?))
+                })
+                .collect(),
+            HistorySeedFetch::Sftp(route) => read_shell_history_over_sftp(&route),
+        }
+    }
+}
+
+fn read_shell_history_over_sftp(route: &crate::ui::sftp::SftpRoute) -> Vec<(String, Vec<u8>)> {
+    use crate::daemon::protocol::{SftpOp, SftpOpResult};
+    let home = match route.op(SftpOp::Realpath {
+        path: ".".to_string(),
+    }) {
+        SftpOpResult::Link(home) if home.starts_with('/') => home,
+        other => {
+            log::debug!(target: "tty7::history", "no remote home to seed history from: {other:?}");
+            return Vec::new();
+        }
+    };
+    super::history::shell_history_names()
+        .into_iter()
+        .filter_map(|rel| {
+            let path = crate::daemon::ssh::sftp::remote_join(&home, rel);
+            match route.op(SftpOp::ReadFile {
+                path,
+                max_bytes: MAX_HISTORY_BYTES,
+            }) {
+                SftpOpResult::File { bytes, .. } => {
+                    Some((crate::daemon::ssh::sftp::remote_basename(rel), bytes))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GitRefresh {
@@ -1892,6 +1995,7 @@ impl TerminalView {
             relink_inflight: false,
             marked_text: String::new(),
             last_mouse_cell: None,
+            mouse_grab: None,
             cell_geom: None,
             ime_anchor: None,
             report_mouse,
@@ -1950,6 +2054,8 @@ impl TerminalView {
             history_scope: super::history::Scope::Local,
             history_cache: Vec::new(),
             history_ready: true,
+            history_seed_pending: false,
+            history_load_gen: 0,
             ranked_cwd: None,
             history_nav: None,
             history_stash: String::new(),
@@ -3488,10 +3594,17 @@ impl TerminalView {
             _ => return,
         };
         self.last_mouse_cell = Some((col, row));
+        self.mouse_grab = Some(button);
         self.write_mouse(base, mods, col, row, true);
     }
 
+    /// Only the release of a press this pane reported: a button let go
+    /// anywhere else in the window is not this program's to hear.
     pub fn mouse_release(&mut self, button: MouseButton, col: usize, row: usize, mods: &Modifiers) {
+        if self.mouse_grab != Some(button) {
+            return;
+        }
+        self.mouse_grab = None;
         let base = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -3501,8 +3614,10 @@ impl TerminalView {
         self.write_mouse(base, mods, col, row, false);
     }
 
+    /// Only a drag that began with a press this pane reported. Once it has,
+    /// the drag follows the pointer out of the grid, pinned to its edge.
     pub fn mouse_drag(&mut self, button: MouseButton, col: usize, row: usize, mods: &Modifiers) {
-        if self.last_mouse_cell == Some((col, row)) {
+        if self.mouse_grab != Some(button) || self.last_mouse_cell == Some((col, row)) {
             return;
         }
         let wants = self.report_mouse
@@ -3523,6 +3638,12 @@ impl TerminalView {
             _ => return,
         };
         self.write_mouse(base, mods, col, row, true);
+    }
+
+    /// No button is down, so no press is still waiting for its release —
+    /// even one whose release went to another window and never came back.
+    pub(super) fn drop_mouse_grab(&mut self) {
+        self.mouse_grab = None;
     }
 
     pub fn mouse_motion(&mut self, col: usize, row: usize, mods: &Modifiers) {
@@ -4302,6 +4423,7 @@ impl TerminalView {
     fn follow_history_scope(&mut self, cx: &mut Context<Self>) {
         let scope = self.desired_history_scope();
         if scope == self.history_scope {
+            self.seed_history_when_connected(cx);
             return;
         }
         self.flush_pending_history();
@@ -4335,32 +4457,66 @@ impl TerminalView {
         self.rerank_history(ranked_cwd.as_deref());
         cx.notify();
 
-        let shell_files = self.remote_shell_history_sources(cx);
+        self.history_seed_pending = false;
+        let fetch = match self.history_seed_fetch(cx) {
+            // The pane's connection is not up yet (still authenticating, most
+            // likely): load what tty7 recorded now, and fetch the far end's
+            // files once it is — see `seed_history_when_connected`.
+            HistorySeedFetch::Sftp(_) if !self.ssh_connected() => {
+                self.history_seed_pending = true;
+                HistorySeedFetch::None
+            }
+            fetch => fetch,
+        };
+        self.spawn_history_load(scope, fetch, cx);
+    }
+
+    fn ssh_connected(&self) -> bool {
+        matches!(
+            self.terminal.ssh_phase(),
+            Some(crate::daemon::protocol::SshPhase::Connected)
+        )
+    }
+
+    /// The far-end seed a native SSH pane deferred until its connection was
+    /// up, fetched the first time it is.
+    fn seed_history_when_connected(&mut self, cx: &mut Context<Self>) {
+        if !self.history_seed_pending || !self.ssh_connected() {
+            return;
+        }
+        self.history_seed_pending = false;
+        let fetch = self.history_seed_fetch(cx);
+        if matches!(fetch, HistorySeedFetch::None) {
+            return;
+        }
+        // A command still waiting for its exit code stays pending: the load
+        // will not hold it, and `install_loaded_history` keeps it from the
+        // list it replaces. Flushing here would record it without the exit.
+        self.spawn_history_load(self.history_scope.clone(), fetch, cx);
+    }
+
+    /// Load `scope`'s list off the UI thread and install it, unless the pane
+    /// has moved on to another scope or a newer load has started meanwhile.
+    fn spawn_history_load(
+        &mut self,
+        scope: super::history::Scope,
+        fetch: HistorySeedFetch,
+        cx: &mut Context<Self>,
+    ) {
+        self.history_load_gen = self.history_load_gen.wrapping_add(1);
+        let generation = self.history_load_gen;
         let loading = scope.clone();
         cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_spawn(async move {
-                    let files = shell_files
-                        .into_iter()
-                        .filter_map(|(host, path)| {
-                            // The name comes along: it is what tells the loader
-                            // which shell's format the bytes are in.
-                            let name = path.file_name()?.to_string_lossy().into_owned();
-                            Some((name, host.read_file(&path, MAX_HISTORY_BYTES).ok()?))
-                        })
-                        .collect();
-                    super::history::load_with_shell_files(&loading, files)
+                    super::history::load_with_shell_files(&loading, fetch.read())
                 })
                 .await;
             this.update(cx, |view, cx| {
-                if view.history_scope != scope {
+                if view.history_scope != scope || view.history_load_gen != generation {
                     return;
                 }
-                view.history = loaded.entries;
-                view.history_counts = loaded.counts;
-                view.history_cwds = loaded.cwds;
-                view.history_meta = loaded.meta;
-                view.history_ready = true;
+                view.install_loaded_history(loaded);
                 let cwd = view.ranked_cwd.clone();
                 view.rerank_history(cwd.as_deref());
                 cx.notify();
@@ -4370,22 +4526,57 @@ impl TerminalView {
         .detach();
     }
 
-    fn remote_shell_history_sources(
+    /// Replace the list with a finished load, keeping anything run while it was
+    /// in flight that it does not already hold — as the most recent entries,
+    /// which is what they are.
+    fn install_loaded_history(&mut self, loaded: super::history::History) {
+        let previous = std::mem::replace(&mut self.history, loaded.entries);
+        let mut counts = std::mem::replace(&mut self.history_counts, loaded.counts);
+        let mut cwds = std::mem::replace(&mut self.history_cwds, loaded.cwds);
+        let mut meta = std::mem::replace(&mut self.history_meta, loaded.meta);
+        if !previous.is_empty() {
+            let known: std::collections::HashSet<String> = self.history.iter().cloned().collect();
+            for line in previous {
+                if known.contains(&line) {
+                    continue;
+                }
+                if let Some(n) = counts.remove(&line) {
+                    self.history_counts.insert(line.clone(), n);
+                }
+                if let Some(dirs) = cwds.remove(&line) {
+                    self.history_cwds.insert(line.clone(), dirs);
+                }
+                if let Some(m) = meta.remove(&line) {
+                    self.history_meta.insert(line.clone(), m);
+                }
+                self.history.push(line);
+            }
+        }
+        self.history_nav = None;
+        self.history_ready = true;
+    }
+
+    fn history_seed_fetch(&self, cx: &mut Context<Self>) -> HistorySeedFetch {
+        match history_seed_source(
+            self.history_scope.is_local(),
+            self.host_id.is_local(),
+            self.remote_context().map(|r| r.kind),
+        ) {
+            HistorySeedSource::None => HistorySeedFetch::None,
+            HistorySeedSource::WorkspaceHost => {
+                HistorySeedFetch::Host(self.workspace_host_history_files(cx))
+            }
+            HistorySeedSource::PaneSftp => HistorySeedFetch::Sftp(crate::ui::sftp::SftpRoute::new(
+                self.pane_id,
+                self.workspace.clone(),
+            )),
+        }
+    }
+
+    fn workspace_host_history_files(
         &self,
         cx: &mut Context<Self>,
     ) -> Vec<(crate::ui::host_ops::SharedHost, std::path::PathBuf)> {
-        if self.history_scope.is_local() || self.host_id.is_local() {
-            return Vec::new();
-        }
-        // The Host reaches the workspace machine's home directory and nothing
-        // beyond it. A pane that has ssh'ed onward from there (remote_context)
-        // is scoped to the *inner* target, and seeding that scope from the
-        // workspace host's ~/.zsh_history would offer commands from the wrong
-        // box — the exact confusion scoping exists to prevent. Those panes
-        // start from what tty7 recorded for the inner target, like bare ssh.
-        if self.remote_context().is_some() {
-            return Vec::new();
-        }
         let Some(host) = self.host(cx) else {
             return Vec::new();
         };
@@ -8877,6 +9068,52 @@ mod tests {
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
 
+    /// #1142: a native SSH host pane runs tty7's prompt editor over the far
+    /// shell, so the far shell's own history is never consulted — the
+    /// editor's list is all ↑, Ctrl+R and the ghost suggestion have. That
+    /// list has to be seeded from the far end's files, over the pane's own
+    /// connection, the way a workspace pane's is.
+    #[test]
+    fn a_native_ssh_pane_seeds_its_history_from_the_far_end() {
+        use super::{HistorySeedSource, history_seed_source};
+        assert_eq!(
+            history_seed_source(false, true, Some(RemoteKind::NativeSsh)),
+            HistorySeedSource::PaneSftp,
+        );
+        // Inside a workspace, too: the connection is the pane's own either way.
+        assert_eq!(
+            history_seed_source(false, false, Some(RemoteKind::NativeSsh)),
+            HistorySeedSource::PaneSftp,
+        );
+    }
+
+    #[test]
+    fn history_seeding_keeps_to_the_machine_the_scope_names() {
+        use super::{HistorySeedSource, history_seed_source};
+        // The workspace host's files, for the workspace host's own scope.
+        assert_eq!(
+            history_seed_source(false, false, None),
+            HistorySeedSource::WorkspaceHost,
+        );
+        // A bare `ssh` onward, from here or from a workspace host: tty7 has no
+        // connection to that box, and the files it can reach are another
+        // machine's.
+        for host_is_local in [true, false] {
+            for kind in [RemoteKind::Ssh, RemoteKind::Wsl] {
+                assert_eq!(
+                    history_seed_source(false, host_is_local, Some(kind)),
+                    HistorySeedSource::None,
+                    "{kind:?}, host local: {host_is_local}",
+                );
+            }
+        }
+        // A local scope reads this machine's shells directly.
+        assert_eq!(
+            history_seed_source(true, true, None),
+            HistorySeedSource::None,
+        );
+    }
+
     #[test]
     fn a_title_the_tab_already_shows_drops_the_one_that_was_waiting() {
         // The revert is what cancels a flash: the pane is told the title it is
@@ -12055,6 +12292,27 @@ mod gpui_tests {
                     "ssh box",
                     "↑ right after the ssh session ended recalled nothing"
                 );
+            })
+            .unwrap();
+    }
+
+    /// A seed that lands after the user already ran something must not take
+    /// that command back off the list: it stays, as the most recent entry.
+    #[gpui::test]
+    fn a_late_history_load_keeps_what_was_run_meanwhile(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.history = vec!["make test".to_string(), "git push".to_string()];
+                view.install_loaded_history(crate::terminal::history::History {
+                    entries: vec!["ls".to_string(), "make test".to_string()],
+                    counts: Default::default(),
+                    cwds: Default::default(),
+                    meta: Default::default(),
+                });
+                assert_eq!(view.history, ["ls", "make test", "git push"]);
+                assert!(view.history_ready);
             })
             .unwrap();
     }
@@ -18339,5 +18597,188 @@ mod prompt_handover_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// #1182: dragging anywhere in the window — the title bar, the sidebar,
+    /// the pane next door — reached every pane whose program had asked for
+    /// the mouse. The drag handler listens on the whole window and pinned the
+    /// pointer to the nearest cell, so tmux (`mouse on`) saw a drag along its
+    /// top row it never saw a press for, dropped into copy-mode and started
+    /// selecting. A click anywhere likewise sent a release to every such pane.
+    ///
+    /// Only a press the pane itself reported starts a drag it reports; that
+    /// drag follows the pointer out of the pane (clamped, as xterm does) and
+    /// ends with the release, and nothing reaches the pane beside it.
+    #[gpui::test]
+    fn only_the_pane_a_press_landed_in_hears_the_drag(cx: &mut TestAppContext) {
+        use gpui::{MouseMoveEvent, MouseUpEvent, PlatformInput};
+
+        struct Split {
+            a: gpui::Entity<TerminalView>,
+            b: gpui::Entity<TerminalView>,
+        }
+        impl Render for Split {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    // Stands in for the sidebar and anything else that is not
+                    // a pane: no hitbox of either terminal covers it.
+                    .child(div().w(px(200.)).h_full())
+                    .child(div().flex_1().h_full().child(self.a.clone()))
+                    .child(div().flex_1().h_full().child(self.b.clone()))
+            }
+        }
+
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+        });
+        let (a_client, mut a_pty) = test_stream_pair();
+        let (b_client, mut b_pty) = test_stream_pair();
+        let window = cx.add_window(|window, cx| {
+            let pane = |link, window: &mut Window, cx: &mut Context<Split>| {
+                let terminal = RemoteTerminal::from_stream(link, TermSize::new(80, 24))
+                    .expect("link-backed terminal");
+                cx.new(|cx| TerminalView::with_terminal(terminal, 1, window, cx))
+            };
+            let a = pane(a_client, window, cx);
+            let b = pane(b_client, window, cx);
+            Split { a, b }
+        });
+        let (a, b) = window
+            .update(cx, |split, _, _| (split.a.clone(), split.b.clone()))
+            .unwrap();
+
+        // Both panes run tmux with `mouse on`.
+        output(&mut a_pty, b"\x1b[?1002h\x1b[?1006h");
+        output(&mut b_pty, b"\x1b[?1002h\x1b[?1006h");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        for _ in 0..300 {
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+            let ready = vcx.update(|_, cx| {
+                [&a, &b].iter().all(|v| {
+                    let v = v.read(cx);
+                    v.mouse_mode() && v.cell_geom.is_some()
+                })
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let geom = |v: &gpui::Entity<TerminalView>, vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|_, cx| v.read(cx).cell_geom.expect("the pane was painted"))
+        };
+        let (ga, gb) = (geom(&a, &mut vcx), geom(&b, &mut vcx));
+        assert!(
+            ga.origin.x > px(200.) && gb.origin.x > ga.origin.x,
+            "sidebar, then A, then B: {:?} {:?}",
+            ga.origin,
+            gb.origin
+        );
+        // Cell (col, row) of a pane, as a window position in its middle.
+        let at = |g: super::super::element::CellGeom, col: f32, row: f32| {
+            gpui::point(
+                g.origin.x + g.cell_width * (col + 0.5),
+                g.origin.y + g.line_height * (row + 0.5),
+            )
+        };
+
+        let hover = |vcx: &mut gpui::VisualTestContext, position| {
+            vcx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Modifiers::none(),
+                    }),
+                    cx,
+                );
+            });
+            vcx.run_until_parked();
+        };
+        let down = |vcx: &mut gpui::VisualTestContext, position| {
+            vcx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+            });
+            vcx.run_until_parked();
+        };
+        let drag = |vcx: &mut gpui::VisualTestContext, position| {
+            vcx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::none(),
+                    }),
+                    cx,
+                );
+            });
+            vcx.run_until_parked();
+        };
+        let up = |vcx: &mut gpui::VisualTestContext, position| {
+            vcx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::none(),
+                        click_count: 1,
+                    }),
+                    cx,
+                );
+            });
+            vcx.run_until_parked();
+        };
+        let text = |pty: &mut Stream| String::from_utf8(drain(pty)).unwrap();
+        // Whatever the panes said while settling is not what this is about.
+        let _ = (text(&mut a_pty), text(&mut b_pty));
+
+        // 1. A drag across the sidebar, the way one would drag a window by
+        //    its title bar: neither pane saw the press, so neither hears it.
+        let side = |y: f32| gpui::point(px(50.), px(y));
+        hover(&mut vcx, side(100.));
+        down(&mut vcx, side(100.));
+        drag(&mut vcx, side(140.));
+        drag(&mut vcx, side(180.));
+        up(&mut vcx, side(180.));
+        assert_eq!(
+            (text(&mut a_pty), text(&mut b_pty)),
+            (String::new(), String::new()),
+            "a drag outside every pane is no pane's business"
+        );
+
+        // 2. A drag that starts in A and wanders into B: A hears all of it,
+        //    pinned to its own edge once the pointer has left it, and B none.
+        hover(&mut vcx, at(ga, 2., 3.));
+        down(&mut vcx, at(ga, 2., 3.));
+        drag(&mut vcx, at(ga, 4., 3.));
+        drag(&mut vcx, at(gb, 1., 5.));
+        up(&mut vcx, at(gb, 1., 5.));
+        let last = ga.cols; // 1-based: the column A's grid ends on.
+        assert_eq!(
+            text(&mut a_pty),
+            format!("\x1b[<0;3;4M\x1b[<32;5;4M\x1b[<32;{last};6M\x1b[<0;{last};6m"),
+            "the pane the press landed in keeps the drag, clamped to its edge"
+        );
+        assert_eq!(
+            text(&mut b_pty),
+            "",
+            "the pane beside it never saw the press, so it hears nothing"
+        );
     }
 }
