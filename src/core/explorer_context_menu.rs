@@ -12,22 +12,33 @@
 //! running GUI through `GuiOpen`, then continues normal startup when no GUI
 //! receives it.
 
+#[cfg(any(windows, test))]
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+#[cfg(any(windows, test))]
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+#[cfg(windows)]
+use anyhow::Context as _;
+use anyhow::Result;
 
+#[cfg(any(windows, test))]
 use crate::ui::i18n::{L10nKey, t};
 
+#[cfg(any(windows, test))]
 const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty7";
+#[cfg(any(windows, test))]
 const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty7";
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Location {
     Directory,
     Background,
 }
 
+#[cfg(any(windows, test))]
 impl Location {
     fn key(self) -> &'static str {
         match self {
@@ -61,6 +72,7 @@ impl Location {
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug)]
 struct Registration {
     location: Location,
@@ -68,6 +80,7 @@ struct Registration {
     command: OsString,
 }
 
+#[cfg(any(windows, test))]
 fn replace_entry_with(
     registration: &Registration,
     delete: impl FnOnce(&str) -> Result<()>,
@@ -80,6 +93,7 @@ fn replace_entry_with(
     write(registration)
 }
 
+#[cfg(any(windows, test))]
 impl Registration {
     fn new(location: Location, app: &Path) -> Self {
         Self {
@@ -124,6 +138,7 @@ pub fn refresh_labels() {
 /// Quotes are unconditional: both the executable and the Explorer-substituted
 /// folder can contain spaces. Windows file names cannot contain a quote, so the
 /// resulting command is unambiguous without an additional escape layer.
+#[cfg(any(windows, test))]
 fn quoted_open_command(executable: &Path, placeholder: &str) -> OsString {
     let mut command = OsString::from("\"");
     command.push(executable.as_os_str());
@@ -133,6 +148,7 @@ fn quoted_open_command(executable: &Path, placeholder: &str) -> OsString {
     command
 }
 
+#[cfg(windows)]
 fn application_path() -> Result<PathBuf> {
     let app = std::env::current_exe().context("locating the running tty7 application")?;
     app.parent()
@@ -140,6 +156,7 @@ fn application_path() -> Result<PathBuf> {
     Ok(app)
 }
 
+#[cfg(any(windows, test))]
 fn registrations(app: &Path) -> [Registration; 2] {
     [
         Registration::new(Location::Directory, app),
@@ -158,8 +175,7 @@ mod windows {
     };
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-        RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
-        RegSetValueExW,
+        RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW,
     };
     use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 

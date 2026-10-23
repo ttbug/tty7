@@ -4127,7 +4127,7 @@ mod close_gpui_tests {
     /// holds the focus as it is drawn.
     fn settle(vcx: &mut VisualTestContext) {
         vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx));
+        let _ = vcx.update(|window, cx| window.draw(cx));
         vcx.run_until_parked();
     }
 

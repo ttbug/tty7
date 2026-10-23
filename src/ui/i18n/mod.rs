@@ -1985,15 +1985,6 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
     )
 }
 
-/// Select a named branch of a translation and fill placeholders.
-pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
-    apply_template(
-        translate_variant(current_locale_index(), key, branch),
-        args,
-        None,
-    )
-}
-
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {
     let mut text = template.to_string();
     if let Some(n) = count {

@@ -208,6 +208,7 @@ fn badge(pixmap: &mut tiny_skia::Pixmap) {
 #[cfg(target_os = "linux")]
 pub(super) fn render_argb(attention: bool) -> Option<(Vec<u8>, u32)> {
     let img = render(attention)?;
+    debug_assert_eq!(img.width, img.height);
     let mut argb = Vec::with_capacity(img.data.len());
     for px in img.data.chunks_exact(4) {
         argb.extend_from_slice(&[px[3], px[0], px[1], px[2]]);

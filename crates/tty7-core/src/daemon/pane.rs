@@ -3166,6 +3166,7 @@ impl ReplayRing {
     /// A ring carried across a handoff, with the pane's modes folded back
     /// from it: `head` is the carried [`Self::head_modes`], and the pane's
     /// modes are that plus every byte the ring still holds.
+    #[cfg(any(unix, test))]
     fn adopted(
         segments: Vec<crate::daemon::scrollback::Segment>,
         size: WinSize,
@@ -3180,6 +3181,7 @@ impl ReplayRing {
     }
 
     /// The geometry new output would be recorded at.
+    #[cfg(unix)]
     fn tail_size(&self) -> WinSize {
         self.segments
             .back()

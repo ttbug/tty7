@@ -1,13 +1,17 @@
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::path::Path;
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use crate::daemon::protocol::{RemoteContext, RemoteKind};
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SshInvocation {
     pub context: RemoteContext,
     pub forward_args: Vec<String>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn parse_ssh_invocation(argv: &[String]) -> Option<SshInvocation> {
     let program = argv.first()?;
     let name = Path::new(program).file_name()?.to_string_lossy();
@@ -95,6 +99,7 @@ pub(crate) fn parse_ssh_invocation(argv: &[String]) -> Option<SshInvocation> {
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn option_takes_value(flag: char) -> bool {
     matches!(
         flag,
@@ -121,6 +126,7 @@ fn option_takes_value(flag: char) -> bool {
     )
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn foreground_argv(pid: i32) -> Option<Vec<String>> {
     platform_foreground_argv(pid)
 }
@@ -208,11 +214,6 @@ fn parse_macos_procargs(buf: &[u8]) -> Option<Vec<String>> {
         }
     }
     (!argv.is_empty()).then_some(argv)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn platform_foreground_argv(_pid: i32) -> Option<Vec<String>> {
-    None
 }
 
 #[cfg(test)]

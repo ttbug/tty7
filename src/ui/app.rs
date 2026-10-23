@@ -20,7 +20,7 @@ use crate::core::session::{
 use crate::core::shells::ShellInventory;
 use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
-use crate::daemon::protocol::{RemoteContext, RemoteKind, ShellSpec, ssh_option_takes_value};
+use crate::daemon::protocol::{RemoteKind, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
@@ -287,6 +287,7 @@ fn title_strip_rule_and_pad(rule: gpui::Pixels) -> (gpui::Pixels, gpui::Pixels) 
 
 /// The centre of the box a row built by [`title_strip_row`] gives its contents:
 /// the bar's height, less whatever its bottom edge spends on rule and padding.
+#[cfg(test)]
 fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
     let (border, pad) = title_strip_rule_and_pad(rule);
     gpui::px((TITLE_BAR_HEIGHT - border.as_f32() - pad.as_f32()) / 2.)
@@ -360,10 +361,6 @@ const TILE_EDGE_GAP: f32 = 5.;
 
 pub(crate) fn tile_trailing_inset() -> f32 {
     (CONTENT_INSET - TILE_PAD).max(TILE_EDGE_GAP)
-}
-
-pub(crate) fn tile_trailing_inset_sm() -> f32 {
-    (CONTENT_INSET - TILE_PAD_SM).max(TILE_EDGE_GAP)
 }
 
 pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") {
@@ -762,18 +759,6 @@ impl Tab {
     /// [`Self::leaf_title`] together with what a `~` in it would mean — one
     /// leaf lookup, so the title and the home shortening it can never come
     /// from different panes (#580).
-    pub(crate) fn leaf_title_and_home(
-        &self,
-        window: Option<&Window>,
-        cx: &App,
-    ) -> (String, Option<std::path::PathBuf>) {
-        let Some(leaf) = self.title_leaf(window, cx) else {
-            return (String::new(), None);
-        };
-        let leaf = leaf.read(cx);
-        (leaf.title.clone(), leaf.display_home(cx))
-    }
-
     /// This tab as the shared label ladder reads it, together with what a `~`
     /// in whatever it ends up named would mean.
     ///
@@ -1551,6 +1536,7 @@ impl Tty7App {
         .detach();
     }
 
+    #[cfg(test)]
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
@@ -3516,7 +3502,7 @@ impl Tty7App {
         // typed one number to forward one port has not been asked to care
         // which local port it lands on, and the row says where it came out.
         let retry_free_port = !fields.advanced && rule.bind_port != 0;
-        let mut failure = match self.place_forward(&route, rule.clone()) {
+        let failure = match self.place_forward(&route, rule.clone()) {
             PlaceOutcome::Placed => None,
             // Nobody answered, so nothing was bound and nothing would be bound
             // by asking again — a second round trip would only spend another
@@ -8499,39 +8485,6 @@ impl Tty7App {
             .pane
             .focused_or_first(window, cx)?;
         self.leaf_close_reason(&leaf, cx)
-    }
-
-    pub(crate) fn active_ssh_pane(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<(u64, RemoteContext)> {
-        let pane = self
-            .tabs
-            .get(self.active)?
-            .pane
-            .focused_or_first(window, cx)?;
-        let pane = pane.read(cx);
-        let remote = pane.remote_context()?;
-        (remote.kind != crate::daemon::protocol::RemoteKind::Wsl).then_some((pane.pane_id, remote))
-    }
-
-    pub(crate) fn active_connected_native_ssh_pane(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<(u64, RemoteContext)> {
-        use crate::daemon::protocol::{RemoteKind, SshPhase};
-        let (pane_id, remote) = self.active_ssh_pane(window, cx)?;
-        if remote.kind != RemoteKind::NativeSsh {
-            return None;
-        }
-        let leaf = self
-            .tabs
-            .get(self.active)?
-            .pane
-            .focused_or_first(window, cx)?;
-        matches!(leaf.read(cx).ssh_phase(), Some(SshPhase::Connected)).then_some((pane_id, remote))
     }
 
     pub(crate) fn select_settings_section(

@@ -2527,6 +2527,7 @@ mod tests {
     }
 
     /// The OSC 0 title the shell settled on, as `user@host:dir`.
+    #[cfg(unix)]
     fn reported_title(text: &str) -> String {
         text.split("\u{1b}]")
             .filter_map(|s| s.strip_prefix("0;"))

@@ -1186,6 +1186,7 @@ pub(crate) mod row_probe {
     }
 
     /// The count since the last call, and zero from here.
+    #[cfg(not(target_os = "windows"))]
     pub(crate) fn take() -> u64 {
         BUILT.replace(0)
     }

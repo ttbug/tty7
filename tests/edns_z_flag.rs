@@ -5,7 +5,7 @@
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use iroh::dns::{DnsProtocol, DnsResolver};
+use iroh::dns::{DnsResolver, NameserverConfig};
 
 /// Answers one A query for `answer`, with an EDNS OPT record whose TTL is
 /// `opt_ttl`: [extended RCODE][version][DO + Z flags], per RFC 6891.
@@ -44,7 +44,7 @@ async fn resolve_with_opt_ttl(opt_ttl: u32) -> Result<Vec<std::net::IpAddr>, Str
 
     // No fallback: a public resolver answering instead would hide the bug.
     let resolver = DnsResolver::builder()
-        .with_nameserver(addr, DnsProtocol::Udp)
+        .add_nameserver_config(NameserverConfig::udp(addr.ip()).with_port(addr.port()))
         .disable_fallback()
         .build();
     let result = resolver
