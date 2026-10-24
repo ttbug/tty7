@@ -1978,6 +1978,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDaemonStaleDescInPlace => {
             "tty7 已更新。server 可原地替换，shell 不受影响；只有内置 SSH 的窗格会断开。"
         }
+        L10nKey::AppRestartServerAfterUpdateDetail => {
+            "tty7 已更新到 {ours}，但 server 仍在运行 {build}。它可以原地更新到当前版本并保留 shell，但用 tty7 内置 SSH 客户端的窗格会断开。现在更新，或稍后在设置中进行。"
+        }
         L10nKey::AppRestartServerBodyInPlace => {
             "tty7 server 会原地更新到当前版本：shell 继续运行，窗口稍后自动重连。用 tty7 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
         }
@@ -2034,7 +2037,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuWindow => "窗口",
         L10nKey::AppMenuHelp => "帮助",
         L10nKey::AppMenuNewTab => "新标签页",
-        L10nKey::NewTabMoreOptions => "更多新标签页选项",
         L10nKey::AppMenuNewWorkspace => "新工作区…",
         L10nKey::AppMenuNewWorktreeTab => "新 worktree 标签页…",
         L10nKey::AppMenuSplitRight => "向右分屏",
