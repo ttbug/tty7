@@ -2701,13 +2701,24 @@ mod windows {
         }
         let bytes =
             fs::read(archive).map_err(|error| format!("reading {}: {error}", archive.display()))?;
-        let archive = smol::block_on(async_zip::base::read::mem::ZipFileReader::new(bytes))
-            .map_err(|error| format!("opening the portable ZIP: {error}"))?;
-        let entries = archive.file().entries();
-        if entries.len() > MAX_PORTABLE_ENTRIES {
+        let options = async_zip::base::read1::ZipOptions {
+            max_cd_num_files: (MAX_PORTABLE_ENTRIES + 1) as u64,
+            max_cd_num_files_load: (MAX_PORTABLE_ENTRIES + 1) as u64,
+            max_uncompressed_size_per_file: MAX_PORTABLE_EXPANDED_BYTES,
+            max_compressed_size_per_file: MAX_PORTABLE_EXPANDED_BYTES,
+            ..async_zip::base::read1::ZipOptions::untrusted()
+        };
+        let mut archive = smol::block_on(
+            async_zip::base::read1::seek::ZipArchiveReader::open_with_options(
+                smol::io::Cursor::new(bytes),
+                options,
+            ),
+        )
+        .map_err(|error| format!("opening the portable ZIP: {error}"))?;
+        if archive.cdrs().len() > MAX_PORTABLE_ENTRIES {
             return Err(format!(
                 "the portable ZIP has {} entries; the limit is {MAX_PORTABLE_ENTRIES}",
-                entries.len()
+                archive.cdrs().len()
             ));
         }
         fs::create_dir(payload)
@@ -2715,23 +2726,33 @@ mod windows {
 
         let mut seen = HashSet::new();
         let mut expanded_bytes = 0u64;
-        for (index, entry) in entries.iter().enumerate() {
-            let name = entry
-                .filename()
-                .as_str()
-                .map_err(|error| format!("reading portable ZIP entry {index} name: {error}"))?;
+        for index in 0..archive.cdrs().len() {
+            let (name, unix_mode, expected_size, is_directory) = {
+                let entry = &archive.cdrs()[index];
+                let name = entry
+                    .insecure_file_name
+                    .as_str()
+                    .ok_or_else(|| {
+                        format!("reading portable ZIP entry {index} name: name is not UTF-8")
+                    })?
+                    .to_owned();
+                let unix_mode = (entry.cdrh.v_made_by >> 8 == 3)
+                    .then_some((entry.cdrh.exter_attr >> 16) as u16);
+                let expected_size = entry
+                    .uncompressed_size()
+                    .map_err(|error| format!("reading portable ZIP entry {name} size: {error}"))?;
+                let is_directory = name.ends_with('/');
+                (name, unix_mode, expected_size, is_directory)
+            };
             if name.contains('\\') {
                 return Err(format!(
                     "the portable ZIP path uses a non-canonical separator: {name}"
                 ));
             }
-            if entry
-                .unix_permissions()
-                .is_some_and(|mode| mode & 0o170000 == 0o120000)
-            {
+            if unix_mode.is_some_and(|mode| mode & 0o170000 == 0o120000) {
                 return Err(format!("the portable ZIP contains a symbolic link: {name}"));
             }
-            let relative = PathBuf::from(name);
+            let relative = PathBuf::from(name.as_str());
             let key = portable_path_key(&relative)?;
             if !seen.insert(key) {
                 return Err(format!(
@@ -2741,7 +2762,7 @@ mod windows {
             }
             validate_portable_relative_path(&relative)?;
             expanded_bytes = expanded_bytes
-                .checked_add(entry.uncompressed_size())
+                .checked_add(expected_size)
                 .ok_or_else(|| "the portable ZIP expanded-size total overflowed".to_string())?;
             if expanded_bytes > MAX_PORTABLE_EXPANDED_BYTES {
                 return Err(format!(
@@ -2751,11 +2772,8 @@ mod windows {
             }
 
             let output = payload.join(&relative);
-            let is_directory = entry
-                .dir()
-                .map_err(|error| format!("reading portable ZIP entry {name}: {error}"))?;
             if is_directory {
-                if entry.uncompressed_size() != 0 {
+                if expected_size != 0 {
                     return Err(format!(
                         "the portable ZIP directory entry has file data: {name}"
                     ));
@@ -2773,10 +2791,8 @@ mod windows {
                 .create_new(true)
                 .open(&output)
                 .map_err(|error| format!("creating {}: {error}", output.display()))?;
-            let mut entry_reader = smol::block_on(archive.reader_with_entry(index))
+            let mut entry_reader = smol::block_on(archive.file(index))
                 .map_err(|error| format!("opening portable ZIP entry {name}: {error}"))?;
-            let expected_size = entry.uncompressed_size();
-            let expected_crc = entry.crc32();
             smol::block_on(async {
                 let mut buffer = [0u8; 64 * 1024];
                 let mut written = 0u64;
@@ -2803,12 +2819,6 @@ mod windows {
                 if written != expected_size {
                     return Err(format!(
                         "the portable ZIP entry size is {written}, expected {expected_size}: {name}"
-                    ));
-                }
-                let actual_crc = entry_reader.compute_hash();
-                if actual_crc != expected_crc {
-                    return Err(format!(
-                        "the portable ZIP entry failed CRC32 verification: {name}"
                     ));
                 }
                 Ok(())

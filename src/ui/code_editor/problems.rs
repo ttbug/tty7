@@ -405,7 +405,7 @@ mod tests {
             app.toggle_editor_problems(cx);
         });
         vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx));
+        let _ = vcx.update(|window, cx| window.draw(cx));
         app.update_in(&mut vcx, |app, window, cx| {
             assert!(app.editor.problems.open);
             assert!(app.render_editor_problems(window, cx).is_some());

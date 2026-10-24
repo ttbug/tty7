@@ -488,7 +488,7 @@ fn drain_git_stream(
     loop {
         match next(idle) {
             Ok(GitStreamMsg::Chunk(bytes)) => {
-                let _ = queued.fetch_update(Ordering::AcqRel, Ordering::Acquire, |q| {
+                let _ = queued.try_update(Ordering::AcqRel, Ordering::Acquire, |q| {
                     Some(q.saturating_sub(bytes.len()))
                 });
                 split.push(&bytes, &mut *on_line);

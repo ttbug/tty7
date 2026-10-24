@@ -1891,10 +1891,7 @@ impl Tty7App {
                     // could not be asked, which is not the same as an empty
                     // answer — see `Host::pane_procs`.
                     let procs = match &host {
-                        Some(host) => {
-                            use crate::ui::host_ops::Host as _;
-                            host.pane_procs(pane_id)
-                        }
+                        Some(host) => host.pane_procs(pane_id),
                         None => Some(crate::terminal::RemoteTerminal::query_procs(pane_id)),
                     };
                     let managed = route.map(|r| r.list()).unwrap_or_default();

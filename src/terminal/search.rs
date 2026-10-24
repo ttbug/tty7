@@ -954,6 +954,7 @@ pub(super) struct LinkRoots {
 impl LinkRoots {
     /// Roots on the machine tty7 is running on, where `$HOME` means what it
     /// says and paths are spelled this OS's way.
+    #[cfg(test)]
     pub fn local(dirs: Vec<PathBuf>) -> Self {
         Self {
             dirs,

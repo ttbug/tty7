@@ -189,6 +189,9 @@ pub(crate) struct TabRow {
     pub(crate) agent: Option<crate::core::cli_agent::CLIAgent>,
     pub(crate) status: Option<crate::core::cli_agent::AgentStatus>,
     pub(crate) unread: usize,
+    /// "waiting 3m" while an agent in the tab is blocked on the user, counted
+    /// from the longest wait. Only this window's own tabs know it.
+    pub(crate) waited: Option<String>,
     pub(crate) ssh: Option<u32>,
     pub(crate) active: bool,
     /// Branch and diff counts, the same line the tab sidebar shows. Only this
@@ -1010,6 +1013,7 @@ impl Tty7App {
     /// in strip order; other workspaces' tabs come in the order they have.
     pub(crate) fn tab_rows_for(&self, id: WorkspaceId, mru: bool, cx: &App) -> Vec<TabRow> {
         if id == self.workspace {
+            let now_ms = crate::core::config::unix_now().saturating_mul(1000);
             let order = match mru {
                 true => self.tabs_by_mru(),
                 false => (0..self.tabs.len()).collect(),
@@ -1037,6 +1041,7 @@ impl Tty7App {
                         agent: tab.agent(cx),
                         status: tab.agent_status(cx),
                         unread: tab.agent_unread_count(cx),
+                        waited: tab.agent_waited(now_ms, cx),
                         ssh: self.tab_ssh_dot(tab, cx),
                         active: i == self.active,
                         git: tab.git_status(None, cx),
@@ -1082,6 +1087,7 @@ impl Tty7App {
                 agent: v.agent,
                 status: v.status,
                 unread: 0,
+                waited: None,
                 ssh: None,
                 active: Some(v.id) == active,
                 git: git(v.cwd.as_deref()),
@@ -3144,6 +3150,13 @@ impl Tty7App {
                                     .child(meta)
                             })),
                     )
+                    .children(tab.waited.clone().map(|waited| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(gpui::rems(11. / 16.))
+                            .text_color(muted)
+                            .child(waited)
+                    }))
                     .when(tab.active, |r| {
                         r.child(
                             div()
@@ -3789,6 +3802,7 @@ mod tests {
             agent: None,
             status: None,
             unread: 0,
+            waited: None,
             ssh: None,
             active: false,
             git: None,
@@ -4443,12 +4457,11 @@ mod gpui_tests {
         });
     }
 
-    /// One of the three places on the card a test wants to put the pointer.
+    /// One of the places on the card a test wants to put the pointer.
     #[derive(Clone, Copy)]
     enum Spot {
         Workspaces,
         Tabs,
-        Search,
     }
 
     /// Where that part of the card lands on screen. The card is centred and
@@ -4465,9 +4478,6 @@ mod gpui_tests {
         let left_w = super::LEFT_W.min(card_w * 0.5);
         let card_left = (viewport.width.as_f32() - card_w) / 2.;
         let (dx, dy) = match spot {
-            // The search row is the first thing in the card; both columns
-            // start below it.
-            Spot::Search => (100., 20.),
             Spot::Workspaces => (20., super::SEARCH_H + super::COLUMN_PAD + 16.),
             // Past the tab column's own header row, onto its first tab.
             Spot::Tabs => (

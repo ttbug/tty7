@@ -101,6 +101,7 @@ impl SearchTab {
     }
 
     /// The neighbouring tab, wrapping at the ends.
+    #[cfg(test)]
     pub(crate) fn step(self, forward: bool) -> SearchTab {
         let n = Self::ORDER.len();
         let i = Self::ORDER.iter().position(|t| *t == self).unwrap_or(0);

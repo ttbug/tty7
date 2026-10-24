@@ -1268,6 +1268,7 @@ l10n_keys! {
     AppMenuWindow,
     AppMenuHelp,
     AppMenuNewTab,
+    NewTabMoreOptions,
     AppMenuNewWorkspace,
     AppMenuNewWorktreeTab,
     AppMenuSplitRight,
@@ -1528,6 +1529,14 @@ l10n_keys! {
     CmdCopySessionIdSubtitle,
     CmdNewAgentTab,
     CmdNewAgentTabSubtitle,
+    CmdNextAgentNeedingAttention,
+    CmdNextAgentNeedingAttentionSubtitle,
+    AppNoAgentNeedsAttention,
+    AgentWaitingFor,
+    AgeUnderMinute,
+    AgeMinutes,
+    AgeHours,
+    AgeDays,
     CmdForkSession,
     CmdForkSessionSubtitle,
     CmdMarkTabAsUnread,
@@ -1973,15 +1982,6 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
         translate_variant(current_locale_index(), key, branch),
         args,
         Some(count),
-    )
-}
-
-/// Select a named branch of a translation and fill placeholders.
-pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
-    apply_template(
-        translate_variant(current_locale_index(), key, branch),
-        args,
-        None,
     )
 }
 

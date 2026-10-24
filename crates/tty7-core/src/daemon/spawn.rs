@@ -1424,6 +1424,7 @@ fn detect_parent_shell() -> Option<PathBuf> {
     None
 }
 
+#[cfg(any(unix, test))]
 fn is_supported_shell(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;

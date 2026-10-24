@@ -20,7 +20,7 @@ use crate::core::session::{
 use crate::core::shells::ShellInventory;
 use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
-use crate::daemon::protocol::{RemoteContext, RemoteKind, ShellSpec, ssh_option_takes_value};
+use crate::daemon::protocol::{RemoteKind, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
@@ -287,6 +287,7 @@ fn title_strip_rule_and_pad(rule: gpui::Pixels) -> (gpui::Pixels, gpui::Pixels) 
 
 /// The centre of the box a row built by [`title_strip_row`] gives its contents:
 /// the bar's height, less whatever its bottom edge spends on rule and padding.
+#[cfg(test)]
 fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
     let (border, pad) = title_strip_rule_and_pad(rule);
     gpui::px((TITLE_BAR_HEIGHT - border.as_f32() - pad.as_f32()) / 2.)
@@ -360,10 +361,6 @@ const TILE_EDGE_GAP: f32 = 5.;
 
 pub(crate) fn tile_trailing_inset() -> f32 {
     (CONTENT_INSET - TILE_PAD).max(TILE_EDGE_GAP)
-}
-
-pub(crate) fn tile_trailing_inset_sm() -> f32 {
-    (CONTENT_INSET - TILE_PAD_SM).max(TILE_EDGE_GAP)
 }
 
 pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") {
@@ -762,18 +759,6 @@ impl Tab {
     /// [`Self::leaf_title`] together with what a `~` in it would mean — one
     /// leaf lookup, so the title and the home shortening it can never come
     /// from different panes (#580).
-    pub(crate) fn leaf_title_and_home(
-        &self,
-        window: Option<&Window>,
-        cx: &App,
-    ) -> (String, Option<std::path::PathBuf>) {
-        let Some(leaf) = self.title_leaf(window, cx) else {
-            return (String::new(), None);
-        };
-        let leaf = leaf.read(cx);
-        (leaf.title.clone(), leaf.display_home(cx))
-    }
-
     /// This tab as the shared label ladder reads it, together with what a `~`
     /// in whatever it ends up named would mean.
     ///
@@ -919,6 +904,23 @@ impl Tab {
                     && v.agent_result_unread()
             })
             .count()
+    }
+
+    /// "waiting 3m", counted from when the tab's longest-waiting agent began
+    /// waiting on the user. `None` when no agent in it is waiting, or none of
+    /// those that are came from a daemon that stamps the time.
+    /// `now_ms` is the same clock [`Tty7App::agent_rows`] reads, so the switcher
+    /// and the tray agree on the age.
+    pub(crate) fn agent_waited(&self, now_ms: u64, cx: &App) -> Option<String> {
+        use crate::core::cli_agent::AgentStatus;
+        self.pane
+            .terminals()
+            .into_iter()
+            .filter_map(|l| l.read(cx).agent_session())
+            .filter(|s| s.status == AgentStatus::Waiting)
+            .filter_map(|s| s.status_age_secs(now_ms))
+            .max()
+            .map(crate::ui::home::waiting_for)
     }
 }
 
@@ -1534,6 +1536,7 @@ impl Tty7App {
         .detach();
     }
 
+    #[cfg(test)]
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
@@ -2332,15 +2335,20 @@ impl Tty7App {
 
     pub(crate) fn agent_rows(&self, cx: &App) -> Vec<crate::ui::tray::AgentRow> {
         use crate::core::cli_agent::AgentStatus;
+        let now_ms = crate::core::config::unix_now().saturating_mul(1000);
         let mut agents = Vec::new();
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let view = leaf.read(cx);
                 let Some(agent) = view.agent() else { continue };
-                let status = view
-                    .agent_session()
-                    .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle);
+                let session = view.agent_session();
+                let status = session.as_ref().map_or(AgentStatus::Idle, |s| s.status);
+                let since_ms = session.as_ref().and_then(|s| s.since_ms);
+                let waited = session
+                    .as_ref()
+                    .filter(|s| s.status == AgentStatus::Waiting)
+                    .and_then(|s| s.status_age_secs(now_ms))
+                    .map(crate::ui::home::waiting_for);
                 let dir = view
                     .cwd()
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -2355,10 +2363,59 @@ impl Tty7App {
                     agent,
                     status,
                     detail,
+                    since_ms,
+                    unread: view.agent_result_unread(),
+                    waited,
                 });
             }
         }
         agents
+    }
+
+    /// Reveal the agent pane that has been waiting on the user longest, or
+    /// the next one after the focused pane on a repeated press
+    /// ([`crate::ui::tray::next_needing_attention`]). Every open window's
+    /// agents count, the same set the tray menu lists, and one in another
+    /// window is revealed there the way a tray pick would.
+    pub(crate) fn focus_next_agent_needing_attention(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // In window order, so ties break the same way whichever window the
+        // press lands in. This window's own rows are read from `self`: its
+        // entity is mid-update and cannot be read through the registry.
+        let me = cx.entity_id();
+        let mut rows = Vec::new();
+        let mut seen_self = false;
+        for (_, weak) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+            let Some(app) = weak.upgrade() else { continue };
+            if app.entity_id() == me {
+                seen_self = true;
+                rows.extend(self.agent_rows(cx));
+            } else {
+                rows.extend(app.read(cx).agent_rows(cx));
+            }
+        }
+        if !seen_self {
+            rows.extend(self.agent_rows(cx));
+        }
+        let current = self
+            .focused_leaf(window, cx)
+            .map(|leaf| leaf.entity_id().as_u64());
+        let Some(leaf_id) = crate::ui::tray::next_needing_attention(&rows, current) else {
+            window.push_notification(t(L10nKey::AppNoAgentNeedsAttention), cx);
+            return;
+        };
+        if self.owns_leaf(leaf_id) {
+            self.handle_tray_action(
+                crate::ui::tray::TrayAction::RevealPane { leaf_id },
+                window,
+                cx,
+            );
+        } else {
+            cx.defer(move |cx| crate::ui::tray::reveal_pane(leaf_id, cx));
+        }
     }
 
     pub(crate) fn handle_tray_action(
@@ -3445,7 +3502,7 @@ impl Tty7App {
         // typed one number to forward one port has not been asked to care
         // which local port it lands on, and the row says where it came out.
         let retry_free_port = !fields.advanced && rule.bind_port != 0;
-        let mut failure = match self.place_forward(&route, rule.clone()) {
+        let failure = match self.place_forward(&route, rule.clone()) {
             PlaceOutcome::Placed => None,
             // Nobody answered, so nothing was bound and nothing would be bound
             // by asking again — a second round trip would only spend another
@@ -6902,6 +6959,7 @@ impl Tty7App {
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             NewAgentTab => self.new_agent_tab(window, cx),
+            FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
             // is: a split beside the focused pane instead of a tab.
             LaunchAgent(agent) => {
@@ -8427,39 +8485,6 @@ impl Tty7App {
             .pane
             .focused_or_first(window, cx)?;
         self.leaf_close_reason(&leaf, cx)
-    }
-
-    pub(crate) fn active_ssh_pane(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<(u64, RemoteContext)> {
-        let pane = self
-            .tabs
-            .get(self.active)?
-            .pane
-            .focused_or_first(window, cx)?;
-        let pane = pane.read(cx);
-        let remote = pane.remote_context()?;
-        (remote.kind != crate::daemon::protocol::RemoteKind::Wsl).then_some((pane.pane_id, remote))
-    }
-
-    pub(crate) fn active_connected_native_ssh_pane(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<(u64, RemoteContext)> {
-        use crate::daemon::protocol::{RemoteKind, SshPhase};
-        let (pane_id, remote) = self.active_ssh_pane(window, cx)?;
-        if remote.kind != RemoteKind::NativeSsh {
-            return None;
-        }
-        let leaf = self
-            .tabs
-            .get(self.active)?
-            .pane
-            .focused_or_first(window, cx)?;
-        matches!(leaf.read(cx).ssh_phase(), Some(SshPhase::Connected)).then_some((pane_id, remote))
     }
 
     pub(crate) fn select_settings_section(
@@ -10238,6 +10263,11 @@ impl Render for Tty7App {
                 }))
                 .on_action(
                     cx.listener(|this, _: &NewAgentTab, window, cx| this.new_agent_tab(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &FocusNextAgentNeedingAttention, window, cx| {
+                        this.focus_next_agent_needing_attention(window, cx)
+                    }),
                 )
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)

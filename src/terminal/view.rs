@@ -616,7 +616,7 @@ pub(super) enum LoopbackPlan {
 /// reachable once a forward exists, and building that forward is something
 /// this app already knows how to do. Answering only "local or not" is what
 /// left the Ports list showing a port it then refused to open.
-pub(crate) fn port_route_of(plan: &LoopbackPlan, local: bool) -> PortRoute {
+fn port_route_of(plan: &LoopbackPlan, local: bool) -> PortRoute {
     match plan {
         // WSL shares this machine's loopback, so its ports are already here
         // under the same number.
@@ -11308,6 +11308,7 @@ mod gpui_tests {
                 turns: 0,
                 inferred: false,
                 readout: Default::default(),
+                since_ms: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -11366,6 +11367,7 @@ mod gpui_tests {
             turns: 0,
             inferred: false,
             readout: Default::default(),
+            since_ms: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11435,6 +11437,7 @@ mod gpui_tests {
             turns,
             inferred: false,
             readout: Default::default(),
+            since_ms: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11921,6 +11924,7 @@ mod gpui_tests {
             turns: 0,
             inferred: false,
             readout: Default::default(),
+            since_ms: None,
         }))
         .encode(&mut daemon)
         .unwrap();

@@ -151,7 +151,7 @@ pub enum UpdateInstallHint {
 impl UpdateInstallHint {
     /// The reason in plain English, pinned by tests. Anything a user reads
     /// goes through `localized_update_install_hint` instead (#602).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, target_os = "windows"))]
     fn english(&self) -> String {
         match self {
             #[cfg(target_os = "macos")]
@@ -2123,6 +2123,7 @@ struct PackageOffer {
 }
 
 impl PackageOffer {
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn plain(name: String) -> Self {
         Self {
             name,
