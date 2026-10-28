@@ -20,7 +20,7 @@
 
 <br />
 
-<a href="assets/tour.mp4"><img src="assets/tour.webp" alt="tty7 46 秒演示：退出应用 agent 照常运行、重新打开回到原处、多仓库 agent 一眼看全、一个 agent 通过 CLI 把活交给另一个、重启后会话自动恢复" width="900" /></a>
+<a href="assets/tour.mp4"><img src="assets/tour.webp" alt="tty7 一分钟演示：多仓库 agent、一个 agent 通过 CLI 驱动另一个、提示符编辑器、diff、拖动 pane、退出应用后会话仍在运行" width="900" /></a>
 
 <sub>▶ <a href="assets/tour.mp4">观看高清版</a></sub>
 

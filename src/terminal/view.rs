@@ -128,7 +128,8 @@ actions!(
         ClearScrollback,
         InsertNewline,
         InsertNewlineFallback,
-        ToggleComposer
+        ToggleComposer,
+        RunReverseSearchSelection
     ]
 );
 
@@ -3417,6 +3418,9 @@ impl TerminalView {
         if self.frame_alt_screen {
             context.add("alt_screen");
         }
+        if self.reverse_search.is_some() {
+            context.add("reverse_search");
+        }
         context
     }
 
@@ -5601,6 +5605,20 @@ impl TerminalView {
                 self.cmd.set(&line);
                 self.submit_command(cx);
             }
+        }
+        cx.notify();
+    }
+
+    /// The menu's Cmd+Enter, which arrives as an action rather than a key:
+    /// on macOS the chord is `ToggleFullscreen`, and a window-wide binding is
+    /// matched before the pane's key handler ever sees the keystroke.
+    fn run_reverse_search_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(rs) = self.reverse_search.take() else {
+            return;
+        };
+        if let Some(line) = rs.selected_line(&self.history).map(str::to_string) {
+            self.cmd.set(&line);
+            self.submit_command(cx);
         }
         cx.notify();
     }
@@ -8002,6 +8020,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &ToggleComposer, window, cx| {
                 this.toggle_composer(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &RunReverseSearchSelection, _w, cx| {
+                this.run_reverse_search_selection(cx);
+            }))
             .on_action(cx.listener(|this, _: &SendTab, _w, cx| {
                 this.tab_pressed(true, cx);
             }))
@@ -8419,7 +8440,7 @@ pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
     } else {
         "xdg-open"
     };
-    std::process::Command::new(opener).arg(path).spawn()?;
+    tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(path))?;
     Ok(())
 }
 
@@ -8453,7 +8474,7 @@ pub(crate) fn reveal_file_path(path: &std::path::Path) -> std::io::Result<()> {
         c.arg(path.parent().unwrap_or(path));
         c
     };
-    command.spawn()?;
+    tty7_core::core::proc::spawn_reaped(&mut command)?;
     Ok(())
 }
 
@@ -8473,7 +8494,7 @@ fn run_file_command(
             "link_file_command expanded to nothing",
         ));
     };
-    std::process::Command::new(program).args(args).spawn()?;
+    tty7_core::core::proc::spawn_reaped(std::process::Command::new(program).args(args))?;
     Ok(())
 }
 

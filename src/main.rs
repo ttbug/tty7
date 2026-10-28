@@ -36,6 +36,10 @@ fn spawn_config_watcher(cx: &mut App) {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
+    // FSEvents reports the resolved path, and a watch registered through a
+    // symlink (`/tmp` is `/private/tmp` on macOS) never matches it: every
+    // edit to config.json went unseen.
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
 
     const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -742,8 +746,13 @@ fn main() {
     if open_path.is_none() && daemon_result.is_ok() && forward_open_path(None) {
         return;
     }
-    if let Err(e) = daemon_result {
-        log::error!("failed to ensure daemon is running: {e}");
+    match &daemon_result {
+        Ok(()) => {
+            if let Err(e) = crate::daemon::spawn::adopt_this_build() {
+                log::warn!("the daemon stays on its old build: {e}");
+            }
+        }
+        Err(e) => log::error!("failed to ensure daemon is running: {e}"),
     }
 
     // `Application`, not the in-loop `App`, owns the native delegate. Register
