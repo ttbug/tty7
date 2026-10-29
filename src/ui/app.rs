@@ -7647,6 +7647,7 @@ impl Tty7App {
             mobile_starting: false,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
+            ssh_list_scroll: gpui::ScrollHandle::new(),
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
@@ -9120,7 +9121,9 @@ impl Tty7App {
         } else {
             "xdg-open"
         };
-        if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
+        if let Err(e) =
+            tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(&path))
+        {
             log::warn!("failed to open {}: {e}", path.display());
         }
     }
