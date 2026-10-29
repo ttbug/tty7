@@ -767,6 +767,8 @@ struct SizeLease {
 
 struct PaneState {
     id: u64,
+    events: Option<super::pane_events::PaneEventHub>,
+    agent_event_metadata: Option<super::control::PaneEventMetadata>,
     ring: ReplayRing,
     subscriber: Option<Sender<DaemonMsg>>,
     subscriber_epoch: u64,
@@ -916,6 +918,12 @@ fn interrupt_key(bytes: &[u8]) -> Option<InterruptKey> {
 }
 
 fn notify(st: &mut PaneState, msg: DaemonMsg) {
+    if let Some(events) = &st.events {
+        let metadata = events.publish(st.id, &msg);
+        if matches!(msg, DaemonMsg::AgentStatus(_)) {
+            st.agent_event_metadata = metadata;
+        }
+    }
     if let Some(sub) = &st.subscriber {
         let _ = sub.send(msg.clone());
     }
@@ -1828,6 +1836,7 @@ impl DaemonPane {
         workspace: Option<String>,
         restore: Option<Restore>,
         allow_remote_clipboard_write: bool,
+        events: Option<super::pane_events::PaneEventHub>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
@@ -1875,6 +1884,8 @@ impl DaemonPane {
             },
             PaneState {
                 id,
+                events,
+                agent_event_metadata: None,
                 ring,
                 subscriber: None,
                 subscriber_epoch: 0,
@@ -2065,6 +2076,7 @@ impl DaemonPane {
     #[cfg(unix)]
     pub fn adopt(
         carried: crate::daemon::pane::Carried,
+        events: Option<super::pane_events::PaneEventHub>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let master = AdoptedMaster::from_fd(carried.master_fd)?;
@@ -2102,6 +2114,8 @@ impl DaemonPane {
             },
             PaneState {
                 id: carried.id,
+                events,
+                agent_event_metadata: None,
                 ring,
                 subscriber: None,
                 subscriber_epoch: 0,
@@ -2154,6 +2168,7 @@ impl DaemonPane {
         size: WinSize,
         spec: Box<NativeSshSpec>,
         remote_start_dir: Option<String>,
+        events: Option<super::pane_events::PaneEventHub>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let allow_remote_clipboard_write = spec.remote_clipboard_write;
@@ -2177,6 +2192,8 @@ impl DaemonPane {
 
         let state = Arc::new(Mutex::new(PaneState {
             id,
+            events,
+            agent_event_metadata: None,
             ring: ReplayRing::new(size),
             subscriber: None,
             subscriber_epoch: 0,
@@ -3670,6 +3687,7 @@ fn agent_state_snapshot(st: &PaneState) -> Option<crate::daemon::control::PaneAg
             pane_id: st.id,
             agent: st.agent,
             state,
+            event_metadata: st.agent_event_metadata.clone(),
         })
 }
 
@@ -4723,6 +4741,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             || {},
         )
         .expect("spawn pane");
@@ -4771,6 +4790,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             || {},
         )
         .expect("spawn pane");
@@ -6318,6 +6338,8 @@ mod tests {
     fn test_state(alive: bool) -> PaneState {
         PaneState {
             id: 0,
+            events: None,
+            agent_event_metadata: None,
             ring: ReplayRing::new(ws(80, 24)),
             subscriber: None,
             subscriber_epoch: 0,
@@ -6343,6 +6365,65 @@ mod tests {
             exit_code: None,
             last_redraw_nudge: None,
         }
+    }
+
+    #[test]
+    fn control_events_follow_agent_changes_and_report_death_once() {
+        use crate::daemon::control::ControlEvent;
+        let hub = super::super::pane_events::PaneEventHub::default();
+        let events = hub.subscribe();
+        let mut st = test_state(true);
+        st.events = Some(hub);
+        let event = crate::core::cli_agent::parse_agent_event_body(
+            br#"{"v":1,"agent":"claude","event":"prompt-submit"}"#,
+        )
+        .unwrap();
+        apply_agent_signals(&mut st, vec![event], None);
+        assert!(
+            matches!(events.receiver.try_recv(), Ok(ControlEvent::AgentStatus { json, .. })
+            if json["status"] == "working")
+        );
+        let state = Mutex::new(st);
+        let death = DeathReporter::new(|| {});
+        death.report(&state, &AtomicBool::new(false));
+        death.report(&state, &AtomicBool::new(false));
+        assert!(matches!(
+            events.receiver.try_recv(),
+            Ok(ControlEvent::PaneExited { .. })
+        ));
+        assert!(events.receiver.is_empty());
+    }
+
+    #[test]
+    fn agent_snapshot_watermark_matches_the_state_published_under_the_pane_lock() {
+        use crate::daemon::control::ControlEvent;
+        let hub = super::super::pane_events::PaneEventHub::default();
+        let events = hub.subscribe();
+        let mut st = test_state(true);
+        st.events = Some(hub);
+        for kind in ["prompt-submit", "stop"] {
+            let body = format!(r#"{{"v":1,"agent":"claude","event":"{kind}"}}"#);
+            let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes()).unwrap();
+            apply_agent_signals(&mut st, vec![event], None);
+            let snapshot = agent_state_snapshot(&st).unwrap();
+            let ControlEvent::AgentStatus { json, metadata, .. } =
+                events.receiver.try_recv().unwrap()
+            else {
+                panic!("expected agent event");
+            };
+            assert_eq!(snapshot.event_metadata, Some(metadata));
+            assert_eq!(serde_json::to_value(snapshot.state).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn shutdown_does_not_publish_a_spurious_control_exit() {
+        let hub = super::super::pane_events::PaneEventHub::default();
+        let events = hub.subscribe();
+        let mut st = test_state(true);
+        st.events = Some(hub);
+        DeathReporter::new(|| {}).report(&Mutex::new(st), &AtomicBool::new(true));
+        assert!(events.receiver.is_empty());
     }
 
     #[test]

@@ -265,6 +265,11 @@ died" is wrong. Ask `tty7 agents` about those.
 A pane can hold another coding agent, and every primitive above works on it —
 plus one that only agents have: status hooks report `working` / `waiting` /
 `done`, so `tty7 wait` can block on the *agent* rather than its process tree.
+On newer servers this uses ordered live events anchored to the initial snapshot;
+older servers or agents without a snapshot watermark fall back to polling. Any
+wait that includes `--until free` also keeps polling. Disconnects reconnect and
+resnapshot without resetting the wait deadline, but missed turns are not replayed.
+Connection establishment and handshakes retain the existing transport behavior.
 
 **Delegation has a playbook — `references/delegation.md`. Read it before you
 spawn a worker.** It covers the whole arc: giving the worker its own git

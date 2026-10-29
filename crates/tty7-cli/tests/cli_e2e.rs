@@ -9,6 +9,8 @@ use tty7_core::daemon::protocol::{DaemonMsg, PROTOCOL_VERSION, ShellSpec, WinSiz
 
 const DAEMON_ENV: &str = "TTY7_CLI_E2E_DAEMON";
 const PASTE_AWARE_FIXTURE_ARG: &str = "--tty7-e2e-paste-aware-fixture";
+const PANE_EVENTS_FIXTURE_ARG: &str = "--tty7-e2e-pane-events-fixture";
+const WAIT_EVENTS_FIXTURE_ARG: &str = "--tty7-e2e-wait-events-fixture";
 const PASTE_AWARE_TEXT: &str = "tty7 paste aware input";
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(120);
 const READY_WITHIN: Duration = Duration::from_secs(30);
@@ -16,6 +18,39 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(60);
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 
 fn main() {
+    if std::env::args().any(|arg| arg == WAIT_EVENTS_FIXTURE_ARG) {
+        let _raw = raw_mode::enable();
+        let emit = |event: &str| {
+            print!(
+                "\x1b]777;notify;tty7://cli-agent;{{\"v\":1,\"agent\":\"claude\",\"event\":\"{event}\"}}\x07"
+            );
+            std::io::stdout().flush().unwrap();
+        };
+        emit("prompt-submit");
+        println!("TTY7_WAIT_EVENTS_READY");
+        std::io::stdout().flush().unwrap();
+        let mut input = [0; 1];
+        while std::io::stdin().read(&mut input).unwrap() != 0 {
+            match input[0] {
+                b'r' => emit("prompt-submit"),
+                b't' => emit("tool-complete"),
+                b'd' => emit("stop"),
+                b'w' => emit("permission-request"),
+                b'x' => std::process::exit(7),
+                _ => {}
+            }
+        }
+        return;
+    }
+    if std::env::args().any(|arg| arg == PANE_EVENTS_FIXTURE_ARG) {
+        for event in ["prompt-submit", "stop"] {
+            print!(
+                "\x1b]777;notify;tty7://cli-agent;{{\"v\":1,\"agent\":\"claude\",\"event\":\"{event}\"}}\x07"
+            );
+            std::io::stdout().flush().expect("flush agent event");
+        }
+        std::process::exit(7);
+    }
     if std::env::args().any(|arg| arg == PASTE_AWARE_FIXTURE_ARG) {
         run_paste_aware_fixture();
         return;
@@ -66,6 +101,14 @@ fn main() {
         (
             "events_stream_reports_a_workspace_creation",
             events_stream_reports_a_workspace_creation,
+        ),
+        (
+            "events_stream_reports_short_agent_turn_and_exit",
+            events_stream_reports_short_agent_turn_and_exit,
+        ),
+        (
+            "wait_on_live_agent_preserves_event_and_timeout_contracts",
+            wait_on_live_agent_preserves_event_and_timeout_contracts,
         ),
         (
             "a_reader_that_hung_up_ends_the_pipeline_quietly",
@@ -790,6 +833,215 @@ fn events_stream_reports_a_workspace_creation(daemon: &Daemon) {
         verdict,
         "no event line arrived within {SETTLE_WITHIN:?}; saw {seen:?}"
     );
+}
+
+fn wait_on_live_agent_preserves_event_and_timeout_contracts(daemon: &Daemon) {
+    let own = std::env::current_exe().unwrap();
+    // Foreground detection runs after OSC processing. Give the fixture a real
+    // agent argv[0], or that probe correctly clears its synthetic hook state.
+    let fixture = daemon.dir.path().join(if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    });
+    std::fs::hard_link(&own, &fixture)
+        .or_else(|_| std::fs::copy(&own, &fixture).map(|_| ()))
+        .expect("install the isolated agent fixture");
+    let mut pane = PaneClient::at(daemon.pane_endpoint())
+        .spawn(
+            None,
+            WinSize {
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            Some(ShellSpec {
+                program: fixture.to_string_lossy().into_owned(),
+                args: vec![WAIT_EVENTS_FIXTURE_ARG.into()],
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    pane.set_recv_timeout(Some(SETTLE_WITHIN)).unwrap();
+    collect_pane_output_until(&mut pane, b"TTY7_WAIT_EVENTS_READY");
+    let address = format!("%{}", pane.pane_id());
+
+    let initial = daemon.run_json(&["wait", &address, "--until", "working", "--timeout", "0"]);
+    assert_eq!(initial["status"], "working");
+    let started = Instant::now();
+    let timeout = daemon.run(&[
+        "wait",
+        &address,
+        "--until",
+        "done",
+        "--interval",
+        "60000",
+        "--timeout",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(timeout.status.code(), Some(124), "{:?}", timeout);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&timeout.stdout).unwrap()["timed_out"],
+        true
+    );
+    assert!(started.elapsed() < Duration::from_secs(4));
+
+    for (status, input) in [("waiting", "tw"), ("done", "td")] {
+        let mut waiter = daemon
+            .cli(&[
+                "wait",
+                &address,
+                "--until",
+                status,
+                "--changed",
+                "--interval",
+                "60000",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        // Repeat safe fixture-only signals so the test needs no startup sleep
+        // or guess about when the wait process has taken its initial snapshot.
+        loop {
+            if waiter.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+                panic!("event wait never completed");
+            }
+            daemon.run_ok(&["send", &address, input]);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let output = waiter.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["status"], status);
+        assert_eq!(json["stale"], false);
+    }
+
+    let waiter = daemon
+        .cli(&[
+            "wait",
+            &address,
+            "--until",
+            "exit",
+            "--changed",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    daemon.run_ok(&["send", &address, "x"]);
+    let output = waiter.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "exit");
+    assert_eq!(json["matched"], true);
+}
+
+fn events_stream_reports_short_agent_turn_and_exit(daemon: &Daemon) {
+    let client = ControlClient::connect_at(
+        &daemon.control_endpoint(),
+        &ControlHello::host_rpc("event-test", "event-test"),
+    )
+    .unwrap();
+    assert!(
+        client
+            .hello()
+            .has_feature(tty7_core::daemon::control::feature::PANE_EVENTS)
+    );
+    let mut watcher = daemon
+        .cli(&["events", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start events");
+    let stdout = watcher.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Prove the CLI subscribed before starting the short-lived fixture.
+        let deadline = Instant::now() + SETTLE_WITHIN;
+        loop {
+            daemon.run_ok(&["ws", "new", "event-barrier"]);
+            if rx.recv_timeout(Duration::from_millis(200)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "event subscription never became ready"
+            );
+        }
+        let own = std::env::current_exe().unwrap();
+        let mut pane = PaneClient::at(daemon.pane_endpoint())
+            .spawn(
+                None,
+                WinSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_w: 8,
+                    cell_h: 16,
+                },
+                Some(ShellSpec {
+                    program: own.to_string_lossy().into_owned(),
+                    args: vec![PANE_EVENTS_FIXTURE_ARG.into()],
+                    args_are_tty7_defaults: false,
+                }),
+                None,
+                None,
+            )
+            .unwrap();
+        let id = pane.pane_id();
+        let deadline = Instant::now() + SETTLE_WITHIN;
+        let mut done_sequence = None;
+        loop {
+            let line = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("pane completion event");
+            let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if let Some(status) = json.get("agent_status").filter(|s| s["pane_id"] == id) {
+                assert_eq!(status["instance"], client.hello().instance);
+                assert!(status["timestamp_ms"].as_u64().unwrap() > 0);
+                if status["json"]["status"] == "done" {
+                    done_sequence = status["sequence"].as_u64();
+                }
+            }
+            if let Some(exit) = json.get("pane_exited").filter(|s| s["pane_id"] == id) {
+                assert_eq!(exit["code"], 7);
+                assert_eq!(exit["instance"], client.hello().instance);
+                let done = done_sequence.expect("short agent turn must precede pane exit");
+                assert!(exit["sequence"].as_u64().unwrap() > done);
+                break;
+            }
+        }
+        let _ = pane.detach();
+    }));
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 /// `tty7 … | head -1` must end the way `cat … | head -1` ends. Rust ignores

@@ -12,6 +12,7 @@ use crate::daemon::transport::{self, Stream};
 struct Registry {
     panes: Mutex<HashMap<u64, Arc<DaemonPane>>>,
     next_id: AtomicU64,
+    events: super::pane_events::PaneEventHub,
 }
 
 impl Registry {
@@ -19,6 +20,7 @@ impl Registry {
         Self {
             panes: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            events: Default::default(),
         }
     }
 
@@ -94,6 +96,14 @@ impl Registry {
 }
 
 impl crate::host::server::PaneDirectory for Registry {
+    fn subscribe_events(&self) -> Option<super::pane_events::PaneEventSubscription> {
+        Some(self.events.subscribe())
+    }
+
+    fn has_events(&self) -> bool {
+        true
+    }
+
     fn pane_count(&self) -> u64 {
         self.panes.lock().unwrap().len() as u64
     }
@@ -551,7 +561,11 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
             for carried in adopted.panes {
                 let id = carried.id;
                 let on_dead = reaper(registry.clone(), id);
-                match crate::daemon::pane::DaemonPane::adopt(carried, on_dead) {
+                match crate::daemon::pane::DaemonPane::adopt(
+                    carried,
+                    Some(registry.events.clone()),
+                    on_dead,
+                ) {
                     Ok(pane) => {
                         registry.insert(pane);
                         kept += 1;
@@ -913,6 +927,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 workspace,
                 restore,
                 allow_remote_clipboard_write,
+                Some(registry.events.clone()),
                 on_dead,
             ) {
                 Ok(p) => p,
@@ -963,8 +978,14 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, remote_start_dir, on_dead)
-            {
+            let pane = match DaemonPane::spawn_native_ssh(
+                id,
+                size,
+                spec,
+                remote_start_dir,
+                Some(registry.events.clone()),
+                on_dead,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     let mut w = write_stream;

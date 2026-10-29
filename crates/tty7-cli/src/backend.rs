@@ -34,6 +34,29 @@ pub trait Backend {
 
     fn hello(&mut self) -> Result<ControlHelloOk>;
 
+    fn wait_snapshot(
+        &mut self,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<(
+        ControlHelloOk,
+        Vec<tty7_core::daemon::control::PaneAgentState>,
+    )> {
+        let hello = self.hello()?;
+        match self.control(ControlRequest::AgentStates)? {
+            ReplyOk::AgentStates(states) => Ok((hello, states)),
+            other => anyhow::bail!("the server answered AgentStates with {other:?}"),
+        }
+    }
+
+    fn next_event(
+        &mut self,
+        wait: std::time::Duration,
+    ) -> Result<ControlEvent, std::sync::mpsc::RecvTimeoutError>;
+
+    fn is_connected(&self) -> bool;
+
+    fn reset_wait_connection(&mut self);
+
     fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64>;
 
     fn send_input(&mut self, pane: u64, bytes: Vec<u8>) -> Result<()>;
@@ -113,6 +136,16 @@ pub mod mock {
         pub runs: Vec<RunSpec>,
         pub run_exit: Option<i32>,
         pub events: Vec<ControlEvent>,
+        pub pane_events: bool,
+        pub wait_events: VecDeque<Result<ControlEvent, std::sync::mpsc::RecvTimeoutError>>,
+        pub event_waits: Vec<std::time::Duration>,
+        pub connection_resets: usize,
+        pub wait_snapshot_failures: usize,
+        pub instance: String,
+        pub reset_instance: Option<String>,
+        pub disconnect_on_machine_get: bool,
+        pub snapshot_deadline_error: bool,
+        pub pane_transport_failure: bool,
         /// Set to make `hello` fail — doctor's unreachable-server branch.
         pub unreachable: bool,
         pub execs: Vec<(u64, Vec<u8>, Option<std::time::Duration>)>,
@@ -140,6 +173,16 @@ pub mod mock {
                 runs: Vec::new(),
                 run_exit: Some(0),
                 events: Vec::new(),
+                pane_events: false,
+                wait_events: VecDeque::new(),
+                event_waits: Vec::new(),
+                connection_resets: 0,
+                wait_snapshot_failures: 0,
+                instance: "mock-instance".into(),
+                reset_instance: None,
+                disconnect_on_machine_get: false,
+                snapshot_deadline_error: false,
+                pane_transport_failure: false,
                 unreachable: false,
                 execs: Vec::new(),
                 exec_run: ExecRun {
@@ -173,6 +216,11 @@ pub mod mock {
         fn control(&mut self, req: ControlRequest) -> Result<ReplyOk> {
             let is_machine_get = req == ControlRequest::MachineGet;
             self.control_calls.push(req);
+            if is_machine_get && self.disconnect_on_machine_get {
+                self.disconnect_on_machine_get = false;
+                self.unreachable = true;
+                anyhow::bail!("link closed during liveness query");
+            }
             if is_machine_get {
                 return Ok(ReplyOk::MachineTree(Box::new(self.machine.clone())));
             }
@@ -189,9 +237,64 @@ pub mod mock {
                 build: "mock".into(),
                 separator: '\\',
                 home: "C:\\Users\\mock".into(),
-                features: vec![feature::CONTROL.into(), feature::MACHINE_TREE.into()],
-                instance: "mock-instance".into(),
+                features: if self.pane_events {
+                    vec![
+                        feature::CONTROL.into(),
+                        feature::MACHINE_TREE.into(),
+                        feature::PANE_EVENTS.into(),
+                    ]
+                } else {
+                    vec![feature::CONTROL.into(), feature::MACHINE_TREE.into()]
+                },
+                instance: self.instance.clone(),
             })
+        }
+
+        fn wait_snapshot(
+            &mut self,
+            timeout: Option<std::time::Duration>,
+        ) -> Result<(
+            ControlHelloOk,
+            Vec<tty7_core::daemon::control::PaneAgentState>,
+        )> {
+            if self.snapshot_deadline_error && !self.control_calls.is_empty() {
+                std::thread::sleep(timeout.unwrap());
+                anyhow::bail!("request timed out on a connected link");
+            }
+            if self.connection_resets > 0 && self.wait_snapshot_failures > 0 {
+                self.wait_snapshot_failures -= 1;
+                self.unreachable = true;
+                anyhow::bail!("connection refused");
+            }
+            self.unreachable = false;
+            let hello = self.hello()?;
+            match self.control(ControlRequest::AgentStates)? {
+                ReplyOk::AgentStates(states) => Ok((hello, states)),
+                other => anyhow::bail!("the server answered AgentStates with {other:?}"),
+            }
+        }
+
+        fn next_event(
+            &mut self,
+            wait: std::time::Duration,
+        ) -> Result<ControlEvent, std::sync::mpsc::RecvTimeoutError> {
+            self.event_waits.push(wait);
+            if let Some(event) = self.wait_events.pop_front() {
+                return event;
+            }
+            std::thread::sleep(wait);
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        }
+
+        fn is_connected(&self) -> bool {
+            !self.unreachable
+        }
+
+        fn reset_wait_connection(&mut self) {
+            self.connection_resets += 1;
+            if let Some(instance) = self.reset_instance.take() {
+                self.instance = instance;
+            }
         }
 
         fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64> {
@@ -213,6 +316,14 @@ pub mod mock {
 
         fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
             self.procs_calls.push(pane);
+            if self.pane_transport_failure {
+                self.pane_transport_failure = false;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "pane socket ended",
+                )
+                .into());
+            }
             Ok(self
                 .procs_replies
                 .pop_front()

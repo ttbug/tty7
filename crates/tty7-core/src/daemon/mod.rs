@@ -11,6 +11,7 @@ pub mod history;
 pub mod install;
 pub mod mobile;
 pub mod pane;
+pub mod pane_events;
 pub mod pidfile;
 pub mod procinfo;
 pub mod procstat;

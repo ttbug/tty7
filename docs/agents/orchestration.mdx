@@ -36,12 +36,28 @@ tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval M
 
 Blocks until the pane reaches one of the states you named.
 
+On servers advertising `pane-events`, a reporting agent's snapshot includes an
+`event_metadata` watermark. `wait` subscribes before taking that snapshot and
+then consumes newer status/exit events in order, so short reported states do not
+have to survive a poll interval. It still checks health every two seconds without
+advancing past queued events. If the stream falls behind or disconnects, it
+reconnects and takes a fresh snapshot without resetting the wait deadline; a new
+daemon instance resets the `--changed` baseline. Connection establishment and
+handshakes retain the existing transport behavior.
+
+Old servers, snapshots without a watermark, and any wait whose `--until` includes
+`free` retain interval-based polling. The event stream is not a history: a turn
+that finished before the initial snapshot, or during a disconnection, cannot be
+replayed. No command/operation ID is inferred from an event sequence.
+`--changed` remembers observed status transitions and completed text-only turns,
+so a new round need not increment the tool activity counter to count as progress.
+
 | Flag | Default | |
 |---|---|---|
 | `--until` | `waiting,done,exit` | Which states end the wait — see below |
 | `--changed` | off | Ignore the state the pane was *already* in — only wake on one it moved into after the wait began |
 | `--timeout` | none | Give up after this many seconds, exiting 124 |
-| `--interval` | 500 ms | How often to poll |
+| `--interval` | 500 ms | Fallback and `free` polling interval; agent events wake immediately |
 
 Exit codes are made for scripts:
 

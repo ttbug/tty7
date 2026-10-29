@@ -133,6 +133,52 @@ impl Backend for RealBackend {
         Ok(self.control_client()?.hello().clone())
     }
 
+    fn wait_snapshot(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<(
+        ControlHelloOk,
+        Vec<tty7_core::daemon::control::PaneAgentState>,
+    )> {
+        let client = self.control_client()?;
+        let req = ControlRequest::AgentStates;
+        // --timeout 0 still performs the initial snapshot, as the polling
+        // implementation did; it only forbids waiting for a future change.
+        let timeout = timeout
+            .filter(|left| !left.is_zero())
+            .map_or(req.deadline(), |left| left.min(req.deadline()));
+        let reply = client.request_with_deadline(req, &[], timeout)?.reply;
+        match reply {
+            ReplyOk::AgentStates(states) => Ok((client.hello().clone(), states)),
+            other => bail!("the server answered AgentStates with {other:?}"),
+        }
+    }
+
+    fn next_event(
+        &mut self,
+        wait: Duration,
+    ) -> Result<ControlEvent, std::sync::mpsc::RecvTimeoutError> {
+        match self.control.as_ref() {
+            Some(client) => client.recv_event(wait),
+            None => Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_some_and(ControlClient::is_connected)
+    }
+
+    fn reset_wait_connection(&mut self) {
+        if let Some(client) = self.control.take() {
+            client.close();
+        }
+        // Resolve routed hosts again after reconnecting, not through a stale link.
+        self.route = None;
+        self.panes = None;
+    }
+
     fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64> {
         let workspace = workspace.to_string();
         let session = self

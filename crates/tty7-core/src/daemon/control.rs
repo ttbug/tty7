@@ -149,6 +149,8 @@ pub mod feature {
     /// simply unknown here: the pane lives in the peer's registry, and the
     /// local daemon this client would otherwise ask has never heard of it.
     pub const PANE_PROCS: &str = "pane-procs";
+    /// The server publishes live pane exit and agent status events.
+    pub const PANE_EVENTS: &str = "pane-events";
     /// The peer can put a tab to sleep: mark it in the tree and stop its panes
     /// while keeping their screens (#762). Needs both a tree and panes, so a
     /// peer serving either alone does not say it.
@@ -419,6 +421,10 @@ pub struct PaneAgentState {
     #[serde(default)]
     pub agent: Option<crate::core::cli_agent::CLIAgent>,
     pub state: crate::core::cli_agent::AgentSessionState,
+    /// Last published agent event, captured under the same pane lock as state.
+    /// Missing after a handoff or on an older server: callers must poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_metadata: Option<PaneEventMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +683,19 @@ impl WireErrorKind {
     }
 }
 
+/// Event identity is (instance, sequence), scoped to one daemon lifetime.
+/// Zero/empty fields mean an older producer supplied no metadata. Timestamps
+/// are wall-clock milliseconds, not an ordering guarantee or a replay cursor.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneEventMetadata {
+    #[serde(default)]
+    pub instance: String,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub timestamp_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlEvent {
@@ -702,10 +721,14 @@ pub enum ControlEvent {
     PaneExited {
         pane_id: u64,
         code: Option<i32>,
+        #[serde(flatten)]
+        metadata: PaneEventMetadata,
     },
     AgentStatus {
         pane_id: u64,
         json: serde_json::Value,
+        #[serde(flatten)]
+        metadata: PaneEventMetadata,
     },
     Preempted {
         workspace: String,
@@ -1789,6 +1812,7 @@ mod tests {
             })),
             ControlReply::Ok(ReplyOk::WatchId(42)),
             ControlReply::Ok(ReplyOk::AgentStates(vec![PaneAgentState {
+                event_metadata: None,
                 pane_id: 9,
                 agent: Some(crate::core::cli_agent::CLIAgent::Claude),
                 state: crate::core::cli_agent::AgentSessionState {
@@ -1854,14 +1878,21 @@ mod tests {
             ControlEvent::PaneExited {
                 pane_id: 9,
                 code: Some(0),
+                metadata: PaneEventMetadata {
+                    instance: "test-daemon".into(),
+                    sequence: 42,
+                    timestamp_ms: 1_760_000_000_000,
+                },
             },
             ControlEvent::PaneExited {
                 pane_id: 9,
                 code: None,
+                metadata: Default::default(),
             },
             ControlEvent::AgentStatus {
                 pane_id: 9,
                 json: serde_json::json!({ "state": "thinking" }),
+                metadata: Default::default(),
             },
             ControlEvent::Preempted {
                 workspace: "w1".into(),
@@ -1881,6 +1912,32 @@ mod tests {
             client_token: "tok".into(),
             client_hostname: "laptop".into(),
             gui: false,
+        }
+    }
+
+    #[test]
+    fn legacy_agent_snapshots_have_no_event_watermark() {
+        let json = serde_json::json!({
+            "pane_id": 3,
+            "state": crate::core::cli_agent::AgentSessionState::default(),
+        });
+        let snapshot: PaneAgentState = serde_json::from_value(json).unwrap();
+        assert!(snapshot.event_metadata.is_none());
+    }
+
+    #[test]
+    fn legacy_pane_events_decode_without_metadata() {
+        for json in [
+            r#"{"pane_exited":{"pane_id":3,"code":0}}"#,
+            r#"{"agent_status":{"pane_id":3,"json":null}}"#,
+        ] {
+            let event: ControlEvent = serde_json::from_str(json).unwrap();
+            let metadata = match event {
+                ControlEvent::PaneExited { metadata, .. }
+                | ControlEvent::AgentStatus { metadata, .. } => metadata,
+                _ => panic!("expected pane event"),
+            };
+            assert_eq!(metadata, PaneEventMetadata::default());
         }
     }
 

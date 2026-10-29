@@ -1,11 +1,12 @@
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use crate::daemon::control::{
-    ControlEvent, ControlHello, ControlHelloOk, ControlRequest, ControlResponse, EventSink, ReplyOk,
+    ControlEvent, ControlHello, ControlHelloOk, ControlRequest, ControlResponse, EventSink,
+    LinkShutdown, ReplyOk,
 };
 use crate::daemon::router::{RouteAction, RouteChannel, RouteHeader, RouteTarget, negotiate};
 use crate::daemon::transport;
@@ -47,9 +48,15 @@ impl ControlClient {
         stream: transport::Stream,
         hello: &ControlHello,
     ) -> io::Result<ControlClient> {
-        let (push, events) = channel();
+        // Polling fallbacks may not consume events for a long time. Bound the
+        // client queue as well as the daemon queue, and fail closed on overflow
+        // instead of blocking the RPC reader or silently skipping an event.
+        let shutdown = stream.try_clone()?;
+        let (push, events) = sync_channel(1024);
         let sink: EventSink = Box::new(move |event| {
-            let _ = push.send(event);
+            if push.try_send(event).is_err() {
+                let _ = shutdown.shutdown_link();
+            }
         });
         #[cfg(unix)]
         let link = crate::daemon::control::ControlClient::over_unix(stream, hello, sink)?;
@@ -86,9 +93,21 @@ impl ControlClient {
         self.link.call_with_deadline(req, blob, deadline)
     }
 
+    /// Unlike `next_event`, preserves the distinction between a quiet stream
+    /// and a closed link so an orchestrator can reconnect and resnapshot.
+    pub fn recv_event(
+        &self,
+        wait: Duration,
+    ) -> Result<ControlEvent, std::sync::mpsc::RecvTimeoutError> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)?;
+        events.recv_timeout(wait)
+    }
+
     pub fn next_event(&self, wait: Duration) -> Option<ControlEvent> {
-        let events = self.events.lock().ok()?;
-        events.recv_timeout(wait).ok()
+        self.recv_event(wait).ok()
     }
 
     pub fn events(&self) -> ControlEvents<'_> {
@@ -283,6 +302,90 @@ mod tests {
     }
 
     #[test]
+    fn an_undrained_event_queue_is_bounded_and_disconnects() {
+        let (client_end, server_end) = stream_pair();
+        let server = std::thread::spawn(move || {
+            let mut r = server_end.try_clone().unwrap();
+            let mut w = server_end;
+            answer_hello(&mut r, &mut w);
+            for _ in 0..2048 {
+                if ControlServerMsg::Event(ControlEvent::WatchOverflow { id: 1 })
+                    .encode(&mut w)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = ControlClient::over_stream(client_end, &hello()).unwrap();
+        server.join().unwrap();
+        let deadline = std::time::Instant::now() + EVENT_WAIT;
+        while client.is_connected() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "overflow did not disconnect"
+            );
+            std::thread::yield_now();
+        }
+        let mut received = 0;
+        loop {
+            match client.recv_event(EVENT_WAIT) {
+                Ok(_) => received += 1,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                other => panic!("overflow must close the event stream: {other:?}"),
+            }
+        }
+        assert!(received <= 1024);
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn recv_event_distinguishes_a_quiet_stream_from_disconnect() {
+        use std::sync::mpsc::RecvTimeoutError;
+        let (client_end, server_end) = stream_pair();
+        let server = std::thread::spawn(move || {
+            let mut r = server_end.try_clone().unwrap();
+            let mut w = server_end;
+            answer_hello(&mut r, &mut w);
+            let ControlClientMsg::Request {
+                req_id,
+                req: ControlRequest::Ping,
+            } = ControlClientMsg::read(&mut r).unwrap()
+            else {
+                panic!("expected ping");
+            };
+            ControlServerMsg::Event(ControlEvent::PaneExited {
+                pane_id: 3,
+                code: Some(0),
+                metadata: Default::default(),
+            })
+            .encode(&mut w)
+            .unwrap();
+            ControlServerMsg::Response {
+                req_id,
+                reply: ControlReply::Ok(ReplyOk::Pong),
+            }
+            .encode(&mut w)
+            .unwrap();
+        });
+        let client = ControlClient::over_stream(client_end, &hello()).unwrap();
+        assert_eq!(
+            client.recv_event(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        client.request(ControlRequest::Ping).unwrap();
+        server.join().unwrap();
+        assert!(matches!(
+            client.recv_event(EVENT_WAIT),
+            Ok(ControlEvent::PaneExited { .. })
+        ));
+        assert_eq!(
+            client.recv_event(EVENT_WAIT),
+            Err(RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
     fn the_event_iterator_ends_when_the_link_goes_down() {
         let (client_end, server_end) = stream_pair();
         let server = std::thread::spawn(move || {
@@ -292,6 +395,7 @@ mod tests {
             ControlServerMsg::Event(ControlEvent::PaneExited {
                 pane_id: 3,
                 code: Some(0),
+                metadata: Default::default(),
             })
             .encode(&mut w)
             .expect("push an event");
@@ -305,7 +409,8 @@ mod tests {
             events.next(),
             Some(ControlEvent::PaneExited {
                 pane_id: 3,
-                code: Some(0)
+                code: Some(0),
+                ..
             })
         ));
         assert!(

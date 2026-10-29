@@ -308,6 +308,7 @@ mod tests {
         );
 
         let live = [PaneAgentState {
+            event_metadata: None,
             pane_id: 3,
             agent: None,
             state: AgentSessionState {

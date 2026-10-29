@@ -1630,11 +1630,11 @@ fn events(json_mode: bool, backend: &mut dyn Backend) -> Result<Outcome> {
 
 fn event_line(event: &ControlEvent) -> String {
     match event {
-        ControlEvent::PaneExited { pane_id, code } => match code {
+        ControlEvent::PaneExited { pane_id, code, .. } => match code {
             Some(code) => format!("pane %{pane_id} exited with code {code}"),
             None => format!("pane %{pane_id} exited"),
         },
-        ControlEvent::AgentStatus { pane_id, json } => {
+        ControlEvent::AgentStatus { pane_id, json, .. } => {
             format!("pane %{pane_id} agent status: {json}")
         }
         ControlEvent::Preempted { workspace, by } => {
@@ -1648,7 +1648,7 @@ fn event_line(event: &ControlEvent) -> String {
     }
 }
 
-/// The one verb that *blocks*: poll until the watched pane reaches a requested
+/// The one verb that *blocks*: wait until the watched pane reaches a requested
 /// state, then report it. This is what turns the CLI into an orchestration tool
 /// — "wake me when my peer agent needs input, or finishes its turn" — without
 /// the screen-scraping a tmux-based agent team resorts to.
@@ -1661,11 +1661,10 @@ fn event_line(event: &ControlEvent) -> String {
 /// kind it has can ask for `waiting,done,free,exit` and get an answer either
 /// way.
 ///
-/// A poll rather than an `events` subscription on purpose: a one-shot,
-/// stateless question composes into scripts (`tty7 wait %3 && tty7 capture %3
-/// --plain`), survives a server restart mid-wait, and needs no cursor
-/// management. At the default 500ms interval an agent wait costs one aggregate
-/// control request per tick — the same request `tty7 agents` makes once.
+/// Live agent events are anchored to a snapshot watermark. Periodic snapshots
+/// cover intentional closes and missing events; old servers, uninstrumented
+/// panes and `free` retain polling. A dropped link is reconnected before the
+/// next snapshot, never resumed from an event sequence as though it were a log.
 fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     use std::time::{Duration, Instant};
     use tty7_core::core::cli_agent::AgentStatus;
@@ -1680,7 +1679,8 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
 
     /// Where the pane stood the moment we looked. `None` is "no agent state
     /// at all", which is itself a position: an agent appearing is a change.
-    type Cursor = Option<(AgentStatus, u64)>;
+    type Cursor = Option<(AgentStatus, u64, u64, Option<String>)>;
+    const EVENT_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 
     /// How many polls in a row must fail to determine freeness before the wait
     /// calls it structural and stops.
@@ -1710,6 +1710,7 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             .iter()
             .all(|s| matches!(s, WaitState::Free | WaitState::Exit));
     let mut baseline: Option<Cursor> = None;
+    let mut seen_agent_change = false;
     // Sticky: has the pane been seen running something since the wait began?
     // This is `--changed`'s edge for `free` — see the flag's own comment.
     let mut seen_busy = false;
@@ -1720,74 +1721,210 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     let mut unknown: Option<String> = None;
     let mut unknown_polls: u32 = 0;
     let mut polls: u32 = 0;
+    let mut event_cursor: Option<crate::wait_events::Cursor> = None;
+    let mut pending = None;
+    let mut last_entry = None;
+    let mut last_current = WaitState::NoAgent;
+    let mut event_death_seen = false;
+    let mut instance: Option<String> = None;
+    let mut health_at = Instant::now();
+    // Some(None) is a snapshot where the agent session was cleared. Retain
+    // a fixed catch-up target, not the next snapshot's moving position.
+    let mut health_target: Option<Option<tty7_core::daemon::control::PaneAgentState>> = None;
     loop {
-        let states = match backend.control(ControlRequest::AgentStates)? {
-            ReplyOk::AgentStates(states) => states,
-            other => bail!("the server answered AgentStates with {other:?}"),
-        };
-        let entry = states.into_iter().find(|s| s.pane_id == pane);
-        let mut current = match &entry {
-            Some(e) => match e.state.status {
-                AgentStatus::Idle => WaitState::Idle,
-                AgentStatus::Working => WaitState::Working,
-                AgentStatus::Waiting => WaitState::Waiting,
-                AgentStatus::Done => WaitState::Done,
-            },
-            // No agent state for the pane: a live one is agentless — a plain
-            // shell, or an agent whose hooks never got installed — and a dead
-            // or vanished one has exited. Reporting `idle` here (as this once
-            // did) made `--until idle` answer "finished" about a pane that was
-            // midway through a build. The machine tree is only fetched on this
-            // branch — while an agent is reporting, its state alone answers.
-            None if pane_is_live(backend, pane)? => WaitState::NoAgent,
-            None => WaitState::Exit,
-        };
-
-        // Status is a level, not an edge (see `--changed` in cli.rs): the
-        // position we arrived at is last turn's answer until the agent moves.
-        let cursor: Cursor = entry.as_ref().map(|e| (e.state.status, e.state.activity));
-        let baseline = *baseline.get_or_insert(cursor);
-        let mut changed = cursor != baseline;
-
-        // `free` is a fact about the pane, not the agent ladder, so it is asked
-        // separately, only when requested, and only once the ladder has failed
-        // to answer. A state the caller listed is their answer: overwriting a
-        // real `waiting` with a process-tree fact would strand a pane whose
-        // depth-0 process *is* the agent (see `pane_freeness`), where the tree
-        // reads free for the whole turn.
-        if watch_free && current != WaitState::Exit && !args.until.contains(&current) {
-            match pane_freeness(backend, pane)? {
-                Freeness::Free => {
-                    current = WaitState::Free;
-                    changed = seen_busy;
-                    (unknown, unknown_polls) = (None, 0);
-                }
-                Freeness::Busy => {
-                    seen_busy = true;
-                    (unknown, unknown_polls) = (None, 0);
-                }
-                // Not `seen_busy`: "we could not look" is not "something was
-                // running", and letting it set that flag was what suppressed
-                // the one hint that would have pointed at the gap (#840).
-                Freeness::Unknown(why) => {
-                    unknown_polls += 1;
-                    unknown = Some(why);
+        let from_event = pending.is_some();
+        let mut snapshot_failed = false;
+        let (entry, exited) = match pending.take() {
+            Some(update) => update,
+            None if instance.is_some() && deadline.is_some_and(|d| Instant::now() >= d) => {
+                snapshot_failed = true;
+                (last_entry.clone(), false)
+            }
+            None => {
+                let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                match backend.wait_snapshot(left) {
+                    Ok((hello, states)) => {
+                        if instance.as_ref().is_some_and(|old| old != &hello.instance) {
+                            // A new daemon may reuse activity counters and pane ids.
+                            // Never count a restart itself as --changed progress.
+                            baseline = None;
+                            seen_agent_change = false;
+                            event_death_seen = false;
+                            event_cursor = None;
+                            health_target = None;
+                            seen_busy = false;
+                            unknown = None;
+                            unknown_polls = 0;
+                        }
+                        instance = Some(hello.instance.clone());
+                        let entry = states.into_iter().find(|s| s.pane_id == pane);
+                        health_at = Instant::now() + EVENT_HEALTH_INTERVAL;
+                        if let Some(cursor) = &event_cursor {
+                            // A health snapshot may overtake its event forwarder.
+                            // Keep consuming in order, rather than discarding a
+                            // transient Waiting behind the snapshot's Working.
+                            let covers =
+                                |target: &Option<tty7_core::daemon::control::PaneAgentState>| {
+                                    target
+                                        .as_ref()
+                                        .map_or(last_entry.is_none(), |s| cursor.covers(s))
+                                };
+                            if health_target.as_ref().is_some_and(|target| !covers(target)) {
+                                // A whole health interval passed without the
+                                // promised events: reconnect and resnapshot.
+                                backend.reset_wait_connection();
+                                event_cursor = None;
+                                health_target = None;
+                            } else {
+                                health_target = if covers(&entry) { None } else { Some(entry) };
+                            }
+                            (last_entry.clone(), false)
+                        } else {
+                            event_cursor =
+                                entry.as_ref().filter(|_| !watch_free).and_then(|state| {
+                                    crate::wait_events::Cursor::from_snapshot(state, &hello)
+                                });
+                            health_target = None;
+                            (entry, false)
+                        }
+                    }
+                    Err(_)
+                        if instance.is_some() && deadline.is_some_and(|d| Instant::now() >= d) =>
+                    {
+                        snapshot_failed = true;
+                        event_cursor = None;
+                        (last_entry.clone(), false)
+                    }
+                    Err(error)
+                        if instance.is_some()
+                            && (!backend.is_connected() || wait_connection_error(&error)) =>
+                    {
+                        backend.reset_wait_connection();
+                        event_cursor = None;
+                        snapshot_failed = true;
+                        (last_entry.clone(), false)
+                    }
+                    Err(error) => return Err(error),
                 }
             }
-        }
+        };
+        let observed = (|| -> Result<_> {
+            let mut current = if exited {
+                WaitState::Exit
+            } else if snapshot_failed {
+                last_current
+            } else {
+                match &entry {
+                    Some(e) => match e.state.status {
+                        AgentStatus::Idle => WaitState::Idle,
+                        AgentStatus::Working => WaitState::Working,
+                        AgentStatus::Waiting => WaitState::Waiting,
+                        AgentStatus::Done => WaitState::Done,
+                    },
+                    // No agent state for the pane: a live one is agentless — a plain
+                    // shell, or an agent whose hooks never got installed — and a dead
+                    // or vanished one has exited. Reporting `idle` here (as this once
+                    // did) made `--until idle` answer "finished" about a pane that was
+                    // midway through a build. The machine tree is only fetched on this
+                    // branch — while an agent is reporting, its state alone answers.
+                    None if pane_is_live(backend, pane)? => WaitState::NoAgent,
+                    None => WaitState::Exit,
+                }
+            };
 
-        let mut matched = args.until.contains(&current) && (changed || !args.changed);
-        polls += 1;
-        // A reporting agent can outlive its pane; re-check on a throttle so a
-        // crashed worker ends the wait instead of spinning on a stale status.
-        if !matched
-            && entry.is_some()
-            && polls.is_multiple_of(LIVENESS_EVERY)
-            && !pane_is_live(backend, pane)?
-        {
-            current = WaitState::Exit;
-            matched = args.until.contains(&current);
-        }
+            // Status is a level, not an edge (see `--changed` in cli.rs): the
+            // position we arrived at is last turn's answer until the agent moves.
+            let cursor: Cursor = entry.as_ref().map(|e| {
+                (
+                    e.state.status,
+                    e.state.activity,
+                    e.state.turns,
+                    e.state.session_id.clone(),
+                )
+            });
+            let baseline = baseline.get_or_insert_with(|| cursor.clone()).clone();
+            // A new turn may return to Waiting/Done with no tool activity.
+            // Remember observed edges, and count completed text-only turns too.
+            seen_agent_change |= cursor != baseline;
+            let mut changed = seen_agent_change;
+
+            // `free` is a fact about the pane, not the agent ladder, so it is asked
+            // separately, only when requested, and only once the ladder has failed
+            // to answer. A state the caller listed is their answer: overwriting a
+            // real `waiting` with a process-tree fact would strand a pane whose
+            // depth-0 process *is* the agent (see `pane_freeness`), where the tree
+            // reads free for the whole turn.
+            if !snapshot_failed
+                && watch_free
+                && current != WaitState::Exit
+                && !args.until.contains(&current)
+            {
+                match pane_freeness(backend, pane)? {
+                    Freeness::Free => {
+                        current = WaitState::Free;
+                        changed = seen_busy;
+                        (unknown, unknown_polls) = (None, 0);
+                    }
+                    Freeness::Busy => {
+                        seen_busy = true;
+                        (unknown, unknown_polls) = (None, 0);
+                    }
+                    // Not `seen_busy`: "we could not look" is not "something was
+                    // running", and letting it set that flag was what suppressed
+                    // the one hint that would have pointed at the gap (#840).
+                    Freeness::Unknown(why) => {
+                        unknown_polls += 1;
+                        unknown = Some(why);
+                    }
+                }
+            }
+
+            let mut matched = args.until.contains(&current)
+                && (changed || !args.changed || current == WaitState::Exit);
+            polls += 1;
+            // A reporting agent can outlive its pane; re-check on a throttle so a
+            // crashed worker ends the wait instead of spinning on a stale status.
+            if !snapshot_failed
+                && !matched
+                && entry.is_some()
+                && if event_cursor.is_some() {
+                    !from_event
+                } else {
+                    polls.is_multiple_of(LIVENESS_EVERY)
+                }
+            {
+                if pane_is_live(backend, pane)? {
+                    event_death_seen = false;
+                } else if event_cursor.is_some() && (!event_death_seen || health_target.is_some()) {
+                    // The exit/status forwarder can trail the liveness query.
+                    // Give its ordered events one health interval before using
+                    // the fallback, so a queued Done is not replaced by Exit.
+                    event_death_seen = true;
+                } else {
+                    current = WaitState::Exit;
+                    matched = args.until.contains(&current);
+                }
+            }
+
+            Ok((current, changed, matched))
+        })();
+        let (current, changed, matched) = match observed {
+            Ok(observation) => observation,
+            Err(error)
+                if !backend.is_connected()
+                    || wait_connection_error(&error)
+                    || deadline.is_some_and(|d| Instant::now() >= d) =>
+            {
+                backend.reset_wait_connection();
+                event_cursor = None;
+                let nap = deadline.map_or(interval, |d| {
+                    interval.min(d.saturating_duration_since(Instant::now()))
+                });
+                std::thread::sleep(nap);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
 
         // Exit ends every wait, requested or not: whatever the caller was
         // waiting for can no longer happen, and reporting beats spinning
@@ -1942,12 +2079,73 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         }
         // Never sleep past the deadline: a long `--interval` must not turn a
         // short `--timeout` into a long one.
-        let nap = match deadline {
-            Some(d) => interval.min(d.saturating_duration_since(Instant::now())),
-            None => interval,
+        last_current = current;
+        last_entry = entry.clone();
+        let delay = if event_cursor.is_some() && !watch_free {
+            health_at.saturating_duration_since(Instant::now())
+        } else {
+            interval
         };
-        std::thread::sleep(nap);
+        let nap = match deadline {
+            Some(d) => delay.min(d.saturating_duration_since(Instant::now())),
+            None => delay,
+        };
+        if let Some(cursor) = &mut event_cursor {
+            use crate::wait_events::Update;
+            use std::sync::mpsc::RecvTimeoutError;
+            let until = Instant::now() + nap;
+            let mut resync = false;
+            loop {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match backend.next_event(left) {
+                    Ok(event) => match cursor.apply(event) {
+                        Update::Ignore => continue,
+                        Update::Agent(state) => {
+                            event_death_seen = false;
+                            pending = Some((state, false));
+                        }
+                        Update::Exited => pending = Some((entry.clone(), true)),
+                        Update::Resync => resync = true,
+                    },
+                    Err(RecvTimeoutError::Disconnected) => resync = true,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+                break;
+            }
+            if resync {
+                backend.reset_wait_connection();
+                event_cursor = None;
+                health_target = None;
+                event_death_seen = false;
+            }
+        } else {
+            std::thread::sleep(nap);
+        }
     }
+}
+
+/// Pane queries use a separate socket from control, so a live control link
+/// does not rule out an interrupted transport. Business/protocol errors are
+/// deliberately not retried.
+fn wait_connection_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+            )
+        })
 }
 
 /// Whether the pane is back to its bare shell — nothing running in front of it.
@@ -4105,6 +4303,7 @@ mod tests {
         activity: u64,
     ) -> tty7_core::daemon::control::PaneAgentState {
         tty7_core::daemon::control::PaneAgentState {
+            event_metadata: None,
             pane_id,
             agent: None,
             state: tty7_core::core::cli_agent::AgentSessionState {
@@ -4133,6 +4332,561 @@ mod tests {
             launch_argv: None,
             status: None,
         });
+    }
+
+    fn event_state(
+        status: tty7_core::core::cli_agent::AgentStatus,
+        activity: u64,
+        sequence: u64,
+    ) -> tty7_core::daemon::control::PaneAgentState {
+        let mut state = agent_state_at(3, status, activity);
+        state.event_metadata = Some(tty7_core::daemon::control::PaneEventMetadata {
+            instance: "mock-instance".into(),
+            sequence,
+            timestamp_ms: 1,
+        });
+        state
+    }
+
+    fn status_event(state: tty7_core::daemon::control::PaneAgentState) -> ControlEvent {
+        ControlEvent::AgentStatus {
+            pane_id: state.pane_id,
+            json: serde_json::to_value(state.state).unwrap(),
+            metadata: state.event_metadata.unwrap(),
+        }
+    }
+
+    #[test]
+    fn wait_uses_ordered_events_without_polling_for_a_short_agent_turn() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Done, 1, 10)]));
+        let mut unrelated = event_state(Done, 100, 99);
+        unrelated.pane_id = 4;
+        backend.wait_events.extend([
+            Ok(status_event(event_state(Done, 0, 9))),
+            Ok(status_event(unrelated)),
+            Ok(status_event(event_state(Working, 2, 11))),
+            Ok(status_event(event_state(Done, 3, 12))),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--changed",
+                "--interval",
+                "60000",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert_eq!(json["activity"], 3);
+        assert_eq!(json["stale"], false);
+        assert_eq!(
+            backend
+                .control_calls
+                .iter()
+                .filter(|r| **r == ControlRequest::AgentStates)
+                .count(),
+            1
+        );
+        assert_eq!(backend.event_waits.len(), 4);
+    }
+
+    #[test]
+    fn wait_changed_remembers_an_edge_back_to_the_initial_status() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Waiting, 0, 10)]));
+        backend.wait_events.extend([
+            Ok(status_event(event_state(Working, 0, 11))),
+            Ok(status_event(event_state(Waiting, 0, 12))),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "waiting",
+                "--changed",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "waiting");
+        assert_eq!(json["stale"], false);
+    }
+
+    #[test]
+    fn wait_changed_counts_text_only_turns_with_no_tool_activity() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Done, 0, 10)]));
+        let mut completed = event_state(Done, 0, 11);
+        completed.state.turns = 1;
+        backend.wait_events.push_back(Ok(status_event(completed)));
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--changed",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert_eq!(json["activity"], 0);
+        assert_eq!(json["stale"], false);
+    }
+
+    #[test]
+    fn wait_consumes_queued_completion_before_using_dead_pane_fallback() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend
+            .machine
+            .panes
+            .iter_mut()
+            .find(|p| p.id == 3)
+            .unwrap()
+            .live = false;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]));
+        backend
+            .wait_events
+            .push_back(Ok(status_event(event_state(Done, 2, 11))));
+        let json = json_of(run_cli(
+            &["tty7", "wait", "%3", "--until", "done", "--timeout", "1"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+    }
+
+    #[test]
+    fn wait_health_snapshot_does_not_skip_a_queued_transient_state() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 3, 12)]),
+        ]);
+        backend.wait_events.extend([
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            Ok(status_event(event_state(Waiting, 2, 11))),
+        ]);
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "waiting",
+                "--changed",
+                "--timeout",
+                "1",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap();
+        let Outcome::Report(report) = out else {
+            panic!("queued waiting must not be swallowed by a later snapshot")
+        };
+        assert_eq!(report.json["status"], "waiting");
+        assert_eq!(report.json["activity"], 2);
+    }
+
+    #[test]
+    fn wait_health_catch_up_uses_the_previous_fixed_target() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 3, 12)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 5, 14)]),
+        ]);
+        backend.wait_events.extend([
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            Ok(status_event(event_state(Working, 3, 12))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            Ok(status_event(event_state(Waiting, 4, 13))),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "waiting",
+                "--changed",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["activity"], 4);
+        assert_eq!(backend.connection_resets, 0);
+    }
+
+    #[test]
+    fn wait_retries_pane_transport_errors_even_if_control_is_connected() {
+        let mut backend = mock();
+        backend.pane_transport_failure = true;
+        backend.procs_reply = idle_procs();
+        backend.replies.extend([
+            ReplyOk::AgentStates(Vec::new()),
+            ReplyOk::AgentStates(Vec::new()),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "free");
+        assert_eq!(backend.connection_resets, 1);
+    }
+
+    #[test]
+    fn wait_does_not_retry_protocol_or_permission_errors() {
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "not a broken connection"))
+                .context("looking up the pane");
+            assert!(!wait_connection_error(&error));
+        }
+    }
+
+    #[test]
+    fn wait_reconnects_if_liveness_query_loses_its_link() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.disconnect_on_machine_get = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Done, 2, 11)]),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert_eq!(backend.connection_resets, 1);
+    }
+
+    #[test]
+    fn wait_with_free_keeps_polling_even_when_agent_events_are_available() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+        ]);
+        backend.procs_replies.extend([busy_procs(), idle_procs()]);
+        backend
+            .wait_events
+            .push_back(Ok(status_event(event_state(Working, 2, 11))));
+        let started = std::time::Instant::now();
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--changed",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "free");
+        assert!(backend.event_waits.is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn wait_resnapshots_if_events_fail_to_catch_up_for_a_health_interval() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 2, 11)]),
+            ReplyOk::AgentStates(vec![event_state(Working, 2, 11)]),
+            ReplyOk::AgentStates(vec![event_state(Done, 3, 12)]),
+        ]);
+        backend.wait_events.extend([
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert_eq!(backend.connection_resets, 1);
+    }
+
+    #[test]
+    fn wait_snapshot_deadline_error_keeps_the_structured_timeout_contract() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.snapshot_deadline_error = true;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]));
+        backend
+            .wait_events
+            .push_back(Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--timeout", "1"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap();
+        let Outcome::Exit(124, report) = out else {
+            panic!("request timeout at the deadline must not become exit 1")
+        };
+        assert_eq!(report.json["status"], "working");
+        assert_eq!(report.json["timed_out"], true);
+    }
+
+    #[test]
+    fn wait_exit_event_ends_an_unsatisfiable_wait_with_structured_failure() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        let state = event_state(Working, 1, 10);
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![state.clone()]));
+        let mut metadata = state.event_metadata.unwrap();
+        metadata.sequence += 1;
+        backend.wait_events.push_back(Ok(ControlEvent::PaneExited {
+            pane_id: 3,
+            code: Some(7),
+            metadata,
+        }));
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--until", "done", "--timeout", "1"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap();
+        let Outcome::Exit(1, report) = out else {
+            panic!("exit must fail a wait for done")
+        };
+        assert_eq!(report.json["status"], "exit");
+        assert_eq!(report.json["matched"], false);
+    }
+
+    #[test]
+    fn wait_without_snapshot_watermark_keeps_polling_even_if_events_are_advertised() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![agent_state_at(3, Working, 1)]),
+            ReplyOk::AgentStates(vec![agent_state_at(3, Done, 2)]),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert!(backend.event_waits.is_empty());
+    }
+
+    #[test]
+    fn wait_reconnects_and_resnapshots_without_resetting_the_deadline() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.wait_snapshot_failures = 2;
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]),
+            ReplyOk::AgentStates(vec![event_state(Done, 2, 12)]),
+        ]);
+        backend
+            .wait_events
+            .push_back(Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--changed",
+                "--interval",
+                "50",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "done");
+        assert_eq!(json["stale"], false);
+        assert_eq!(backend.connection_resets, 3);
+        assert_eq!(backend.wait_snapshot_failures, 0);
+    }
+
+    #[test]
+    fn wait_does_not_count_restarted_daemons_counters_as_changed_progress() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend.reset_instance = Some("restarted".into());
+        let mut restarted = event_state(Done, 0, 1);
+        restarted.event_metadata.as_mut().unwrap().instance = "restarted".into();
+        let mut new_turn = event_state(Done, 1, 2);
+        new_turn.event_metadata.as_mut().unwrap().instance = "restarted".into();
+        backend.replies.extend([
+            ReplyOk::AgentStates(vec![event_state(Working, 10, 10)]),
+            ReplyOk::AgentStates(vec![restarted]),
+        ]);
+        backend.wait_events.extend([
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            Ok(status_event(new_turn)),
+        ]);
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "done",
+                "--changed",
+                "--timeout",
+                "1",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["activity"], 1);
+        assert_eq!(
+            backend.event_waits.len(),
+            2,
+            "the restarted snapshot alone must not wake --changed"
+        );
+    }
+
+    #[test]
+    fn wait_event_timeout_is_bounded_by_timeout_not_poll_interval() {
+        use tty7_core::core::cli_agent::AgentStatus::*;
+        let mut backend = mock();
+        backend.pane_events = true;
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![event_state(Working, 1, 10)]));
+        let started = std::time::Instant::now();
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--interval",
+                "60000",
+                "--timeout",
+                "1",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(out, Outcome::Exit(124, _)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(backend.event_waits.len(), 1);
+        assert!(backend.event_waits[0] <= Duration::from_secs(1));
+        assert_eq!(
+            backend
+                .control_calls
+                .iter()
+                .filter(|r| **r == ControlRequest::AgentStates)
+                .count(),
+            1
+        );
     }
 
     /// The happy path is one aggregate poll: a matching agent state answers

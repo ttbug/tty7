@@ -12,6 +12,7 @@ mod server;
 mod stdio;
 #[cfg(test)]
 mod testbed;
+mod wait_events;
 
 use clap::Parser;
 

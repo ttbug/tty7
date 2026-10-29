@@ -30,6 +30,12 @@ pub trait PaneDirectory: Send + Sync {
     fn pane_count(&self) -> u64;
     fn panes(&self) -> Vec<PaneInfo>;
     fn agent_states(&self) -> Vec<PaneAgentState>;
+    fn has_events(&self) -> bool {
+        false
+    }
+    fn subscribe_events(&self) -> Option<crate::daemon::pane_events::PaneEventSubscription> {
+        None
+    }
     /// What is running inside one pane, and what it is listening on.
     ///
     /// Answered by whoever owns the pane's PTY, which for a remote workspace
@@ -270,6 +276,11 @@ where
     W: Write + Send + 'static,
 {
     let sink = Arc::new(Sink::new(w));
+    // Subscribe before HelloOk: a client can act as soon as it sees the hello.
+    let pane_sub = services.panes.as_ref().and_then(|p| p.subscribe_events());
+    if let Some(subscription) = &pane_sub {
+        subscription.disconnect_on_overflow(Arc::clone(&shutdown));
+    }
 
     let hello = match handshake(&mut r, &sink, &*host, &services) {
         Ok(Some(hello)) => hello,
@@ -289,6 +300,9 @@ where
     };
 
     let machine_sub = subscribe_machine(&services, &sink);
+    if let Some(subscription) = &pane_sub {
+        spawn_pane_forwarder(subscription, Arc::clone(&sink), Arc::clone(&shutdown))?;
+    }
 
     let conn = Arc::new(Conn {
         host,
@@ -337,8 +351,9 @@ where
     // Every exit path converges here, including EOF and protocol errors.
     conn.attachments.unregister_gui(conn.id);
     drop(machine_sub);
-    sink.retire();
+    drop(pane_sub);
     let _ = shutdown.shutdown_link();
+    sink.retire();
 
     match outcome {
         Ok(()) => {
@@ -393,6 +408,9 @@ fn handshake<R: Read>(
     // "nothing is listening" rather than as "I cannot tell you".
     if services.panes.is_some() {
         features.push(feature::PANE_PROCS.to_string());
+    }
+    if services.panes.as_ref().is_some_and(|p| p.has_events()) {
+        features.push(feature::PANE_EVENTS.to_string());
     }
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
@@ -1265,6 +1283,27 @@ impl Conn {
     }
 }
 
+fn spawn_pane_forwarder(
+    subscription: &crate::daemon::pane_events::PaneEventSubscription,
+    sink: Arc<Sink>,
+    shutdown: Arc<dyn LinkShutdown>,
+) -> io::Result<()> {
+    let rx = subscription.receiver.clone();
+    std::thread::Builder::new()
+        .name("tty7-control-pane-events".into())
+        .spawn(move || {
+            while let Ok(event) = rx.recv_blocking() {
+                if rx.is_closed() || sink.send(&ControlServerMsg::Event(event)).is_err() {
+                    break;
+                }
+            }
+            // An overflowing queue must not silently lose a completion event.
+            // Closing the link forces a consumer to reconnect and resnapshot.
+            let _ = shutdown.shutdown_link();
+        })?;
+    Ok(())
+}
+
 fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::Subscription> {
     let store = services.machine.as_ref()?;
     let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(LAYOUT_EVENT_QUEUE);
@@ -1852,6 +1891,7 @@ mod aggregate_tests {
 
         fn agent_states(&self) -> Vec<PaneAgentState> {
             vec![PaneAgentState {
+                event_metadata: None,
                 pane_id: 7,
                 agent: Some(CLIAgent::Claude),
                 state: AgentSessionState {
@@ -1877,6 +1917,66 @@ mod aggregate_tests {
             Box::new(|_| {}),
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_event_overflow_cancels_a_blocked_socket_writer() {
+        use crate::daemon::pane_events::PaneEventHub;
+        use crate::daemon::protocol::DaemonMsg;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        let buffer: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&buffer as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&buffer) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let shutdown: Arc<dyn LinkShutdown> = Arc::new(writer.try_clone().unwrap());
+        let sink = Arc::new(Sink::new(writer));
+        let hub = PaneEventHub::default();
+        let subscription = hub.subscribe();
+        subscription.disconnect_on_overflow(Arc::clone(&shutdown));
+        spawn_pane_forwarder(&subscription, Arc::clone(&sink), shutdown).unwrap();
+        let _ = hub.publish(
+            3,
+            &DaemonMsg::AgentStatus(Some(AgentSessionState {
+                message: Some("x".repeat(64 * 1024)),
+                ..Default::default()
+            })),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // The first frame is larger than the socket buffer; nobody reads it.
+        while sink.out.try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "writer never started");
+            std::thread::yield_now();
+        }
+        for _ in 0..=1024 {
+            let _ = hub.publish(3, &DaemonMsg::Exited { code: None });
+        }
+        while sink.out.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "overflow did not unblock writer"
+            );
+            std::thread::yield_now();
+        }
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut remaining = Vec::new();
+        reader
+            .read_to_end(&mut remaining)
+            .expect("overflow closes the real socket");
     }
 
     #[test]
@@ -1961,6 +2061,7 @@ mod aggregate_tests {
     fn a_process_with_no_panes_does_not_claim_it_can_list_ports() {
         let client = client_with(Services::none());
         assert!(!client.hello().has_feature(feature::PANE_PROCS));
+        assert!(!client.hello().has_feature(feature::PANE_EVENTS));
     }
 
     #[test]

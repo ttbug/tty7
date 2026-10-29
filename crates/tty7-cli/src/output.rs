@@ -416,6 +416,7 @@ mod tests {
         assert_eq!(status_age(4 * 86_400), "4d");
 
         let unstamped = PaneAgentState {
+            event_metadata: None,
             pane_id: 7,
             agent: None,
             state: Default::default(),

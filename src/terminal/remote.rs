@@ -4436,6 +4436,7 @@ mod replay_tests {
             None,
             None,
             false,
+            None,
             || {},
         )
         .expect("a pty-backed pane");
@@ -4525,6 +4526,7 @@ mod replay_tests {
             None,
             None,
             false,
+            None,
             || {},
         )
         .expect("a pty-backed pane");

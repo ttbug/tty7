@@ -276,12 +276,28 @@ forever. Each diagnostic is
 Blocks until the pane reaches one of the named states. The orchestration
 primitive: `tty7 wait %3 && tty7 capture %3 --plain`.
 
+On servers advertising `pane-events`, a reporting agent's snapshot includes an
+`event_metadata` watermark. `wait` subscribes before taking that snapshot and
+then consumes newer status/exit events in order, so short reported states do not
+have to survive a poll interval. It still checks health every two seconds without
+advancing past queued events. If the stream falls behind or disconnects, it
+reconnects and takes a fresh snapshot without resetting the wait deadline; a new
+daemon instance resets the `--changed` baseline. Connection establishment and
+handshakes retain the existing transport behavior.
+
+Old servers, snapshots without a watermark, and any wait whose `--until` includes
+`free` retain interval-based polling. The event stream is not a history: a turn
+that finished before the initial snapshot, or during a disconnection, cannot be
+replayed. No command/operation ID is inferred from an event sequence.
+`--changed` remembers observed status transitions and completed text-only turns,
+so a new round need not increment the tool activity counter to count as progress.
+
 | Flag | Default | |
 |---|---|---|
 | `--until` | `waiting,done,exit` | Comma-separated; see the states below |
 | `--changed` | off | Only wake on a state the pane moved into *after* the wait began |
 | `--timeout` | none | Give up after N seconds, exiting 124 |
-| `--interval` | 500 | Poll interval in ms (50–3,600,000) |
+| `--interval` | 500 | Fallback and `free` polling interval in ms (50–3,600,000); agent events wake immediately |
 
 | State | Means |
 |---|---|
@@ -319,6 +335,22 @@ Notes that decide whether a loop works:
 Streams server events until interrupted, one per line — pane exits, agent
 status changes, workspace preemption, layout deltas. `--json` makes it NDJSON.
 Blocks forever; run it with a timeout or in the background.
+
+Servers advertising `pane-events` publish live `agent_status` and natural
+`pane_exited` events, including for panes with no GUI attached. Each JSON payload
+adds `instance`, `sequence` and `timestamp_ms`. Identify an event by
+`(instance, sequence)`; sequence increases across all panes of that daemon and
+resets on restart. The timestamp is Unix milliseconds, not an ordering key.
+`agent_status.json` is the agent session state, or `null` when cleared.
+`pane_exited.code` is the exit code, or `null` if unknown. Intentional shutdown
+is not a natural exit event.
+
+The stream has no history or replay cursor. Subscribe before starting work and
+fetch a fresh snapshot after connecting or reconnecting. A consumer that falls
+behind the bounded queue is disconnected rather than silently losing events.
+Older servers may emit no pane events; missing metadata decodes as empty/zero.
+`wait` uses these events when its agent snapshot also carries a watermark.
+
 
 ### `tty7 status`
 Same as `server status`: pid, uptime, pane count, dialect versions, build,

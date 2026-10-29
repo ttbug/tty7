@@ -430,7 +430,7 @@ pub struct WaitArgs {
         value_name = "MS",
         default_value_t = 500,
         value_parser = clap::value_parser!(u64).range(50..=3_600_000),
-        help = "Poll every this many milliseconds"
+        help = "Fallback and free-state polling interval in milliseconds; agent events wake immediately"
     )]
     pub interval: u64,
 }
