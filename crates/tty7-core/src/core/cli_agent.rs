@@ -443,6 +443,37 @@ impl CLIAgent {
         Some(tail.into_iter().map(String::from).collect())
     }
 
+    /// The session `argv` resumes, for the agents that name it with a
+    /// positional id after a `resume` subcommand — `codex resume <id>`, which
+    /// is also what a restore types. Codex reports nothing until the first
+    /// turn of a resumed session, so without this a restored pane holds no id
+    /// until then, and a second restore before that turn has nothing to
+    /// resume (#1260). `None` for `resume --last`, a bare `resume` picker, or
+    /// anything that is not an id.
+    pub fn resumed_session_id(self, argv: &[String]) -> Option<String> {
+        if !matches!(self, CLIAgent::Codex | CLIAgent::TraeCode | CLIAgent::Muse) {
+            return None;
+        }
+        let names_self = |token: &str| {
+            token.split(['/', '\\']).any(|seg| {
+                CLIAgent::match_token(&base_stem(seg).to_ascii_lowercase()) == Some(self)
+            })
+        };
+        let argv = &argv[argv.iter().take_while(|t| is_env_assignment(t)).count()..];
+        let named = argv.iter().position(|t| names_self(t))?;
+        let mut tail = argv[named + 1..].iter().map(String::as_str);
+        if tail.next() != Some("resume") {
+            return None;
+        }
+        let id = tail.next()?;
+        (!id.is_empty()
+            && !id.starts_with('-')
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+        .then(|| id.to_string())
+    }
+
     /// What follows the agent's own name in `argv`, with everything that names
     /// a session taken out: the resume/fork subcommands and the flags listed as
     /// stale for this agent, each with its value. `None` when no token in
@@ -691,7 +722,9 @@ impl CLIAgent {
             CLIAgent::Antigravity => 0x3186FF,
             CLIAgent::Grok => 0x000000,
             CLIAgent::Qwen => 0x6D44E8,
-            CLIAgent::OhMyPi => 0xF97316,
+            // The near-black field omp.sh's favicon sits on; the mark wears
+            // the violet midpoint of the site's pink-to-cyan gradient.
+            CLIAgent::OhMyPi => 0x0F0A14,
             // The blue of the flame in Kimi's brand mark; the glyph itself is
             // black, which Codex and Grok already have covered.
             CLIAgent::Kimi => 0x027AFF,
@@ -724,11 +757,12 @@ impl CLIAgent {
     /// agent wearing two faces.
     ///
     /// White for every mark that is a silhouette sitting on its brand colour.
-    /// TraeCode is the one whose mark is the coloured half of the pair, on an
-    /// accent that is deliberately black.
+    /// TraeCode and Oh My Pi are the ones whose mark is the coloured half of
+    /// the pair, on an accent that is deliberately near-black.
     pub fn icon_rgb(self) -> u32 {
         match self {
             CLIAgent::TraeCode => 0x32F08C,
+            CLIAgent::OhMyPi => 0x9B4DFF,
             CLIAgent::QoderCLI => 0x000000,
             // A white silhouette would vanish on the brand yellow disc.
             CLIAgent::CommandCode => 0x000000,
