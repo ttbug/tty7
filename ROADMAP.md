@@ -6,6 +6,9 @@
 
 ## 已完成
 
+- 已基于本轮侧边栏样式重构重新打包 Apple Silicon DMG 与 updater ZIP，包内主程序 UUID 与本次 release 构建一致，新文案 `当前项目 {projects} · 会话 {sessions}` 已编入；桌面视觉确认仍待进行。
+- 参考新截图调整侧边栏现有列表：标题显示项目数与会话数，分组名移除方括号、固定图标移到右侧，Shell 与 Agent 统一双层会话行，本地会话采用透明品牌图标，调整分组行高、树连接线、选中背景和左侧强调线。侧边栏 56 项测试（含 180／248／420px 宽度布局回归）、国际化 8 项测试、格式检查和差异检查通过；最新构建的桌面视觉效果待确认。
+- 已移除左侧边栏搜索框及其布局占位，任务列表直接接在品牌区下方。侧边栏 55 项测试、格式检查和差异检查通过，桌面视觉效果待确认。
 - 侧边栏中文品牌副标题从「终端工作台」改为「All in One终端工作台」。国际化 8 项测试、格式检查和差异检查通过。
 - 侧边栏分组名字号从 13px 增大到 14px，名称及方括号的宽度测量同步使用新字号，保留高亮粗体显示。侧边栏 51 项测试及格式检查通过，桌面视觉效果待确认。
 - 已修复侧边栏分组 Git 分支图标漏设颜色：SVG 显式设置主题 `danger` 色，避免 GPUI 因图标自身颜色为空而跳过绘制。侧边栏 51 项测试、Git 图标资源测试及格式检查通过，桌面视觉效果待确认。
@@ -52,11 +55,12 @@
 - MiniMax Hook 三项补充修复已通过代码级验证：识别 `tty7-server-c{control}p{protocol}` 远程宿主；祖先进程解析保留带空格的路径；首次临时写入为空或标记未完整时按预期内容的字节前缀恢复，且不据此认领其他文件。真实 `mcode` 运行时端到端验证仍待完成。
 
 - 已按参考图调整品牌区、任务标题、Agent 会话双层布局、树连接线和选中态，等待启动最新构建进行桌面视觉检查；本次桌面工具未成功返回截图。
-- 已保留搜索、折叠、拖拽排序、关闭、右键菜单、Git Diff 和缩放行为。
+- 已保留折叠、拖拽排序、关闭、右键菜单、Git Diff 和缩放行为。
 
 ## 待办
 
 - 启动桌面应用进行侧边栏视觉检查。
+- 参考图中「最近任务」的历史会话数据接入范围待确认；本轮仅调整现有列表样式，未添加历史任务分区或示例时间。
 
 ## 阻塞
 
@@ -64,6 +68,9 @@
 
 ## 最近验证
 
+- 2026-11-19 11:49 侧边栏样式重构的 Apple Silicon DMG：`cargo build --release --locked --target aarch64-apple-darwin`（8m01s，仅既有 `download_file` 未使用警告）与 `cargo build --release --locked --features updater --bin tty7-updater --target aarch64-apple-darwin`（10.11s）通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`（hdiutil 沙箱外执行）生成 [dist/tty7-26.10.0-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.dmg)（38421693 bytes，SHA-256 `52c2ba519c44504df857319e29ad04c81d05c6a4298b93161d7eaf3af5196732`）与 [dist/tty7-26.10.0-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.zip)（33514474 bytes，SHA-256 `8576427147297db06f8fdfd46228f7598ee2ab77caf445a17b362b6aca6b6981`）。DMG CRC VALID、ZIP 完整性、只读挂载含 `tty7.app` 与 `/Applications` 入口、`CFBundleShortVersionString=26.10.0`、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release `dwarfdump` UUID 逐一比对（tty7-app `86F500BC-3BF0-3D3C-AA0A-561AE0A75175`、tty7 `42C63CFE-F0F8-332A-AC20-BC6CE5EA3433`、tty7-updater `E131A12D-F68B-3A55-9EFE-E63F07767A5A`）均通过；已确认新文案 `当前项目` 编入包内主程序、旧 `当前任务` 不再出现；旧 dist 备份至 `.tmp/dmg-build/prev-dist-26.10.0/`；未启动桌面窗口做视觉确认。
+- 2026-11-19 参考图侧边栏样式：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（56 passed）、`cargo test -p tty7 --bin tty7-app 'ui::i18n::' --offline --no-fail-fast`（8 passed）、`cargo fmt --check` 和 `git diff --check` 通过。已通过界面布局测试检查长分组名、右侧固定图标和双层会话在 180／248／420px 宽度下不重叠或裁切；未完成最新构建的桌面截图比对。
+- 2026-11-19 移除左侧边栏搜索框：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（55 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。
 - 2026-10-13 14:42 侧边栏品牌副标题与分组名字号改动的 Apple Silicon DMG：`cargo test -p tty7 'ui::tab_sidebar::'`（51 passed）后执行 `cargo build --release --locked --target aarch64-apple-darwin`（14:36:02–14:41:49）与 updater 构建通过，`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64` 生成 [dist/tty7-26.10.0-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.dmg)（38240496 bytes，SHA-256 `697bbd64757900a0892336b00e672ab23d701b0eb4c34612f27740668f13308d`）与 [dist/tty7-26.10.0-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.zip)（33355311 bytes，SHA-256 `08ae269f2a50fd4b3991f64e563eab6a9430bd3482228dedf2b7453d1048a745`）。DMG CRC VALID、ZIP 完整性、只读挂载含 `tty7.app` 与 `/Applications` 入口、`CFBundleShortVersionString=26.10.0`、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release `dwarfdump` UUID 逐一比对（tty7-app `40F457E3-4F71-3AB0-A4E0-0A69D109A30F`、tty7 `7521001D-B98A-35B5-BE7F-BDCE899FFABA`、tty7-updater `6EEC3F60-57F0-37B1-ADF2-916A4E5580C3`）均通过；已确认新文案 `All in One终端工作台` 编入包内主程序，旧 dist 备份至 `.tmp/dmg-build/prev-dist-26.10.0/`；未启动桌面窗口做视觉确认。
 - 2026-10-13 侧边栏品牌副标题文案：`cargo test -p tty7 --bin tty7-app 'ui::i18n::' --offline --no-fail-fast`（8 passed）、`cargo fmt --check` 和 `git diff --check` 通过。
 - 2026-10-13 分组名字号增大：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（51 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。

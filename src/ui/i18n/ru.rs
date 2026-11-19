@@ -1824,7 +1824,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "Оболочка {n}",
         L10nKey::ShellDefault => "по умолчанию",
         L10nKey::SidebarProductTagline => "Терминальная рабочая среда",
-        L10nKey::SidebarActiveTasks => "Активные задачи",
+        L10nKey::SidebarActiveProjects => "Проекты {projects} · Сеансы {sessions}",
         L10nKey::SidebarAgentReady => "Готово",
         L10nKey::SidebarScratchGroup => "Черновики",
         L10nKey::SidebarUngroupedGroup => "Без группы",

@@ -2140,7 +2140,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",
         L10nKey::SidebarProductTagline => "All in One终端工作台",
-        L10nKey::SidebarActiveTasks => "当前任务",
+        L10nKey::SidebarActiveProjects => "当前项目 {projects} · 会话 {sessions}",
         L10nKey::SidebarAgentReady => "就绪",
         L10nKey::SidebarScratchGroup => "草稿",
         L10nKey::SidebarUngroupedGroup => "未分组",

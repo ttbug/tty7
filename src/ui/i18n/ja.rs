@@ -2362,7 +2362,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "シェル {n}",
         L10nKey::ShellDefault => "デフォルト",
         L10nKey::SidebarProductTagline => "ターミナルワークベンチ",
-        L10nKey::SidebarActiveTasks => "現在のタスク",
+        L10nKey::SidebarActiveProjects => "プロジェクト {projects} · セッション {sessions}",
         L10nKey::SidebarAgentReady => "準備完了",
         L10nKey::SidebarScratchGroup => "スクラッチ",
         L10nKey::SidebarUngroupedGroup => "未分類",

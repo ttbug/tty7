@@ -49,18 +49,15 @@ const PIN_MARK_SIZE: f32 = 11.;
 /// A single-line tab row: one line of `text_sm` and a little air.
 const ROW_HEIGHT: f32 = 30.;
 
-/// A row with a branch line under its title.
-const ROW_HEIGHT_TWO_LINE: f32 = 42.;
-
-const AGENT_ROW_HEIGHT: f32 = 64.;
-const AGENT_ROW_HEADER_Y: f32 = 18.;
+const SESSION_ROW_HEIGHT: f32 = 64.;
+const SESSION_ROW_HEADER_Y: f32 = 18.;
 const BRANCH_CHROME: f32 = 23.;
 
 /// The air between two groups — what makes a group a group without a box.
 const GROUP_GAP: f32 = 16.;
 
 /// A group heading's line.
-const HEADER_HEIGHT: f32 = 22.;
+const HEADER_HEIGHT: f32 = 38.;
 
 /// The group heading's line: 13px at the default size.
 const HEADER_REM: f32 = 13. / 16.;
@@ -72,10 +69,6 @@ const META_REM: f32 = 11.5 / 16.;
 
 /// The rail's side inset, for its header tiles, controls and rows alike.
 const RAIL_INSET: f32 = 12.;
-
-/// The workspace chip and the search field under the rail's header.
-const HEAD_CONTROL_HEIGHT: f32 = 28.;
-const HEAD_CONTROL_RADIUS: f32 = 7.;
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
 fn tabular() -> gpui::FontFeatures {
@@ -89,14 +82,15 @@ fn tabular() -> gpui::FontFeatures {
 mod row_metrics {
     /// `border_r_1` on the sidebar itself.
     pub(super) const BORDER: f32 = 1.;
-    /// `px_3` on the scrolling list that holds the rows.
-    pub(super) const LIST_PAD: f32 = 12.;
+    /// `px_1` on the scrolling list that holds the rows.
+    pub(super) const LIST_PAD: f32 = 4.;
     /// `pl_2` + `pr_2` on the row.
     pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar_plain`.
     pub(super) const AVATAR: f32 = 16.;
     /// The tree connector between a group heading and its session rows.
-    pub(super) const TREE: f32 = 14.;
+    pub(super) const TREE: f32 = 42.;
+    pub(super) const TREE_X: f32 = 13.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
     /// The trailing status mark, when the row has one.
@@ -109,8 +103,7 @@ mod row_metrics {
     pub(super) const META_GAP: f32 = 6.;
     /// `px_2` on a group header.
     pub(super) const HEADER_PAD: f32 = 8. + 8.;
-    /// The chevron a header opens with, and the pin that marks a folder
-    /// group: both `xsmall` icons, which resolve to 12px.
+    /// The chevron a header opens with.
     pub(super) const HEADER_ICON: f32 = 12.;
 
     /// What a row can spend on text, before the badge is taken out.
@@ -304,6 +297,9 @@ impl Tty7App {
         // Every group drops itself when its rows filter out, so a query that
         // matches nothing left the sidebar showing only its own search box.
         let mut any_rows = false;
+        let keys: Rc<Vec<Option<GroupKey>>> = Rc::new(self.sidebar_group_keys(cx));
+        let groups = &self.sidebar_groups;
+        let sections = sidebar_sections(&keys, groups);
 
         let mut list = v_flex()
             .id("tab-sidebar-list")
@@ -317,7 +313,7 @@ impl Tty7App {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .px_3()
+            .px_1()
             .pb(px(20.))
             .gap(px(GROUP_GAP))
             .child(
@@ -327,18 +323,16 @@ impl Tty7App {
                     .px_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(t(L10nKey::SidebarActiveTasks)),
-                    )
-                    .child(self.tabs.len().to_string())
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(t_fmt(
+                        L10nKey::SidebarActiveProjects,
+                        &[
+                            ("projects", &sections.len().to_string()),
+                            ("sessions", &self.tabs.len().to_string()),
+                        ],
+                    )))
                     .child(div().flex_1().h(px(1.)).bg(cx.theme().sidebar_border)),
             );
 
-        let keys: Rc<Vec<Option<GroupKey>>> = Rc::new(self.sidebar_group_keys(cx));
-        let groups = &self.sidebar_groups;
-        let sections = sidebar_sections(&keys, groups);
         // A search outranks a fold. Typing something that matches a row inside
         // a folded group has to show that row — a box that says nothing
         // matches while the match sits behind a chevron is just lying.
@@ -409,6 +403,7 @@ impl Tty7App {
         // Measure with the same interface scale used to paint the header.
         let header_size = rem * HEADER_REM;
         let header_name_size = rem * HEADER_NAME_REM;
+        let tree_ink = cx.theme().muted_foreground.opacity(0.55);
         // The git lines and the group header paint with `tabular()` figures,
         // which set a `1` as wide as an `8`; measuring them proportionally
         // came out a few pixels short on counts like `+1565 −124`, and the
@@ -880,18 +875,8 @@ impl Tty7App {
                 let success = added_ink;
                 let danger = removed_ink;
 
-                let two_line = git_line.is_some();
-                let row_h = match (agent.is_some(), two_line) {
-                    (true, true) => AGENT_ROW_HEIGHT + 16.,
-                    (true, false) => AGENT_ROW_HEIGHT,
-                    (false, true) => ROW_HEIGHT_TWO_LINE,
-                    (false, false) => ROW_HEIGHT,
-                };
-                let connector_y = if agent.is_some() {
-                    AGENT_ROW_HEADER_Y
-                } else {
-                    row_h / 2.
-                };
+                let row_h = SESSION_ROW_HEIGHT + if git_line.is_some() { 16. } else { 0. };
+                let connector_y = SESSION_ROW_HEADER_Y;
                 let has_group_header = section.name.is_some();
                 let is_last_in_group = slot + 1 == visible_tabs.len();
                 let label_region = match rename_input {
@@ -915,10 +900,10 @@ impl Tty7App {
                         .id(("sidebar-label", i))
                         .flex_1()
                         .min_w_0()
-                        .justify_center()
-                        .when(agent.is_some(), |col| {
-                            col.h_full().justify_start().pt(px(8.)).gap(px(6.))
-                        })
+                        .h_full()
+                        .justify_start()
+                        .pt(px(8.))
+                        .gap(px(6.))
                         .when_some(info, |col, info| {
                             col.tooltip(move |window, cx| {
                                 // `Tooltip::element` rebuilds its content on
@@ -1005,14 +990,14 @@ impl Tty7App {
                                 .build(window, cx)
                             })
                         })
-                        .when_some(agent, |col, agent| {
+                        .map(|col| {
                             let status_label = if asleep {
                                 t(L10nKey::TabContextHibernate)
                             } else {
                                 crate::ui::tab_strip::agent_status_label(agent_status)
                                     .unwrap_or_else(|| t(L10nKey::SidebarAgentReady))
                             };
-                            let show_status = !(show_badges && badge_pos < 9);
+                            let show_status = agent.is_some() && !(show_badges && badge_pos < 9);
                             let status_chrome =
                                 row_metrics::STATUS + row_metrics::META_GAP + row_metrics::GAP;
                             let status_text = elide_end_clusters(
@@ -1032,23 +1017,47 @@ impl Tty7App {
                                 &window.text_system(),
                                 &title_font_active,
                                 title_size,
-                                agent.display_name(),
+                                agent.map_or("Shell", |agent| agent.display_name()),
                                 (label_avail - status_w).max(0.),
                             );
                             col.child(
                                 h_flex()
+                                    .debug_selector(move || format!("sidebar-session-heading-{i}"))
                                     .w_full()
                                     .h(px(20.))
                                     .items_center()
                                     .gap(px(row_metrics::GAP))
-                                    .child(self.tab_avatar_plain(
-                                        ("sidebar-avatar", i),
-                                        Some(agent),
-                                        agent_status,
-                                        ssh_dot,
-                                        row_metrics::AVATAR,
-                                        cx,
-                                    ))
+                                    .child(if ssh_dot.is_some() {
+                                        self.tab_avatar_plain(
+                                            ("sidebar-avatar", i),
+                                            agent,
+                                            agent_status,
+                                            ssh_dot,
+                                            row_metrics::AVATAR,
+                                            cx,
+                                        )
+                                    } else {
+                                        let ink = match agent {
+                                            Some(agent)
+                                                if !crate::ui::presets::needs_edge(
+                                                    agent.accent_rgb(),
+                                                    rail_fill,
+                                                ) =>
+                                            {
+                                                gpui::rgb(agent.accent_rgb()).into()
+                                            }
+                                            Some(_) => cx.theme().foreground,
+                                            None => cx.theme().accent,
+                                        };
+                                        gpui::svg()
+                                            .path(agent.map_or("icons/terminal.svg", |agent| {
+                                                agent.icon_path()
+                                            }))
+                                            .flex_shrink_0()
+                                            .size(px(row_metrics::AVATAR))
+                                            .text_color(ink)
+                                            .into_any_element()
+                                    })
                                     .child(
                                         div()
                                             .min_w_0()
@@ -1061,6 +1070,7 @@ impl Tty7App {
                                         line.child(
                                             h_flex()
                                                 .flex_shrink_0()
+                                                .items_center()
                                                 .gap(px(row_metrics::META_GAP))
                                                 .children(status_dot.take())
                                                 .when(
@@ -1090,47 +1100,41 @@ impl Tty7App {
                             h_flex()
                                 .w_full()
                                 .items_center()
-                                .gap(px(if agent.is_some() {
-                                    row_metrics::GAP
-                                } else {
-                                    row_metrics::META_GAP
-                                }))
-                                .when(agent.is_some(), |line| {
-                                    line.child(
-                                        div()
-                                            .relative()
-                                            .flex_shrink_0()
-                                            .w(px(row_metrics::AVATAR))
-                                            .h(px(18.))
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left(px(7.))
-                                                    .top(px(-8.))
-                                                    .w(px(1.))
-                                                    .h(px(17.))
-                                                    .bg(cx.theme().sidebar_border),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left(px(7.))
-                                                    .top(px(9.))
-                                                    .w(px(9.))
-                                                    .h(px(1.))
-                                                    .bg(cx.theme().sidebar_border),
-                                            ),
-                                    )
-                                })
+                                .gap(px(row_metrics::GAP))
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex_shrink_0()
+                                        .w(px(row_metrics::AVATAR))
+                                        .h(px(18.))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left(px(if has_group_header { -16. } else { 7. }))
+                                                .top(px(-16.))
+                                                .w(px(1.))
+                                                .h(px(25.))
+                                                .bg(tree_ink),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left(px(if has_group_header { -16. } else { 7. }))
+                                                .top(px(9.))
+                                                .w(px(if has_group_header { 34. } else { 9. }))
+                                                .h(px(1.))
+                                                .bg(tree_ink),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .text_sm()
-                                        .when(agent.is_some(), |d| d.text_color(muted))
-                                        .when(is_active && agent.is_none(), |d| {
-                                            d.font_weight(FontWeight::MEDIUM)
+                                        .text_size(px(header_size))
+                                        .text_color(muted)
+                                        .debug_selector(move || {
+                                            format!("sidebar-session-summary-{i}")
                                         })
                                         .child(shown_title),
                                 )
@@ -1149,9 +1153,7 @@ impl Tty7App {
                                 }),
                         )
                         .when_some(git_line, |col, line| {
-                            col.child(line.when(agent.is_some(), |line| {
-                                line.pl(px(row_metrics::AVATAR + row_metrics::GAP))
-                            }))
+                            col.child(line.pl(px(row_metrics::AVATAR + row_metrics::GAP)))
                         })
                         .into_any_element(),
                 };
@@ -1196,18 +1198,23 @@ impl Tty7App {
                     .px_2()
                     .rounded(crate::ui::rounding::ROW_RADIUS)
                     .when(is_active, |s| {
-                        s.bg(gpui::rgb(sf.selected))
-                            .text_color(gpui::rgb(sf.text_selected))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top(px(3.))
-                                    .bottom(px(3.))
-                                    .w(px(3.))
-                                    .rounded_full()
-                                    .bg(cx.theme().accent),
-                            )
+                        let selected: gpui::Hsla = gpui::rgb(sf.selected).into();
+                        s.bg(linear_gradient(
+                            90.,
+                            linear_color_stop(selected.blend(cx.theme().accent.opacity(0.10)), 0.),
+                            linear_color_stop(selected, 1.),
+                        ))
+                        .text_color(gpui::rgb(sf.text_selected))
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(2.))
+                                .rounded_full()
+                                .bg(cx.theme().accent),
+                        )
                     })
                     .when(!is_active, |s| {
                         s.text_color(gpui::rgb(sf.text_resting))
@@ -1291,35 +1298,25 @@ impl Tty7App {
                                 .child(
                                     div()
                                         .absolute()
-                                        .left(px(5.))
+                                        .left(px(row_metrics::TREE_X))
                                         .top(px(-ROW_GAP))
                                         .w(px(1.))
                                         .when(is_last_in_group, |line| {
                                             line.bottom(px(row_h - connector_y))
                                         })
                                         .when(!is_last_in_group, |line| line.bottom_0())
-                                        .bg(cx.theme().sidebar_border),
+                                        .bg(tree_ink),
                                 )
                                 .child(
                                     div()
                                         .absolute()
-                                        .left(px(5.))
+                                        .left(px(row_metrics::TREE_X))
                                         .top(px(connector_y - 0.5))
-                                        .w(px(9.))
+                                        .w(px(row_metrics::TREE - row_metrics::TREE_X + 2.))
                                         .h(px(1.))
-                                        .bg(cx.theme().sidebar_border),
+                                        .bg(tree_ink),
                                 ),
                         )
-                    })
-                    .when(agent.is_none(), |row| {
-                        row.child(self.tab_avatar_plain(
-                            ("sidebar-avatar", i),
-                            agent,
-                            agent_status,
-                            ssh_dot,
-                            row_metrics::AVATAR,
-                            cx,
-                        ))
                     })
                     // Leading, like the chip's: the trailing end of a row is
                     // the badge's, and the close button fades in over it.
@@ -1481,7 +1478,7 @@ impl Tty7App {
                 .map(|r| r.input.clone());
             let header = section.name.clone().map(|name| {
                 // The header packs a heading and the branch its whole group
-                // shares onto one 11px line, and the branch is the unbounded
+                // shares onto one line, and the branch is the unbounded
                 // half of it: beside `fix/rpc-proxy-and-error-classification`,
                 // `DELTA-NEUTRAL-BOT` came out as `DEL…`. Flex splits an
                 // overflow between the two in proportion to how much room each
@@ -1492,11 +1489,12 @@ impl Tty7App {
                 // keeps the rest, and each is elided into its share the way a
                 // row already elides its own.
                 let ts = window.text_system();
-                let mut avail =
-                    row_metrics::header_budget(width) - header_size - row_metrics::META_GAP;
-                avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
+                let mut avail = row_metrics::header_budget(width)
+                    - row_metrics::AVATAR
+                    - row_metrics::HEADER_ICON
+                    - 2. * row_metrics::GAP;
                 if pinned {
-                    avail -= PIN_MARK_SIZE + row_metrics::META_GAP;
+                    avail -= PIN_MARK_SIZE + row_metrics::GAP;
                 }
                 let avail = avail.max(HEADER_NAME_FLOOR);
                 let branch_gap = measure_text(&ts, &meta_font, header_size, "  ");
@@ -1506,31 +1504,26 @@ impl Tty7App {
                         + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                 });
                 let name_avail = header_name_avail(avail, git_want);
-                let brackets_w = measure_text(&ts, &header_font, header_name_size, "[]");
-                let label = format!(
-                    "[{}]",
-                    elide_label(
-                        &ts,
-                        &header_font,
-                        header_name_size,
-                        &name,
-                        (name_avail - brackets_w).max(0.),
-                    )
-                );
+                let label = elide_label(&ts, &header_font, header_name_size, &name, name_avail);
                 let name_w = measure_text(&ts, &header_font, header_name_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
+                let header_fill = if pinned {
+                    gpui::rgb(sf.hover).into()
+                } else {
+                    rail_fill
+                };
                 let bar = h_flex()
                     .id(("sidebar-group", group_ix))
                     .group(hover_group.clone())
                     .relative()
                     .w_full()
                     .items_center()
-                    .gap_1p5()
+                    .gap(px(row_metrics::GAP))
                     .px_2()
-                    // The air above a heading is the list's `GROUP_GAP`;
-                    // the heading itself is one short caption line.
                     .h(px(HEADER_HEIGHT))
                     .flex_shrink_0()
+                    .rounded(crate::ui::rounding::ROW_RADIUS)
+                    .bg(header_fill)
                     .text_size(px(header_size))
                     .text_color(cx.theme().muted_foreground)
                     .font_features(tabular())
@@ -1579,34 +1572,12 @@ impl Tty7App {
                             .xsmall(),
                         ),
                     )
-                    // Every kept group carries the mark; it is what sets them
-                    // apart from the derived groups below. It is only a mark:
-                    // an 11px glyph that reads as status is no place for an
-                    // act with no undo, and a stray click on it used to scatter
-                    // a folder's tabs back into auto groups. Letting go of a
-                    // group is Unpin or Delete Group, in the header's menu. A
-                    // click here folds the group like the rest of the header.
-                    .when(pinned, |header| {
-                        let tip = if pinned_folder.is_some() {
-                            L10nKey::SidebarPinnedFolderMark
-                        } else {
-                            L10nKey::SidebarPinnedGroupMark
-                        };
-                        header.child(
-                            div()
-                                .id(("sidebar-group-pin-mark", group_ix))
-                                .debug_selector(|| "sidebar-group-pin-mark".into())
-                                .flex_shrink_0()
-                                .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)))
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
-                                }),
-                        )
-                    })
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .child(Icon::empty().path("icons/folder.svg").size(px(header_size))),
+                        div().flex_shrink_0().child(
+                            Icon::empty()
+                                .path("icons/folder.svg")
+                                .size(px(row_metrics::AVATAR)),
+                        ),
                     )
                     .child(match renaming_group {
                         Some(input) => div()
@@ -1629,6 +1600,7 @@ impl Tty7App {
                         // paints; the name no longer gives room to the branch.
                         None => div()
                             .id(("sidebar-group-name", group_ix))
+                            .debug_selector(move || format!("sidebar-group-name-{group_ix}"))
                             .flex_shrink_0()
                             .min_w_0()
                             .truncate()
@@ -1662,7 +1634,7 @@ impl Tty7App {
                             .min_w_0()
                             .items_center()
                             // Replace the header's default gap with two spaces.
-                            .ml(px(branch_gap - row_metrics::META_GAP))
+                            .ml(px(branch_gap - row_metrics::GAP))
                             .px(px(5.))
                             .rounded(px(6.))
                             .bg(cx.theme().danger.opacity(0.12))
@@ -1678,11 +1650,42 @@ impl Tty7App {
                             .child(div().min_w_0().truncate().child(branch));
                         bar.child(line)
                     })
+                    // A kept group's mark stays at the trailing edge. Clicking
+                    // it still folds the group; unpinning lives in its menu.
+                    .when(pinned, |header| {
+                        let tip = if pinned_folder.is_some() {
+                            L10nKey::SidebarPinnedFolderMark
+                        } else {
+                            L10nKey::SidebarPinnedGroupMark
+                        };
+                        header.child(
+                            div()
+                                .id(("sidebar-group-pin-mark", group_ix))
+                                .debug_selector(|| "sidebar-group-pin-mark".into())
+                                .ml_auto()
+                                .flex_shrink_0()
+                                .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)))
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
+                                }),
+                        )
+                    })
+                    .when(!folded && row_count > 0, |header| {
+                        header.child(
+                            div()
+                                .absolute()
+                                .left(px(row_metrics::ROW_PAD + row_metrics::TREE_X))
+                                .top(px(HEADER_HEIGHT / 2.))
+                                .bottom(px(-ROW_GAP))
+                                .w(px(1.))
+                                .bg(tree_ink),
+                        )
+                    })
                     .children(self.header_actions(
                         group_ix,
                         group_key.clone(),
                         hover_group,
-                        rail_fill,
+                        header_fill,
                         cx,
                     ));
                 // Renaming is offered on a menu rather than a double click:
@@ -1964,47 +1967,6 @@ impl Tty7App {
                     .text_color(cx.theme().muted_foreground)
                     .child(t(L10nKey::SidebarProductTagline)),
             );
-        // The tile inside asks for `w_full`, and a percentage is only a width
-        // while some box above it has a real one. This row used to have none of
-        // its own and borrowed the column's by cross-axis stretch, which did not
-        // always hold; `w_full` here swapped that for a second percentage, and a
-        // row whose width is `Percent` is no longer `auto`, so it lost stretch
-        // as well — on the passes that size the column from its content there
-        // was still nothing to resolve against and the tile fell back to hugging
-        // the workspace name. Hand the row real pixels: the rail is
-        // `w(px(width))` and layout is border-box, so its content is one pixel
-        // narrower than that because of the right border.
-        let search = h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(7.))
-            .h(px(HEAD_CONTROL_HEIGHT))
-            .pl_2()
-            .pr_1()
-            .rounded(px(HEAD_CONTROL_RADIUS))
-            .bg(cx.theme().muted)
-            .child(
-                Icon::new(IconName::Search)
-                    .size(px(12.))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&self.sidebar_search)
-                        .appearance(false)
-                        .cleanable(true)
-                        .pl_0(),
-                ),
-            );
-        let search_head = v_flex()
-            .w(px(width - 1.))
-            .flex_shrink_0()
-            .px(px(RAIL_INSET))
-            .pt(px(4.))
-            .pb(px(16.))
-            .child(search);
         let workspace_footer = h_flex()
             .w(px(width - 1.))
             .flex_shrink_0()
@@ -2131,7 +2093,6 @@ impl Tty7App {
                         cx,
                     ))
                     .child(brand)
-                    .child(search_head)
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         "tab-sidebar-scrollbar",
                         list,
@@ -3441,6 +3402,66 @@ mod fold_tests {
     /// being dropped into a group that is shut.
     fn drawn(app: &Tty7App, i: usize) -> bool {
         app.sidebar_slots.borrow()[i].size.height > px(0.)
+    }
+
+    #[gpui::test]
+    fn session_summaries_and_trailing_pins_fit_a_narrow_sidebar(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        app.update(&mut vcx, |app, cx| {
+            let kept = label(app, "a-project-with-a-long-name", cx);
+            for i in 0..2 {
+                app.set_tab_group(i, Some(kept), cx);
+            }
+            cx.notify();
+        });
+
+        for width in [MIN_SIDEBAR_WIDTH, 248., 420.] {
+            app.update(&mut vcx, |app, cx| {
+                app.sidebar_width.set(width);
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let name = vcx
+                .debug_bounds("sidebar-group-name-0")
+                .expect("group name");
+            let pin = vcx.debug_bounds("sidebar-group-pin-mark").expect("pin");
+            assert!(name.size.width > px(0.));
+            assert!(
+                name.right() <= pin.left(),
+                "the pin does not cover the name"
+            );
+            let group = app.update(&mut vcx, |app, _| app.sidebar_group_slots.borrow()[0].1);
+            assert!(
+                pin.right() >= group.right() - px(20.),
+                "the pin stays at the trailing edge"
+            );
+            for i in 0..2 {
+                let row = app.update(&mut vcx, |app, _| app.sidebar_slots.borrow()[i]);
+                let (heading_selector, summary_selector) = match i {
+                    0 => ("sidebar-session-heading-0", "sidebar-session-summary-0"),
+                    _ => ("sidebar-session-heading-1", "sidebar-session-summary-1"),
+                };
+                let heading = vcx.debug_bounds(heading_selector).expect("heading");
+                let summary = vcx.debug_bounds(summary_selector).expect("summary");
+                assert!(
+                    summary.size.width > px(0.),
+                    "a shell keeps room for its title"
+                );
+                assert!(
+                    heading.bottom() <= summary.top(),
+                    "the title gets its own line"
+                );
+                assert!(
+                    summary.bottom() <= row.bottom(),
+                    "the summary fits vertically"
+                );
+                assert!(
+                    summary.right() <= row.right(),
+                    "the summary fits horizontally"
+                );
+            }
+        }
     }
 
     /// Put tab `i` in a directory and tell the cache that directory is in the

@@ -2291,7 +2291,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",
         L10nKey::SidebarProductTagline => "Terminal workbench",
-        L10nKey::SidebarActiveTasks => "Active tasks",
+        L10nKey::SidebarActiveProjects => "Projects {projects} · Sessions {sessions}",
         L10nKey::SidebarAgentReady => "Ready",
         L10nKey::SidebarScratchGroup => "Scratch",
         L10nKey::SidebarUngroupedGroup => "Ungrouped",

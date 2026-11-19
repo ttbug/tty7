@@ -1366,7 +1366,7 @@ l10n_keys! {
     TabUnnamedShell,
     ShellDefault,
     SidebarProductTagline,
-    SidebarActiveTasks,
+    SidebarActiveProjects,
     SidebarAgentReady,
     SidebarScratchGroup,
     SidebarUngroupedGroup,
