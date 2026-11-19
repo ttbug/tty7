@@ -2916,7 +2916,7 @@ impl Tty7App {
     }
 
     /// The auto group tab `tab` resolves to (rule 3): the host for an SSH
-    /// pane, otherwise the repo its cwd is in, otherwise none (Ungrouped).
+    /// pane, otherwise the repo its cwd is in, otherwise the cwd itself.
     ///
     /// Remembered on the tab, and the memory is what answers while there is
     /// nothing to go on — a probe in flight, or a pane (a WSL one, say) whose
@@ -2926,11 +2926,12 @@ impl Tty7App {
         let resolved = tab.pane.first_leaf().and_then(|leaf| {
             let view = leaf.terminal()?.read(cx);
             let host = ssh_host(view.remote_context().as_ref());
-            let known = view.git_status_cwd().and_then(|cwd| {
+            let cwd = view.git_status_cwd();
+            let known = cwd.and_then(|cwd| {
                 cx.try_global::<GitStatusCache>()?
                     .known_repo_for(view.host_id(), cwd)
             });
-            auto_key(host.as_deref(), known)
+            auto_key(host.as_deref(), cwd, known)
         });
         if let Some(key) = resolved {
             *tab.auto_group.borrow_mut() = key;
@@ -3026,7 +3027,7 @@ impl Tty7App {
         });
         SpawnPlace {
             group: kept.or(entered),
-            auto: auto_key(None, known),
+            auto: auto_key(None, cwd, known),
         }
     }
 }
@@ -3161,7 +3162,7 @@ impl SpawnPlace {
     /// Seed the auto group with SSH host `host`, for a tab dialling a machine
     /// whose pane has not reported its remote context yet.
     pub(crate) fn on_host(mut self, host: Option<String>) -> Self {
-        if let Some(auto) = auto_key(host.as_deref(), None) {
+        if let Some(auto) = auto_key(host.as_deref(), None, None) {
             self.auto = Some(auto);
         }
         self
@@ -3597,6 +3598,78 @@ mod fold_tests {
         });
     }
 
+    #[gpui::test]
+    fn plain_directories_group_by_path_and_follow_cwd_without_moving_pins(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "work", cx);
+            app.set_tab_group(3, Some(work), cx);
+            for i in [0, 1, 3] {
+                plant_plain(app, i, "/w/notes", cx);
+            }
+            plant_plain(app, 2, "/other/notes", cx);
+            let keys = app.sidebar_group_keys(cx);
+            assert_eq!(
+                keys,
+                vec![
+                    repo("/w/notes"),
+                    repo("/w/notes"),
+                    repo("/other/notes"),
+                    Some(GroupKey::Pinned(work)),
+                ]
+            );
+            let sections = sidebar_sections(&keys, &app.sidebar_groups);
+            assert_eq!(
+                sections
+                    .iter()
+                    .map(|s| s.name.as_deref())
+                    .collect::<Vec<_>>(),
+                vec![Some("work"), Some("w/notes"), Some("other/notes")]
+            );
+            assert_eq!(sections[1].tabs, vec![0, 1]);
+
+            let cwd = PathBuf::from("/w/next");
+            app.tabs[0]
+                .pane
+                .first_leaf()
+                .unwrap()
+                .terminal()
+                .unwrap()
+                .update(cx, |view, _| view.set_git_status_cwd_for_test(Some(cwd)));
+            assert_eq!(app.sidebar_group_keys(cx)[0], repo("/w/notes"));
+            plant_plain(app, 0, "/w/next", cx);
+            plant_plain(app, 3, "/w/next", cx);
+            app.settle_sidebar_groups(cx);
+            let keys = app.sidebar_group_keys(cx);
+            assert_eq!(keys[0], repo("/w/next"));
+            assert_eq!(keys[3], Some(GroupKey::Pinned(work)));
+            let (desired, _, _) = crate::ui::tree_sync::desired_tabs(app, cx);
+            assert_eq!(desired[0].last_auto, Some(AutoKey::Repo("/w/next".into())));
+
+            plant_repo(app, 0, "/w/project/src", "/w/project", cx);
+            assert_eq!(app.sidebar_group_keys(cx)[0], repo("/w/project"));
+        });
+    }
+
+    #[gpui::test]
+    fn a_plain_directory_group_seeds_new_tabs_and_can_be_pinned(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update(&mut vcx, |app, cx| {
+            plant_plain(app, 0, "/w/notes", cx);
+            let cwd = PathBuf::from("/w/notes");
+            let place = app.spawn_group(Some(&cwd), cx);
+            assert_eq!(place.group, None);
+            assert_eq!(place.auto, Some(Some(AutoKey::Repo(cwd.clone()))));
+            app.sidebar_group_keys(cx);
+            app.pin_auto_group(AutoKey::Repo(cwd), cx);
+            let pinned = &app.sidebar_groups.pinned[0];
+            assert_eq!(pinned.folder.as_deref(), Some("/w/notes"));
+            assert_eq!(app.tabs[0].group.get(), Some(pinned.id));
+        });
+    }
+
     /// Dropping a tab below the divider is the way out of a pinned group: the
     /// cwd decides again.
     #[gpui::test]
@@ -3864,13 +3937,13 @@ mod fold_tests {
             let keys = app.sidebar_group_keys(cx);
             assert_eq!(
                 keys,
-                vec![Some(GroupKey::Pinned(work)), repo("/w/alpha"), None]
+                vec![Some(GroupKey::Pinned(work)), repo("/w/alpha"), repo("/tmp")]
             );
             let sections = sidebar_sections(&keys, &app.sidebar_groups);
             assert_eq!(
                 sections.last().and_then(|s| s.name.clone()),
-                Some("Ungrouped".into()),
-                "beside an auto group, the rest is Ungrouped again"
+                Some("tmp".into()),
+                "plain directories regain their auto groups too"
             );
         });
     }

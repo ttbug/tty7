@@ -6,6 +6,8 @@
 
 ## 已完成
 
+- 已重新构建并打包包含非 Git 目录自动分组的 Apple Silicon DMG 与 updater ZIP，输出到 `dist/local-20261119-205505/`，保留旧产物。DMG CRC、ZIP 完整性、只读挂载入口、ad-hoc 签名、三个 thin arm64 可执行文件及其与本次 release 的 UUID 比对均通过；验证挂载已卸载，真实桌面效果待确认。
+- 侧边栏自动分组已支持非 Git 目录：确认无仓库后按当前完整路径分组，标题使用目录名、重名时补充父目录；切换目录后更新归属，保留 Git 仓库根目录、SSH 主机和手动固定分组规则。复用现有路径分组的固定、新建终端、折叠和会话保存逻辑，无新增配置或协议类型。核心分组 24 项、侧边栏 60 项测试及编译、格式、差异检查通过；真实桌面效果待确认。
 - 已移除长提示符后的输入区提前换行阈值：空输入光标紧跟提示符，输入填满当前行后自然折行；保留右边界处理，并覆盖跨行点击、宽字符与输入法预编辑布局。终端 view 130 项测试、格式与差异检查通过，真实桌面视觉效果待确认。
 - 已接入 Codex、Claude Code 和 OpenCode 当前会话名称：按宿主机器、Agent 类型与完整会话 ID 定向读取，不受历史列表最近 500 项限制；每 5 秒后台刷新，支持标题延迟生成、重命名和旧查询结果隔离。侧边栏优先保留 tty7 手动命名，其次显示 Agent 标题或首条用户消息摘要，无标题时回退工作目录，不再将这三个 Agent 的终端状态串当作任务名称；其他 Agent 保持原有标题逻辑。相关 94 项测试、主程序与远程 server 编译检查、格式和差异检查通过；真实桌面与 SSH 联调待确认。
 - 已基于本轮侧边栏样式重构重新打包 Apple Silicon DMG 与 updater ZIP，包内主程序 UUID 与本次 release 构建一致，新文案 `当前项目 {projects} · 会话 {sessions}` 已编入；桌面视觉确认仍待进行。
@@ -71,6 +73,8 @@
 
 ## 最近验证
 
+- 2026-11-19 非 Git 目录分组版打包：`cargo build --release --locked --offline --target aarch64-apple-darwin`（5m38s）及 updater 构建（5.95s）通过；现有脚本以 `TTY7_BUNDLE_ONLY=1` 在全新独立目录生成应用，再生成 ZIP 与 DMG，未清理旧产物及本轮 staging。产物 `dist/local-20261119-205505/tty7-26.10.0-macos-arm64.dmg`（38379959 bytes，SHA-256 `9e826843e8b4586d421f9f7dfd1bc6806186292acf8d09c876b3a03a4c8004dd`）与同目录 ZIP（33541007 bytes，SHA-256 `f00e06f40961f05c5f4ce6f6853419d2176024a14f64c35c0ae1fc766a014d77`）。DMG CRC VALID、ZIP 完整性、只读挂载中的应用及 `/Applications` 入口、版本 26.10.0、严格签名校验及 arm64 架构均通过；包内／release UUID 一致：主程序 `31CD791C-A00A-3163-A2F4-C9D5F9C70D4B`、CLI `F0BAAA8E-7938-3E25-A611-CF87996314A6`、updater `AFDF42DE-6081-38DF-A224-0D93391D2F08`。镜像设备操作获授权后在沙箱外执行，验证挂载已卸载；采用 ad-hoc 签名，未做 Developer ID 签名或公证，未启动真实桌面验证。
+- 2026-11-19 非 Git 目录自动分组：`cargo test -p tty7-core --lib core::group_key:: --offline`（24 passed）、`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（60 passed）、`cargo check -p tty7 --offline`、`cargo fmt --check` 和 `git diff --check` 通过。覆盖同目录合并、同名路径区分、目录切换与 Git 探测等待、固定分组保留、组内新建、固定及会话提示保存；仅有既有未使用函数、linker unwind 与依赖未来兼容性警告。未重新打包 DMG／ZIP，未进行真实桌面验证。
 - 2026-11-19 Agent 当前会话标题提交前复核：`cargo test -p tty7 --bin tty7-app --offline -- terminal::agent_title:: ui::tab_sidebar::`（61 passed）、`cargo test -p tty7-core --lib --offline -- core::agent_history::`（27 passed）、`cargo fmt --check` 与 `git diff --cached --check` 通过；真实桌面与 SSH 联调仍待确认。
 - 2026-11-19 输入区自然折行：先以长提示符回归测试复现提前换行失败，再修复布局；`cargo test -p tty7 --bin tty7-app --offline -- terminal::view::tests::`（130 passed）、`cargo fmt --check`、`git diff --check` 通过。编译有既有 linker unwind 大小与依赖未来兼容性警告；未重新打包或进行真实桌面验证。
 - 2026-11-19 Agent 当前会话标题：先用 `codex_status_title_is_not_a_task_summary` 复现状态串直出的失败，再验证修复。`tty7-core` 定向测试共 32 项通过（历史解析 27 项、协议兼容与序列化 2 项、远程读取与 server 往返 3 项）；其中两项远程客户端测试首次因沙箱禁止绑定本机 socket 失败，授权沙箱外重跑均通过。`cargo test -p tty7 --bin tty7-app --offline -- terminal::agent_title:: terminal::view::gpui_tests::live_agent_title_tracks_identity_and_skips_nested_remote_sessions ui::tab_sidebar::`（62 passed）、`cargo check -p tty7 -p tty7-server --offline`、`cargo fmt --check` 和 `git diff --check` 通过。覆盖完整 ID／宿主／Agent 隔离、同目录多会话读取、超过 500 项的老会话、Codex／Claude 重命名、OpenCode WAL 最新标题、首条消息回退、缓存限频与失败重试、旧异步结果丢弃、手动命名优先和非目标 Agent 行为保留。仅有既有 `download_file` 未使用、测试链接器 unwind 与依赖未来兼容提示；未启动真实桌面或连接真实 SSH 服务器。
