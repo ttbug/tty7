@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 已移除长提示符后的输入区提前换行阈值：空输入光标紧跟提示符，输入填满当前行后自然折行；保留右边界处理，并覆盖跨行点击、宽字符与输入法预编辑布局。终端 view 130 项测试、格式与差异检查通过，真实桌面视觉效果待确认。
 - 已基于本轮侧边栏样式重构重新打包 Apple Silicon DMG 与 updater ZIP，包内主程序 UUID 与本次 release 构建一致，新文案 `当前项目 {projects} · 会话 {sessions}` 已编入；桌面视觉确认仍待进行。
 - 参考新截图调整侧边栏现有列表：标题显示项目数与会话数，分组名移除方括号、固定图标移到右侧，Shell 与 Agent 统一双层会话行，本地会话采用透明品牌图标，调整分组行高、树连接线、选中背景和左侧强调线。侧边栏 56 项测试（含 180／248／420px 宽度布局回归）、国际化 8 项测试、格式检查和差异检查通过；最新构建的桌面视觉效果待确认。
 - 已移除左侧边栏搜索框及其布局占位，任务列表直接接在品牌区下方。侧边栏 55 项测试、格式检查和差异检查通过，桌面视觉效果待确认。
@@ -68,6 +69,7 @@
 
 ## 最近验证
 
+- 2026-11-19 输入区自然折行：先以长提示符回归测试复现提前换行失败，再修复布局；`cargo test -p tty7 --bin tty7-app --offline -- terminal::view::tests::`（130 passed）、`cargo fmt --check`、`git diff --check` 通过。编译有既有 linker unwind 大小与依赖未来兼容性警告；未重新打包或进行真实桌面验证。
 - 2026-11-19 11:49 侧边栏样式重构的 Apple Silicon DMG：`cargo build --release --locked --target aarch64-apple-darwin`（8m01s，仅既有 `download_file` 未使用警告）与 `cargo build --release --locked --features updater --bin tty7-updater --target aarch64-apple-darwin`（10.11s）通过；`bash .github/scripts/bundle-macos.sh aarch64-apple-darwin arm64`（hdiutil 沙箱外执行）生成 [dist/tty7-26.10.0-macos-arm64.dmg](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.dmg)（38421693 bytes，SHA-256 `52c2ba519c44504df857319e29ad04c81d05c6a4298b93161d7eaf3af5196732`）与 [dist/tty7-26.10.0-macos-arm64.zip](/Users/JOYY/workspace/tty7/dist/tty7-26.10.0-macos-arm64.zip)（33514474 bytes，SHA-256 `8576427147297db06f8fdfd46228f7598ee2ab77caf445a17b362b6aca6b6981`）。DMG CRC VALID、ZIP 完整性、只读挂载含 `tty7.app` 与 `/Applications` 入口、`CFBundleShortVersionString=26.10.0`、三个 thin arm64 可执行文件、ad-hoc `codesign --verify --deep --strict` 和包内／release `dwarfdump` UUID 逐一比对（tty7-app `86F500BC-3BF0-3D3C-AA0A-561AE0A75175`、tty7 `42C63CFE-F0F8-332A-AC20-BC6CE5EA3433`、tty7-updater `E131A12D-F68B-3A55-9EFE-E63F07767A5A`）均通过；已确认新文案 `当前项目` 编入包内主程序、旧 `当前任务` 不再出现；旧 dist 备份至 `.tmp/dmg-build/prev-dist-26.10.0/`；未启动桌面窗口做视觉确认。
 - 2026-11-19 参考图侧边栏样式：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（56 passed）、`cargo test -p tty7 --bin tty7-app 'ui::i18n::' --offline --no-fail-fast`（8 passed）、`cargo fmt --check` 和 `git diff --check` 通过。已通过界面布局测试检查长分组名、右侧固定图标和双层会话在 180／248／420px 宽度下不重叠或裁切；未完成最新构建的桌面截图比对。
 - 2026-11-19 移除左侧边栏搜索框：`cargo test -p tty7 --bin tty7-app 'ui::tab_sidebar::' --offline --no-fail-fast`（55 passed）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口进行视觉检查。

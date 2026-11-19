@@ -7519,7 +7519,7 @@ impl TerminalView {
             (term.screen_lines(), term.columns())
         };
         // Anchored to where the input starts, which is a row below the prompt
-        // when the prompt left it too little room.
+        // when the prompt has reached the right edge.
         let (start_row, scol) = input_start(scol, total_cols.max(1));
         let srow = (srow + start_row).saturating_sub(self.input_scroll_rows());
         // How wide the menu ends up, decided before the rows so their
@@ -8778,36 +8778,11 @@ fn menu_layout(
     (place_above, visible, first)
 }
 
-/// The fewest columns the input is given beside the prompt, however wide the
-/// pane. Below this nearly any command with an argument or two wraps on its
-/// first row, and a row that short is harder to read than a row lower down.
-const INPUT_MIN_BESIDE_PROMPT: usize = 20;
-
 /// Where the input bar starts, as `(row, column)` with the prompt's own row as
-/// row 0: right after the prompt, or — when the prompt has left too little of
-/// its row — at column 0 of the row below, with the whole width to itself
-/// (#767).
-///
-/// "Too little" is under a third of the pane, and never under
-/// [`INPUT_MIN_BESIDE_PROMPT`]. A third keeps an ordinary prompt on its own
-/// line in any pane you would type in (`user@host ~/src/app % ` is about 25
-/// columns; an 80-column pane still leaves 55), and only moves the input when
-/// a deep path or a busy theme has eaten most of the row — the report behind
-/// this had a 119-column prompt in a 143-column pane, 24 columns left. The
-/// floor covers narrow panes, where a third is a handful of columns.
-///
-/// The move also has to gain something: in a pane barely wider than the
-/// floor, a short prompt leaves under 20 columns and a new row would hardly
-/// give more. So it only happens when the prompt is at least as wide as what
-/// it left — the new row at least doubles the room.
+/// row 0. Stay beside the prompt until it reaches the right edge; input cells
+/// then wrap naturally as they fill the remaining columns.
 fn input_start(scol: usize, cols: usize) -> (usize, usize) {
-    let left = cols.saturating_sub(scol);
-    let floor = INPUT_MIN_BESIDE_PROMPT.max(cols / 3);
-    if left < floor && scol >= left {
-        (1, 0)
-    } else {
-        (0, scol)
-    }
+    if scol >= cols { (1, 0) } else { (0, scol) }
 }
 
 /// Where each character of the input bar lands: `(row, column, width)`, one
@@ -10870,65 +10845,79 @@ mod tests {
         // No prompt at all, and a bare `$ `.
         assert_eq!(input_start(0, 80), (0, 0));
         assert_eq!(input_start(2, 143), (0, 2));
-        // Exactly a third left is enough.
+        // The amount of remaining space does not affect the input's start.
         assert_eq!(input_start(60, 90), (0, 60));
     }
 
     #[test]
-    fn a_prompt_that_eats_the_row_pushes_the_input_below_it() {
-        // #767: a 119-column prompt in a 143-column pane left 24.
-        assert_eq!(input_start(119, 143), (1, 0));
-        // One column short of a third.
-        assert_eq!(input_start(61, 90), (1, 0));
-        // A narrow pane falls back to the 20-column floor, not a third of it.
-        assert_eq!(input_start(25, 40), (1, 0));
+    fn a_long_prompt_keeps_the_input_beside_it_until_the_right_edge() {
+        // A long prompt leaves 24 columns available for input.
+        assert_eq!(input_start(119, 143), (0, 119));
+        assert_eq!(input_start(61, 90), (0, 61));
+        // Narrow panes follow the same rule.
+        assert_eq!(input_start(25, 40), (0, 25));
         assert_eq!(input_start(20, 40), (0, 20));
-        // A cursor parked in the last column, or past it, has no room at all.
-        assert_eq!(input_start(79, 80), (1, 0));
+        // The last column is still usable; only the right edge starts a new row.
+        assert_eq!(input_start(79, 80), (0, 79));
         assert_eq!(input_start(80, 80), (1, 0));
+        assert_eq!(input_start(81, 80), (1, 0));
     }
 
     #[test]
-    fn a_new_row_has_to_gain_something() {
-        // A 20-column pane: a `$ ` prompt leaves 18, under the floor, but a
-        // fresh row would give only two more.
+    fn a_narrow_pane_keeps_the_input_beside_the_prompt() {
         assert_eq!(input_start(2, 20), (0, 2));
-        // Half the row is the break-even point.
         assert_eq!(input_start(9, 20), (0, 9));
-        assert_eq!(input_start(10, 20), (1, 0));
+        assert_eq!(input_start(10, 20), (0, 10));
     }
 
-    /// Everything that reads the layout — the overlay's height, the caret's
-    /// row, clicks — sees the input a row down, with the prompt's row empty.
     #[test]
-    fn input_below_the_prompt_is_laid_out_from_the_next_row() {
+    fn input_after_a_long_prompt_wraps_at_the_right_edge() {
         let start = input_start(119, 143);
         let chars: Vec<char> = "git status".chars().collect();
         let (positions, r, c) = input_char_positions(&chars, start, 143);
-        assert_eq!(positions[0], (1, 0, 1));
-        assert_eq!((r, c), (1, 10));
-        // Two rows tall — the prompt's and the input's — with the caret on
-        // the second, so an overflow shift keeps the input on screen.
-        assert_eq!(input_overlay_rows(&chars, 10, "", start, 143), (2, 1));
-        assert_eq!(input_overlay_rows(&[], 0, "", start, 143), (2, 1));
-        // Wrapping uses the whole width of the new row.
+        assert_eq!(positions[0], (0, 119, 1));
+        assert_eq!((r, c), (0, 129));
+        assert_eq!(input_overlay_rows(&chars, 10, "", start, 143), (1, 0));
+        assert_eq!(input_overlay_rows(&[], 0, "", start, 143), (1, 0));
+        // Fill the remaining 24 columns before using the next row.
         let long: Vec<char> = "a".repeat(150).chars().collect();
-        assert_eq!(input_overlay_rows(&long, 150, "", start, 143), (3, 2));
-        // A click on the prompt's row lands before the first character; on
-        // the input row it hits the character under it.
+        let (positions, r, c) = input_char_positions(&long, start, 143);
+        assert_eq!(positions[23], (0, 142, 1));
+        assert_eq!(positions[24], (1, 0, 1));
+        assert_eq!((r, c), (1, 126));
+        assert_eq!(input_overlay_rows(&long, 23, "", start, 143), (2, 0));
+        assert_eq!(input_overlay_rows(&long[..24], 24, "", start, 143), (2, 1));
+        assert_eq!(input_overlay_rows(&long, 150, "", start, 143), (2, 1));
         assert_eq!(
-            wrapped_click_index(&chars, start, 143, 130, 0, false),
+            wrapped_click_index(&chars, start, 143, 118, 0, false),
             Some(0)
         );
         assert_eq!(
-            wrapped_click_index(&chars, start, 143, 4, 1, false),
+            wrapped_click_index(&chars, start, 143, 123, 0, false),
             Some(4)
         );
         assert_eq!(
-            wrapped_click_index(&chars, start, 143, 60, 1, false),
+            wrapped_click_index(&chars, start, 143, 130, 0, false),
             Some(10)
         );
         assert_eq!(wrapped_click_index(&chars, start, 143, 0, 2, false), None);
+        assert_eq!(
+            wrapped_click_index(&long, start, 143, 4, 1, false),
+            Some(28)
+        );
+    }
+
+    #[test]
+    fn wide_input_and_ime_wrap_only_when_the_cell_does_not_fit() {
+        let start = input_start(79, 80);
+        assert_eq!(input_overlay_rows(&[], 0, "", start, 80), (1, 0));
+        assert_eq!(input_overlay_rows(&[], 0, "a", start, 80), (1, 0));
+        assert_eq!(input_overlay_rows(&[], 0, "漢", start, 80), (2, 1));
+        let chars: Vec<char> = "a漢".chars().collect();
+        let (positions, r, c) = input_char_positions(&chars, start, 80);
+        assert_eq!(positions, [(0, 79, 1), (1, 0, 2)]);
+        assert_eq!((r, c), (1, 2));
+        assert_eq!(wrapped_click_index(&chars, start, 80, 1, 1, false), Some(1));
     }
 
     #[test]

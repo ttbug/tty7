@@ -2396,7 +2396,7 @@ impl Element for TerminalElement {
         }
 
         // With the input bar up, the IME composes into the bar, which starts a
-        // row below the prompt when the prompt left it too little room.
+        // row below the prompt when the prompt has reached the right edge.
         let ime_cell = cursor.map(|c| {
             self.view
                 .read(cx)
