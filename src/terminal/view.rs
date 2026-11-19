@@ -500,6 +500,7 @@ pub struct TerminalView {
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_turns: u64,
     last_agent_session: (Option<String>, Option<Vec<String>>),
+    agent_title: super::agent_title::AgentTitle,
     agent_turn_started: Option<std::time::Instant>,
     /// The "finished" notification for a turn that just reached `Done`,
     /// waiting out [`AGENT_DONE_SETTLE`]. Dropped — and so never sent — when
@@ -2074,6 +2075,7 @@ impl TerminalView {
             last_agent_status: None,
             last_agent_turns: 0,
             last_agent_session: (None, None),
+            agent_title: super::agent_title::AgentTitle::default(),
             agent_turn_started: None,
             pending_finish_notice: None,
             agent_was_rich: false,
@@ -2329,6 +2331,53 @@ impl TerminalView {
 
     pub fn agent_session(&self) -> Option<crate::core::cli_agent::AgentSessionState> {
         self.terminal.agent_session()
+    }
+
+    fn agent_title_key(&self) -> Option<super::agent_title::TitleKey> {
+        let agent = self
+            .agent()
+            .filter(|agent| super::agent_title::supports_title(*agent))?;
+        // A nested SSH/WSL shell's history is not on the workspace host.
+        if self.remote_context().is_some() {
+            return None;
+        }
+        let id = self
+            .agent_session()?
+            .session_id
+            .filter(|id| !id.trim().is_empty())?;
+        Some(super::agent_title::TitleKey {
+            host: self.host_id,
+            session: tty7_core::core::agent_history::SessionKey { agent, id },
+        })
+    }
+
+    pub(crate) fn agent_title(&self) -> Option<&str> {
+        self.agent_title.title(&self.agent_title_key()?)
+    }
+
+    fn refresh_agent_title(&mut self, cx: &mut Context<Self>) {
+        let key = self.agent_title_key();
+        if self.agent_title.set_key(key.clone()) {
+            cx.notify();
+        }
+        let Some(key) = key else { return };
+        let Some(host) = self.host(cx).filter(|host| host.is_connected()) else {
+            return;
+        };
+        let Some(generation) = self.agent_title.begin(std::time::Instant::now()) else {
+            return;
+        };
+        let session = key.session.clone();
+        crate::ui::host_ops::HostOps::run(
+            host,
+            cx,
+            move |host| host.agent_session_title(&session),
+            move |view, result, cx| {
+                if view.agent_title.finish(&key, generation, result) {
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// What this pane is in the middle of, when it can say so. `None` means
@@ -4365,6 +4414,7 @@ impl TerminalView {
         self.poll_agent_detection(at_prompt, cx);
 
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
+        self.refresh_agent_title(cx);
 
         let session = self.terminal.agent_session();
         let tool_activity = match session.as_ref().map(|s| s.activity) {
@@ -11366,6 +11416,110 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the alternate-screen switch never reached the grid");
+    }
+
+    #[gpui::test]
+    fn live_agent_title_tracks_identity_and_skips_nested_remote_sessions(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::{AgentSessionState, CLIAgent};
+        use crate::ui::host_ops::HostId;
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Agent(Some(CLIAgent::Codex))
+            .encode(&mut daemon)
+            .unwrap();
+        let report = |id: &str, daemon: &mut Stream| {
+            DaemonMsg::AgentStatus(Some(AgentSessionState {
+                session_id: Some(id.into()),
+                rich: true,
+                ..Default::default()
+            }))
+            .encode(daemon)
+            .unwrap();
+        };
+        report("first-session", &mut daemon);
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.agent_title_key().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                let key = view
+                    .agent_title_key()
+                    .expect("the hook supplied a session ID");
+                assert_eq!(key.host, HostId::LOCAL);
+                view.agent_title.set_key(Some(key.clone()));
+                let generation = view.agent_title.begin(std::time::Instant::now()).unwrap();
+                view.agent_title
+                    .finish(&key, generation, Ok(Some("First title".into())));
+                assert_eq!(view.agent_title(), Some("First title"));
+                view.host_id = HostId::from_connection_key("ssh:workspace");
+                let remote_key = view.agent_title_key().unwrap();
+                assert_eq!(remote_key.host, view.host_id);
+                assert_eq!(
+                    view.agent_title(),
+                    None,
+                    "another host cannot borrow the local title"
+                );
+                view.host_id = HostId::LOCAL;
+            })
+            .unwrap();
+
+        report("second-session", &mut daemon);
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| {
+                    view.agent_session().and_then(|s| s.session_id).as_deref()
+                        == Some("second-session")
+                })
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.agent_title_key().unwrap().session.id, "second-session");
+                assert_eq!(
+                    view.agent_title(),
+                    None,
+                    "a session change hides the old name immediately"
+                );
+            })
+            .unwrap();
+
+        DaemonMsg::RemoteContext(Some(crate::daemon::protocol::RemoteContext {
+            kind: crate::daemon::protocol::RemoteKind::Ssh,
+            argv: vec!["ssh".into(), "elsewhere".into()],
+            target: "elsewhere".into(),
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.remote_context().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.remote_context().is_some());
+                assert_eq!(view.agent_title_key(), None);
+                view.host_id = HostId::from_connection_key("ssh:workspace");
+                assert_eq!(
+                    view.agent_title_key(),
+                    None,
+                    "a nested hop is not the workspace host"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

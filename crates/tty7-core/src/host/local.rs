@@ -362,6 +362,15 @@ impl Host for LocalHost {
         Ok(Roots::local().map_or_else(Vec::new, |roots| scan(&roots, known_dirs)))
     }
 
+    fn agent_session_title(
+        &self,
+        session: &crate::core::agent_history::SessionKey,
+    ) -> io::Result<Option<String>> {
+        guard_off_ui();
+        use crate::core::agent_history::{Roots, session_title};
+        Ok(Roots::local().and_then(|roots| session_title(&roots, session)))
+    }
+
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
         guard_off_ui();
         local_watch(dirs, Arc::clone(&self.gitignore))

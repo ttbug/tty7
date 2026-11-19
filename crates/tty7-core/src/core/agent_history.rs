@@ -47,6 +47,64 @@ pub struct PastSession {
     pub updated: u64,
 }
 
+/// An exact session on one host. A directory alone cannot identify a chat.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionKey {
+    pub agent: CLIAgent,
+    pub id: String,
+}
+
+/// Read a live session's name without the recent-history list's size limit.
+pub fn session_title(roots: &Roots, key: &SessionKey) -> Option<String> {
+    if key.id.trim().is_empty() {
+        return None;
+    }
+    let title = match key.agent {
+        CLIAgent::Codex => {
+            if let Some(title) = codex_thread_names(&roots.codex)
+                .remove(&key.id)
+                .filter(|title| !title.trim().is_empty())
+            {
+                return Some(title.trim().to_string());
+            }
+            let suffix = format!("-{}", key.id);
+            codex_files(&roots.codex)
+                .into_iter()
+                .filter(|file| {
+                    file.path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.ends_with(&suffix))
+                })
+                .find_map(|file| read(&file).filter(|s| s.id == key.id))?
+                .title
+        }
+        CLIAgent::Claude => {
+            let mut files = claude_files(&roots.claude.join("projects"), CLIAgent::Claude);
+            files.retain(|file| {
+                file.path.file_stem().and_then(|s| s.to_str()) == Some(key.id.as_str())
+            });
+            files.sort_by_key(|file| std::cmp::Reverse(file.modified));
+            files.into_iter().find_map(|file| read(&file))?.title
+        }
+        CLIAgent::OpenCode => opencode_dbs(roots).into_iter().find_map(|db| {
+            let conn = open_read_only(&db)?;
+            let title = conn
+                .query_row(
+                    "SELECT title FROM session WHERE id = ?1 \
+                     AND parent_id IS NULL AND time_archived IS NULL",
+                    [&key.id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()?;
+            opencode_title(&conn, &key.id, title)
+        })?,
+        _ => return None,
+    };
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
 /// Where each agent keeps its history on this computer.
 #[derive(Clone, Debug)]
 pub struct Roots {
@@ -657,10 +715,7 @@ pub(crate) fn read_opencode(conn: &rusqlite::Connection) -> Vec<PastSession> {
     };
     rows.into_iter()
         .filter_map(|(id, dir, title, updated)| {
-            let title = title
-                .filter(|t| !t.starts_with("New session - ") && !t.starts_with("Child session - "))
-                .and_then(|t| real_title(Some(t.trim())))
-                .or_else(|| opencode_first_prompt(conn, &id))?;
+            let title = opencode_title(conn, &id, title)?;
             Some(PastSession {
                 agent: CLIAgent::OpenCode,
                 cwd: dir.filter(|d| !d.is_empty()).map(PathBuf::from),
@@ -671,6 +726,13 @@ pub(crate) fn read_opencode(conn: &rusqlite::Connection) -> Vec<PastSession> {
             })
         })
         .collect()
+}
+
+fn opencode_title(conn: &rusqlite::Connection, id: &str, title: Option<String>) -> Option<String> {
+    title
+        .filter(|t| !t.starts_with("New session - ") && !t.starts_with("Child session - "))
+        .and_then(|t| real_title(Some(t.trim())))
+        .or_else(|| opencode_first_prompt(conn, id))
 }
 
 fn opencode_first_prompt(conn: &rusqlite::Connection, session: &str) -> Option<String> {
@@ -1523,6 +1585,120 @@ mod tests {
     }
 
     #[test]
+    fn live_codex_titles_follow_renames_and_match_the_full_session_id() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = Roots::under(home.path());
+        let sessions = roots.codex.join("sessions/2026/11/19");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-time-0199-abc.jsonl"),
+            format!("{}{}", codex_meta(json!({})), codex_user("First prompt")),
+        )
+        .unwrap();
+        let mut key = SessionKey {
+            agent: CLIAgent::Codex,
+            id: "0199-abc".into(),
+        };
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("First prompt"));
+        let other = SessionKey {
+            agent: CLIAgent::Codex,
+            id: "0199-other".into(),
+        };
+        std::fs::write(
+            sessions.join("rollout-time-0199-other.jsonl"),
+            format!(
+                "{}{}",
+                codex_meta(json!({"id": "0199-other"})),
+                codex_user("Another task in the same directory")
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            session_title(&roots, &other).as_deref(),
+            Some("Another task in the same directory")
+        );
+        let index = roots.codex.join("session_index.jsonl");
+        std::fs::write(
+            &index,
+            line(json!({"id":"0199-abc", "thread_name":"Generated"})),
+        )
+        .unwrap();
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("Generated"));
+        std::fs::write(
+            &index,
+            format!(
+                "{}{}{}",
+                line(json!({"id":"0199-abc", "thread_name":"Generated"})),
+                line(json!({"id":"0199-abc", "thread_name":"Renamed"})),
+                line(json!({"id":"0199-other", "thread_name":"Other chat"})),
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("Renamed"));
+        assert_eq!(session_title(&roots, &other).as_deref(), Some("Other chat"));
+        key.id = "abc".into();
+        assert_eq!(
+            session_title(&roots, &key),
+            None,
+            "short IDs cannot match a rollout"
+        );
+        key.id = "0199-abc".into();
+        key.agent = CLIAgent::Claude;
+        assert_eq!(
+            session_title(&roots, &key),
+            None,
+            "agent type is part of the identity"
+        );
+        key.id.clear();
+        assert_eq!(session_title(&roots, &key), None);
+    }
+
+    #[test]
+    fn live_claude_titles_bypass_the_recent_list_cap_and_follow_custom_names() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = Roots::under(home.path());
+        let project = roots.claude.join("projects/-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join("old-session.jsonl");
+        std::fs::write(&path, user("Original request")).unwrap();
+        let old = UNIX_EPOCH + std::time::Duration::from_secs(1);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        for n in 0..MAX_SESSIONS {
+            std::fs::write(project.join(format!("new-{n}.jsonl")), user("New chat")).unwrap();
+        }
+        assert!(!scan(&roots, &[]).iter().any(|s| s.id == "old-session"));
+        let key = SessionKey {
+            agent: CLIAgent::Claude,
+            id: "old-session".into(),
+        };
+        assert_eq!(
+            session_title(&roots, &key).as_deref(),
+            Some("Original request")
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}{}",
+                user("Original request"),
+                line(json!({"type":"ai-title", "aiTitle":"Generated title"})),
+                line(json!({"type":"custom-title", "customTitle":"My task"})),
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("My task"));
+        let missing = SessionKey {
+            id: "missing".into(),
+            ..key
+        };
+        assert_eq!(session_title(&roots, &missing), None);
+    }
+
+    #[test]
     fn a_codex_rollout_is_named_by_what_was_typed_not_the_injected_context() {
         let injected = line(serde_json::json!({
             "type": "response_item",
@@ -1784,6 +1960,44 @@ mod tests {
                 ("ses_named".into(), "Fix login".into(), 2),
             ]
         );
+    }
+
+    #[test]
+    fn live_opencode_titles_read_the_exact_session_and_see_wal_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("live.db");
+        let conn = opencode_db(&db);
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let mut roots = Roots::under(dir.path());
+        roots.opencode_db = Some(db);
+        let mut key = SessionKey {
+            agent: CLIAgent::OpenCode,
+            id: "ses_named".into(),
+        };
+        for n in 0..MAX_SESSIONS {
+            conn.execute(
+                "INSERT INTO session (id, title, time_updated) VALUES (?1, 'new', 9999)",
+                [format!("new-{n}")],
+            )
+            .unwrap();
+        }
+        assert!(!read_opencode(&conn).iter().any(|s| s.id == key.id));
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("Fix login"));
+        conn.execute(
+            "UPDATE session SET title = 'Renamed live' WHERE id = ?1",
+            [&key.id],
+        )
+        .unwrap();
+        assert_eq!(session_title(&roots, &key).as_deref(), Some("Renamed live"));
+        key.id = "ses_default".into();
+        assert_eq!(
+            session_title(&roots, &key).as_deref(),
+            Some("add dark mode")
+        );
+        for id in ["ses_child", "ses_archived", "missing", "' OR 1=1 --"] {
+            key.id = id.into();
+            assert_eq!(session_title(&roots, &key), None);
+        }
     }
 
     #[test]

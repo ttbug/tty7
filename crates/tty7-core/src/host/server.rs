@@ -709,10 +709,27 @@ fn run_request(
         }
 
         ControlRequest::Shells => (ReplyOk::Shells(h.shells()?), Vec::new()),
-        ControlRequest::AgentSessions { known_dirs } => (
-            ReplyOk::AgentSessions(h.agent_sessions(&paths(&known_dirs))?),
-            Vec::new(),
-        ),
+        ControlRequest::AgentSessions {
+            known_dirs,
+            session,
+        } => {
+            let sessions = match session {
+                Some(session) => h
+                    .agent_session_title(&session)?
+                    .map(|title| crate::core::agent_history::PastSession {
+                        agent: session.agent,
+                        id: session.id,
+                        cwd: None,
+                        title,
+                        branch: None,
+                        updated: 0,
+                    })
+                    .into_iter()
+                    .collect(),
+                None => h.agent_sessions(&paths(&known_dirs))?,
+            };
+            (ReplyOk::AgentSessions(sessions), Vec::new())
+        }
 
         ControlRequest::WatchOpen { dirs } => {
             let id = conn.open_watch(req_id, &paths(&dirs))?;
@@ -2516,6 +2533,20 @@ mod tests {
 
     fn pair() -> Pair {
         pair_with(LocalHost::new())
+    }
+
+    #[test]
+    fn a_live_session_title_request_reaches_the_server_host() {
+        use crate::core::agent_history::SessionKey;
+        use crate::core::cli_agent::CLIAgent;
+        let pair = pair();
+        // Unsupported types have no title adapter and must return no title,
+        // rather than interpreting a successful reply as a recent-session list.
+        let key = SessionKey {
+            agent: CLIAgent::Aider,
+            id: "not-a-session".into(),
+        };
+        assert_eq!(pair.host.agent_session_title(&key).unwrap(), None);
     }
 
     fn raw() -> (UnixStream, ControlHelloOk) {

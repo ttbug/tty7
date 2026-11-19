@@ -146,10 +146,27 @@ fn header_name_avail(avail: f32, git_want: Option<f32>) -> f32 {
 fn agent_task_summary(
     view: &crate::ui::machine_mirror::TabView,
     title: Option<String>,
+    session_title: Option<&str>,
     home: Option<&Path>,
 ) -> Option<String> {
     use crate::ui::machine_mirror::TabLabel;
 
+    if matches!(view.label(), TabLabel::Named(_)) {
+        return title;
+    }
+    if view
+        .agent
+        .is_some_and(crate::terminal::agent_title::supports_title)
+    {
+        return session_title
+            .filter(|title| !title.trim().is_empty())
+            .map(|title| title.trim().to_string())
+            .or_else(|| {
+                view.cwd
+                    .as_deref()
+                    .map(|cwd| abbreviate_home(cwd, home).into_owned())
+            });
+    }
     if matches!(view.label(), TabLabel::Agent(_)) {
         view.cwd
             .as_deref()
@@ -693,7 +710,10 @@ impl Tty7App {
                 let raw_title = self.full_tab_label(tab, Some(window), cx);
                 let raw_title = if agent.is_some() {
                     let (view, home) = tab.label_view(Some(window), cx);
-                    agent_task_summary(&view, raw_title, home.as_deref())
+                    let session_title = tab
+                        .title_leaf(Some(window), cx)
+                        .and_then(|leaf| leaf.read(cx).agent_title().map(str::to_string));
+                    agent_task_summary(&view, raw_title, session_title.as_deref(), home.as_deref())
                 } else {
                     raw_title
                 };
@@ -4656,7 +4676,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_summary_uses_cwd_only_when_the_title_is_an_agent_fallback() {
+    fn codex_status_title_is_not_a_task_summary() {
+        let view = crate::ui::machine_mirror::TabView {
+            id: crate::core::machine::TabId::new(),
+            name: None,
+            title: String::new(),
+            osc_title: Some("codex|tty7|Ready|01a0xxx".into()),
+            cwd: Some("/home/test/project".into()),
+            agent: Some(crate::core::cli_agent::CLIAgent::Codex),
+            status: None,
+            live: true,
+            panes: 1,
+        };
+        assert_eq!(
+            agent_task_summary(
+                &view,
+                view.osc_title.clone(),
+                None,
+                Some(Path::new("/home/test"))
+            ),
+            Some("~/project".into()),
+        );
+    }
+
+    #[test]
+    fn agent_summary_prefers_session_names_and_preserves_explicit_tab_names() {
         use crate::core::cli_agent::CLIAgent;
         use crate::ui::machine_mirror::TabView;
 
@@ -4672,22 +4716,72 @@ mod tests {
             panes: 1,
         };
         assert_eq!(
-            agent_task_summary(&view, Some("Codex".into()), Some(Path::new("/home/test"))),
+            agent_task_summary(
+                &view,
+                Some("Codex".into()),
+                None,
+                Some(Path::new("/home/test"))
+            ),
             Some("~/project".into()),
         );
         view.cwd = None;
-        assert_eq!(agent_task_summary(&view, Some("Codex".into()), None), None);
+        assert_eq!(
+            agent_task_summary(&view, Some("Codex".into()), None, None),
+            None
+        );
 
         view.osc_title = Some("Fix sidebar layout".into());
         assert_eq!(
-            agent_task_summary(&view, Some("Fix sidebar layout".into()), None),
-            Some("Fix sidebar layout".into()),
+            agent_task_summary(
+                &view,
+                view.osc_title.clone(),
+                Some("Generated task name"),
+                None
+            ),
+            Some("Generated task name".into()),
         );
         // An explicit name remains a task title even when it names the agent.
         view.name = Some("Codex".into());
         assert_eq!(
-            agent_task_summary(&view, Some("Codex".into()), None),
+            agent_task_summary(
+                &view,
+                Some("Codex".into()),
+                Some("Generated task name"),
+                None
+            ),
             Some("Codex".into()),
+        );
+    }
+
+    #[test]
+    fn supported_agents_use_session_names_and_other_agents_keep_their_osc_title() {
+        use crate::core::cli_agent::CLIAgent;
+        let mut view = crate::ui::machine_mirror::TabView {
+            id: crate::core::machine::TabId::new(),
+            name: None,
+            title: String::new(),
+            osc_title: Some("agent status".into()),
+            cwd: Some("/repo".into()),
+            agent: None,
+            status: None,
+            live: true,
+            panes: 1,
+        };
+        for agent in [CLIAgent::Codex, CLIAgent::Claude, CLIAgent::OpenCode] {
+            view.agent = Some(agent);
+            assert_eq!(
+                agent_task_summary(&view, view.osc_title.clone(), Some("Fix login"), None),
+                Some("Fix login".into()),
+            );
+            assert_eq!(
+                agent_task_summary(&view, view.osc_title.clone(), Some("  "), None),
+                Some("/repo".into()),
+            );
+        }
+        view.agent = Some(CLIAgent::CommandCode);
+        assert_eq!(
+            agent_task_summary(&view, view.osc_title.clone(), None, None),
+            Some("agent status".into()),
         );
     }
 

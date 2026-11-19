@@ -1,3 +1,4 @@
+pub(crate) mod agent_title;
 mod boxdraw;
 mod cmd_editor;
 mod color_scheme;

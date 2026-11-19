@@ -423,9 +423,26 @@ impl Host for RemoteHost {
     ) -> io::Result<Vec<crate::core::agent_history::PastSession>> {
         match self.call(ControlRequest::AgentSessions {
             known_dirs: wire_paths(known_dirs),
+            session: None,
         })? {
             ReplyOk::AgentSessions(sessions) => Ok(sessions),
             other => Err(wrong_shape("a list of agent sessions", &other)),
+        }
+    }
+
+    fn agent_session_title(
+        &self,
+        session: &crate::core::agent_history::SessionKey,
+    ) -> io::Result<Option<String>> {
+        match self.call(ControlRequest::AgentSessions {
+            known_dirs: Vec::new(),
+            session: Some(session.clone()),
+        })? {
+            ReplyOk::AgentSessions(sessions) => Ok(sessions
+                .into_iter()
+                .find(|s| s.agent == session.agent && s.id == session.id)
+                .map(|s| s.title)),
+            other => Err(wrong_shape("a session title", &other)),
         }
     }
 
@@ -1306,9 +1323,57 @@ mod tests {
             seen.recv().unwrap(),
             ControlRequest::AgentSessions {
                 known_dirs: vec!["/home/me/repo".into()],
+                session: None,
             }
         );
         assert_eq!(found, vec![session]);
+    }
+
+    #[test]
+    fn live_agent_titles_are_requested_from_the_peer_and_matched_exactly() {
+        use crate::core::agent_history::{PastSession, SessionKey};
+        use crate::core::cli_agent::CLIAgent;
+        let key = SessionKey {
+            agent: CLIAgent::Codex,
+            id: "full-id".into(),
+        };
+        let session = PastSession {
+            agent: key.agent,
+            id: key.id.clone(),
+            title: "Remote title".into(),
+            cwd: None,
+            branch: None,
+            updated: 0,
+        };
+        // Older peers may ignore the optional target and return a recent list.
+        let other = PastSession {
+            id: "other-id".into(),
+            title: "Wrong".into(),
+            ..session.clone()
+        };
+        let (host, seen) = host_with_peer('/', move |req| match req {
+            ControlRequest::AgentSessions { .. } => Some((
+                ControlReply::Ok(ReplyOk::AgentSessions(vec![other.clone(), session.clone()])),
+                vec![],
+            )),
+            other => panic!("unexpected request {other:?}"),
+        });
+        assert_eq!(
+            host.agent_session_title(&key).unwrap().as_deref(),
+            Some("Remote title")
+        );
+        assert_eq!(
+            seen.recv().unwrap(),
+            ControlRequest::AgentSessions {
+                known_dirs: vec![],
+                session: Some(key.clone()),
+            }
+        );
+        let wrong_agent = SessionKey {
+            agent: CLIAgent::Claude,
+            ..key
+        };
+        assert_eq!(host.agent_session_title(&wrong_agent).unwrap(), None);
     }
 
     #[test]

@@ -252,6 +252,9 @@ pub enum ControlRequest {
     /// client's open directories there, which place Cursor's chats.
     AgentSessions {
         known_dirs: Vec<String>,
+        /// An exact live session, bypassing the recent-history list's cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<crate::core::agent_history::SessionKey>,
     },
 
     WatchOpen {
@@ -1651,6 +1654,17 @@ mod tests {
     fn every_request() -> Vec<ControlRequest> {
         vec![
             ControlRequest::Ping,
+            ControlRequest::AgentSessions {
+                known_dirs: vec!["/repo".into()],
+                session: None,
+            },
+            ControlRequest::AgentSessions {
+                known_dirs: vec![],
+                session: Some(crate::core::agent_history::SessionKey {
+                    agent: crate::core::cli_agent::CLIAgent::Codex,
+                    id: "full-session-id".into(),
+                }),
+            },
             ControlRequest::ReadDir {
                 dir: "/home/me/proj/src".into(),
                 root: Some("/home/me/proj".into()),
@@ -1963,6 +1977,20 @@ mod tests {
             let got = ControlClientMsg::read(&mut Cursor::new(&buf)).unwrap();
             assert_eq!(&got, msg, "client message did not survive the round trip");
         }
+    }
+
+    #[test]
+    fn agent_sessions_without_a_target_keep_the_old_wire_shape() {
+        let json = serde_json::json!({"agent_sessions": {"known_dirs": ["/repo"]}});
+        let request: ControlRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            request,
+            ControlRequest::AgentSessions {
+                known_dirs: vec!["/repo".into()],
+                session: None,
+            }
+        );
+        assert_eq!(serde_json::to_value(request).unwrap(), json);
     }
 
     #[test]

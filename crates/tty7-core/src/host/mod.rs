@@ -394,6 +394,17 @@ pub trait Host: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    fn agent_session_title(
+        &self,
+        session: &crate::core::agent_history::SessionKey,
+    ) -> io::Result<Option<String>> {
+        Ok(self
+            .agent_sessions(&[])?
+            .into_iter()
+            .find(|s| s.agent == session.agent && s.id == session.id)
+            .map(|s| s.title))
+    }
+
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub>;
 
     fn is_connected(&self) -> bool {
