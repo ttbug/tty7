@@ -119,6 +119,12 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/codebuddy.svg" => {
             include_bytes!("../../assets/icons/agents/codebuddy.svg")
         }
+        "icons/agents/antigravity.svg" => {
+            include_bytes!("../../assets/icons/agents/antigravity.svg")
+        }
+        "icons/agents/antigravity.png" => {
+            include_bytes!("../../assets/icons/agents/antigravity.png")
+        }
         // The GitHub tab's state glyphs: one shape per state, not one colour.
         "icons/github/issue-open.svg" => include_bytes!("../../assets/icons/github/issue-open.svg"),
         "icons/github/issue-closed.svg" => {
@@ -180,6 +186,13 @@ mod tests {
                 "{} points at {path}, which nothing serves",
                 agent.display_name()
             );
+            if let Some(colour) = agent.colour_icon_path() {
+                assert!(
+                    Assets.load(colour).unwrap().is_some(),
+                    "{} points at {colour}, which nothing serves",
+                    agent.display_name()
+                );
+            }
         }
     }
 

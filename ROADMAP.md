@@ -6,6 +6,7 @@
 
 ## 已完成
 
+- 已将 Antigravity 图标替换为官方全彩标识：素材取自官方 press 页面的 `icon-full-color` SVG／PNG。侧边栏优先绘制 540px PNG（新增 `CLIAgent::colour_icon_path`），标签条、设置页与托盘保留 SVG 单色剪影，与其他 Agent 流程一致。资源注册、托盘渲染与侧边栏相关 68 项测试、`cli_agent` 60 项测试、`cargo fmt --check` 与 `git diff --check` 通过；桌面侧边栏的实际显示效果待确认。
 - 已移除长提示符后的输入区提前换行阈值：空输入光标紧跟提示符，输入填满当前行后自然折行；保留右边界处理，并覆盖跨行点击、宽字符与输入法预编辑布局。终端 view 130 项测试、格式与差异检查通过，真实桌面视觉效果待确认。
 - 已接入 Codex、Claude Code 和 OpenCode 当前会话名称：按宿主机器、Agent 类型与完整会话 ID 定向读取，不受历史列表最近 500 项限制；每 5 秒后台刷新，支持标题延迟生成、重命名和旧查询结果隔离。侧边栏优先保留 tty7 手动命名，其次显示 Agent 标题或首条用户消息摘要，无标题时回退工作目录，不再将这三个 Agent 的终端状态串当作任务名称；其他 Agent 保持原有标题逻辑。相关 94 项测试、主程序与远程 server 编译检查、格式和差异检查通过；真实桌面与 SSH 联调待确认。
 - 已基于本轮侧边栏样式重构重新打包 Apple Silicon DMG 与 updater ZIP，包内主程序 UUID 与本次 release 构建一致，新文案 `当前项目 {projects} · 会话 {sessions}` 已编入；桌面视觉确认仍待进行。
@@ -71,6 +72,7 @@
 
 ## 最近验证
 
+- 2026-11-25 Antigravity 官方全彩图标：`cargo test -p tty7-core --lib --offline -- cli_agent`（60 passed）、`cargo test -p tty7 --bin tty7-app --offline -- ui::assets:: ui::tray::icon ui::tab_sidebar::`（68 passed，含 `every_agent_icon_resolves` 与托盘 SVG 渲染测试）、`cargo fmt --check` 和 `git diff --check` 通过；未启动桌面窗口做视觉确认。
 - 2026-11-19 Agent 当前会话标题提交前复核：`cargo test -p tty7 --bin tty7-app --offline -- terminal::agent_title:: ui::tab_sidebar::`（61 passed）、`cargo test -p tty7-core --lib --offline -- core::agent_history::`（27 passed）、`cargo fmt --check` 与 `git diff --cached --check` 通过；真实桌面与 SSH 联调仍待确认。
 - 2026-11-19 输入区自然折行：先以长提示符回归测试复现提前换行失败，再修复布局；`cargo test -p tty7 --bin tty7-app --offline -- terminal::view::tests::`（130 passed）、`cargo fmt --check`、`git diff --check` 通过。编译有既有 linker unwind 大小与依赖未来兼容性警告；未重新打包或进行真实桌面验证。
 - 2026-11-19 Agent 当前会话标题：先用 `codex_status_title_is_not_a_task_summary` 复现状态串直出的失败，再验证修复。`tty7-core` 定向测试共 32 项通过（历史解析 27 项、协议兼容与序列化 2 项、远程读取与 server 往返 3 项）；其中两项远程客户端测试首次因沙箱禁止绑定本机 socket 失败，授权沙箱外重跑均通过。`cargo test -p tty7 --bin tty7-app --offline -- terminal::agent_title:: terminal::view::gpui_tests::live_agent_title_tracks_identity_and_skips_nested_remote_sessions ui::tab_sidebar::`（62 passed）、`cargo check -p tty7 -p tty7-server --offline`、`cargo fmt --check` 和 `git diff --check` 通过。覆盖完整 ID／宿主／Agent 隔离、同目录多会话读取、超过 500 项的老会话、Codex／Claude 重命名、OpenCode WAL 最新标题、首条消息回退、缓存限频与失败重试、旧异步结果丢弃、手动命名优先和非目标 Agent 行为保留。仅有既有 `download_file` 未使用、测试链接器 unwind 与依赖未来兼容提示；未启动真实桌面或连接真实 SSH 服务器。

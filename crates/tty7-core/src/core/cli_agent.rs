@@ -801,15 +801,28 @@ impl CLIAgent {
             CLIAgent::CommandCode => "icons/agents/command-code.svg",
             CLIAgent::MiniMaxCode => "icons/agents/minimax-code.svg",
             CLIAgent::CodeBuddy => "icons/agents/codebuddy.svg",
+            CLIAgent::Antigravity => "icons/agents/antigravity.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
             | CLIAgent::Empryo
             | CLIAgent::PrimeAgent
             | CLIAgent::Muse
             | CLIAgent::Jcode => "icons/bot.svg",
+        }
+    }
+
+    /// A full-colour raster of the mark, for surfaces that draw one.
+    ///
+    /// `icon_path` is drawn as a single-colour mask, so a mark whose colours
+    /// are the point cannot come through it. Those marks also ship a bitmap
+    /// here; the sidebar draws it, and the tab strip, settings and tray keep
+    /// the mask so the agent still wears one colour on a brand disc.
+    pub fn colour_icon_path(self) -> Option<&'static str> {
+        match self {
+            CLIAgent::Antigravity => Some("icons/agents/antigravity.png"),
+            _ => None,
         }
     }
 
@@ -1848,7 +1861,6 @@ mod tests {
                 "auggie",
                 "hermes",
                 "vibe",
-                "antigravity",
                 "empryo",
                 "prime-agent",
                 "muse",

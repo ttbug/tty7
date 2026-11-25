@@ -1056,6 +1056,13 @@ impl Tty7App {
                                             row_metrics::AVATAR,
                                             cx,
                                         )
+                                    } else if let Some(path) =
+                                        agent.and_then(|agent| agent.colour_icon_path())
+                                    {
+                                        gpui::img(path)
+                                            .flex_shrink_0()
+                                            .size(px(row_metrics::AVATAR))
+                                            .into_any_element()
                                     } else {
                                         let ink = match agent {
                                             Some(agent)
