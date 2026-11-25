@@ -1,6 +1,6 @@
 //! Which sidebar group a tab belongs to, and who decided.
 //!
-//! "The sidebar groups tabs by repo automatically. Pin what you want to keep."
+//! "The sidebar groups tabs by repo or directory. Pin what you want to keep."
 //! Everything here follows from that sentence. Groups above the divider are
 //! *kept*: a [`PinnedGroup`] is stored with the workspace, has an id, an order
 //! the user chose and a name they may change, and a tab in one only ever
@@ -110,6 +110,9 @@ pub enum AutoKey {
     /// The repository home a tab's cwd resolved to. A linked worktree resolves
     /// to the repo it belongs to, and a submodule to itself — so a submodule
     /// gets its own group, and a worktree sits with its main checkout.
+    /// For a cwd known not to be in a repository, this is the cwd itself.
+    /// Both use the same path key so naming, folds and pinning work alike;
+    /// the stored variant keeps its existing spelling.
     Repo(PathBuf),
     /// The host an SSH pane is on, as its `user@host` target.
     ///
@@ -284,14 +287,22 @@ pub fn pinned_folder_for(
 ///
 /// Otherwise `known` is the repo cache's three-valued answer for the tab's cwd:
 /// `Some(Some(home))` a repo, `Some(None)` a directory that is known not to be
-/// in one (Ungrouped), and `None` a probe that has not landed. That last one is
+/// in one (use `cwd`), and `None` a probe that has not landed. That last one is
 /// no decision at all, answered as `None`, so the caller keeps whatever it had
 /// rather than bouncing the tab through Ungrouped mid-probe.
-pub fn auto_key(ssh_host: Option<&str>, known: Option<Option<PathBuf>>) -> Option<Option<AutoKey>> {
+pub fn auto_key(
+    ssh_host: Option<&str>,
+    cwd: Option<&Path>,
+    known: Option<Option<PathBuf>>,
+) -> Option<Option<AutoKey>> {
     if let Some(host) = ssh_host.map(str::trim).filter(|h| !h.is_empty()) {
         return Some(Some(AutoKey::SshHost(host.to_string())));
     }
-    Some(known?.map(AutoKey::Repo))
+    Some(
+        known?
+            .or_else(|| cwd.map(Path::to_path_buf))
+            .map(AutoKey::Repo),
+    )
 }
 
 /// Where a tab is drawn, given the pinned group it names (if any), the auto
@@ -383,7 +394,7 @@ pub fn pinned_names(pinned: &[PinnedGroup]) -> Vec<String> {
 
 /// What each auto group's header reads, in `keys` order.
 ///
-/// Only repo roots go through [`group_names`]. They are paths, so two of them
+/// Repo roots and plain directories go through [`group_names`], so two paths
 /// can perfectly well end in the same component and need lengthening until
 /// they differ. A host group reads its `user@host` target as it is.
 pub fn auto_names(keys: &[&AutoKey]) -> Vec<String> {
@@ -585,8 +596,9 @@ mod tests {
     /// The same remote path on two machines is two directories.
     #[test]
     fn ssh_tabs_on_two_hosts_with_one_path_land_apart() {
-        let one = auto_key(Some("ubuntu@alpha"), Some(Some(p("/home/ubuntu"))));
-        let two = auto_key(Some("ubuntu@beta"), Some(Some(p("/home/ubuntu"))));
+        let cwd = p("/home/ubuntu");
+        let one = auto_key(Some("ubuntu@alpha"), Some(&cwd), Some(None));
+        let two = auto_key(Some("ubuntu@beta"), Some(&cwd), Some(None));
         assert_eq!(one, Some(Some(AutoKey::SshHost("ubuntu@alpha".into()))));
         assert_eq!(two, Some(Some(AutoKey::SshHost("ubuntu@beta".into()))));
         assert_ne!(one, two);
@@ -594,11 +606,25 @@ mod tests {
 
     #[test]
     fn a_probe_that_has_not_landed_is_no_decision() {
-        assert_eq!(auto_key(None, None), None);
-        assert_eq!(auto_key(None, Some(None)), Some(None), "known: no repo");
+        assert_eq!(auto_key(None, None, None), None);
+        assert_eq!(auto_key(None, None, Some(None)), Some(None), "no cwd");
         assert_eq!(
-            auto_key(None, Some(Some(p("/w/r")))),
+            auto_key(None, None, Some(Some(p("/w/r")))),
             Some(Some(AutoKey::Repo(p("/w/r"))))
+        );
+    }
+
+    #[test]
+    fn a_plain_directory_uses_its_full_path_after_the_probe() {
+        let cwd = p("/w/notes");
+        assert_eq!(auto_key(None, Some(&cwd), None), None);
+        assert_eq!(
+            auto_key(None, Some(&cwd), Some(None)),
+            Some(Some(AutoKey::Repo(cwd.clone())))
+        );
+        assert_eq!(
+            auto_key(None, Some(&cwd), Some(Some(p("/w")))),
+            Some(Some(AutoKey::Repo(p("/w"))))
         );
     }
 

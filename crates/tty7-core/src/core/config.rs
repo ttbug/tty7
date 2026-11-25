@@ -292,9 +292,9 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub editor_git_gutter: bool,
     /// Whether the sidebar files tabs nobody pinned into groups of its own —
-    /// by repository, and by host for an SSH pane. Off, those tabs sit in one
-    /// flat list below the pinned groups, which are the user's and show
-    /// either way.
+    /// by repository or directory, and by host for an SSH pane. Off, those
+    /// tabs sit in one flat list below the pinned groups, which are the
+    /// user's and show either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
     #[serde(default, deserialize_with = "de_lenient")]
